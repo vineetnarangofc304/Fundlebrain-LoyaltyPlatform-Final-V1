@@ -54,6 +54,18 @@ Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manag
 - ✅ **Security fix** — `_store_scope` now denies (403) when store-bound role has no `store_id`; startup migration backfills `store_id` for `store.mumbai@kazo.com` and `staff.delhi@kazo.com`
 - ✅ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)
 
+### Iteration 7 (May 2026) — ✅ Communications Module (SMS / WhatsApp / RCS)
+- ✅ **Templates CRUD** — `GET/POST/PATCH/DELETE /api/templates` with channel (sms/whatsapp/rcs) + event_trigger (purchase/coupon_issued/points_earned/tier_upgrade/birthday/win_back/abandoned_visit/campaign_bulk/none) validation + status (draft/active/archived).
+- ✅ **AI Suggest + AI Improve** — `POST /api/templates/ai-suggest` & `/ai-improve` powered by Emergent LLM (gpt-5.2). Returns structured body+variables+rationale. Auto-normalises single-brace `{name}` → mustache `{{name}}`.
+- ✅ **Karix Live Integration** — Real Karix Transactional SMS endpoint hit on test-send. Response `Statuscode=200 Platform Accepted` verified. WhatsApp/RCS WABA payload supported per spec.
+- ✅ **Auto-fire on transactions** — POS `/api/pos/issue-points` now fires all active `purchase` templates after saving. POS-side variables rendered (name/amount/bill_no/store_name/points_earned/points_balance/tier).
+- ✅ **Auto-fire on coupon issue** — New `POST /api/coupons/{id}/issue-to-customer?customer_mobile=XYZ` endpoint fires `coupon_issued` templates.
+- ✅ **Bulk send** — `POST /api/communications/bulk-send` with dry_run preview returning audience size + sample; live path iterates customers and dispatches.
+- ✅ **Provider Settings** — Karix SMS/WhatsApp/RCS endpoints, sender IDs, API keys editable from `/admin/communications/settings`. Secrets stored in MongoDB `provider_config` singleton, masked in API responses (3 chars + ••• + 3 chars), reveal/hide toggle in UI, RBAC: only brand_admin/super_admin can PATCH.
+- ✅ **Message log** — `GET /api/message-log` with channel filter; every send logs to `message_log` collection with status + provider response.
+- ✅ **Frontend** — New COMMUNICATIONS sidebar section. Templates page (SMS/WhatsApp/RCS tabs, table list with status pills + body previews), Template Editor modal (live preview pane, AI Fundle Brain copywriter with Generate+Improve buttons, variable insertion chips, real test-send panel). Provider Settings page (3 coloured sections, masked secrets with reveal/hide, pending-edit counter on Save button).
+- ✅ Iteration 7 testing: 16/16 backend pytest + 100% frontend Playwright (`/app/test_reports/iteration_6.json`). Karix LIVE — real SMS dispatch verified end-to-end (Statuscode=200 Platform Accepted).
+
 ### Iteration 6 (May 2026) — ✅ Cross-dashboard colour refresh
 - ✅ **All older dashboards refreshed** with the brand accent system: Sales, Customer Analytics, Loyalty, Campaign Performance, NPS now use `chart-card` with coloured top border + tinted KPI cards + multi-colour bar series + section-heading colour bars.
 - ✅ **Coloured outlines** — KPI cards now have tinted accent borders (indigo/teal/amber/rose/burgundy/emerald/slate) instead of plain black/10. Chart cards have coloured top strip + matching soft border.
