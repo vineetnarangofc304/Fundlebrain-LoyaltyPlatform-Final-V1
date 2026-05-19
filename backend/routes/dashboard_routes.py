@@ -282,6 +282,162 @@ async def top_skus(period: str = "30d", limit: int = 10, user: dict = Depends(ge
     ]
 
 
+@router.get("/command-center")
+async def command_center(period: str = "30d", user: dict = Depends(get_current_user)):
+    """Live Command Center KPIs + sparkline + cohort distribution + alerts.
+
+    Pure real-time MongoDB aggregations. No snapshots."""
+    start, end = _date_range(period)
+    prev_start = start - (end - start)
+    now = datetime.now(timezone.utc)
+
+    # --- Sales aggregate (current vs previous window) ---
+    cur_sales_pipe = [
+        {"$match": {"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}}},
+        {"$group": {
+            "_id": None,
+            "net": {"$sum": "$net_amount"},
+            "gross": {"$sum": "$gross_amount"},
+            "discount": {"$sum": "$discount_amount"},
+            "txns": {"$sum": 1},
+            "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+            "customers": {"$addToSet": "$customer_id"},
+        }},
+    ]
+    prev_sales_pipe = [
+        {"$match": {"bill_date": {"$gte": prev_start.isoformat(), "$lt": start.isoformat()}}},
+        {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+    ]
+    cur = (await transactions_col.aggregate(cur_sales_pipe).to_list(1)) or [{}]
+    prev = (await transactions_col.aggregate(prev_sales_pipe).to_list(1)) or [{}]
+    cur = cur[0] if cur else {}
+    prev = prev[0] if prev else {}
+    net = cur.get("net", 0) or 0
+    txns = cur.get("txns", 0) or 0
+    aov = (net / txns) if txns else 0
+    upt = ((cur.get("items", 0) or 0) / txns) if txns else 0
+    prev_net = prev.get("net", 0) or 0
+    prev_txns = prev.get("txns", 0) or 0
+    sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
+    txn_delta = round(((txns - prev_txns) / prev_txns) * 100, 1) if prev_txns else None
+
+    # --- Active customers in window ---
+    active = await customers_col.count_documents({"last_visit_at": {"$gte": start.isoformat()}})
+    total_customers = await customers_col.count_documents({})
+
+    # --- Repeat rate window (customers with >=2 txns in window) ---
+    repeat_pipe = [
+        {"$match": {"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()},
+                    "customer_id": {"$ne": None}}},
+        {"$group": {"_id": "$customer_id", "n": {"$sum": 1}}},
+        {"$group": {"_id": None,
+                    "repeat": {"$sum": {"$cond": [{"$gte": ["$n", 2]}, 1, 0]}},
+                    "unique": {"$sum": 1}}},
+    ]
+    rr = (await transactions_col.aggregate(repeat_pipe).to_list(1)) or [{}]
+    rr = rr[0] if rr else {}
+    repeat_rate = round((rr.get("repeat", 0) / rr["unique"]) * 100, 1) if rr.get("unique") else 0
+
+    # --- NPS in window ---
+    nps_pipe = [
+        {"$match": {"created_at": {"$gte": start.isoformat()}}},
+        {"$group": {"_id": None,
+                    "promoters": {"$sum": {"$cond": [{"$gte": ["$score", 9]}, 1, 0]}},
+                    "detractors": {"$sum": {"$cond": [{"$lte": ["$score", 6]}, 1, 0]}},
+                    "total": {"$sum": 1}}},
+    ]
+    nps_rows = (await nps_col.aggregate(nps_pipe).to_list(1)) or []
+    if nps_rows and nps_rows[0]["total"]:
+        nps_score = round(((nps_rows[0]["promoters"] - nps_rows[0]["detractors"]) / nps_rows[0]["total"]) * 100)
+    else:
+        nps_score = None
+
+    # --- API health in window ---
+    api_total = await api_logs_col.count_documents({"timestamp": {"$gte": start.isoformat()}})
+    api_failed = await api_logs_col.count_documents({"status_code": {"$gte": 400},
+                                                     "timestamp": {"$gte": start.isoformat()}})
+    api_health = round(((api_total - api_failed) / api_total) * 100, 2) if api_total else 100.0
+
+    # --- Outstanding loyalty liability ---
+    liab_pipe = [{"$group": {"_id": None,
+                              "points": {"$sum": "$points_balance"},
+                              "issued": {"$sum": "$lifetime_points_earned"},
+                              "redeemed": {"$sum": "$lifetime_points_redeemed"}}}]
+    liab = (await customers_col.aggregate(liab_pipe).to_list(1)) or [{}]
+    liab = liab[0] if liab else {}
+    burn_ratio = 0.25
+    outstanding_points = int(liab.get("points", 0) or 0)
+    outstanding_inr = round(outstanding_points * burn_ratio, 2)
+
+    # --- Cohort distribution: customers acquired today, 7d, 30d, 90d, >90d ---
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    d7 = now - timedelta(days=7)
+    d30 = now - timedelta(days=30)
+    d90 = now - timedelta(days=90)
+    cohort = {
+        "today": await customers_col.count_documents({"created_at": {"$gte": today_start.isoformat()}}),
+        "last_7d": await customers_col.count_documents({"created_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}}),
+        "last_30d": await customers_col.count_documents({"created_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}}),
+        "last_90d": await customers_col.count_documents({"created_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}}),
+        "older": await customers_col.count_documents({"created_at": {"$lt": d90.isoformat()}}),
+    }
+
+    # --- Sparkline: daily net sales for the window ---
+    spark_pipe = [
+        {"$match": {"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}}},
+        {"$group": {"_id": {"$substr": ["$bill_date", 0, 10]},
+                    "net": {"$sum": "$net_amount"},
+                    "txns": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]
+    spark_rows = await transactions_col.aggregate(spark_pipe).to_list(400)
+    sparkline = [{"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in spark_rows]
+
+    # --- Alerts (live computed) ---
+    alerts = []
+    if sales_delta is not None and sales_delta < -10:
+        alerts.append({"severity": "high", "title": "Sales decline",
+                       "detail": f"Net sales down {abs(sales_delta)}% vs previous {period} window.",
+                       "link": "/admin/dashboards/sales"})
+    if api_health < 95 and api_total > 0:
+        alerts.append({"severity": "medium", "title": "API health degraded",
+                       "detail": f"{api_failed} of {api_total} requests failed ({api_health}% healthy).",
+                       "link": "/admin/api-monitor"})
+    open_tickets = await tickets_col.count_documents({"status": {"$in": ["open", "in_progress", "escalated"]}})
+    if open_tickets > 10:
+        alerts.append({"severity": "medium", "title": "Open complaints",
+                       "detail": f"{open_tickets} support tickets need attention.",
+                       "link": "/admin/tickets?status=open"})
+    if nps_score is not None and nps_score < 30:
+        alerts.append({"severity": "high", "title": "NPS below threshold",
+                       "detail": f"NPS score is {nps_score} ({period}).",
+                       "link": "/admin/dashboards/nps"})
+
+    return {
+        "period": period,
+        "generated_at": now.isoformat(),
+        "kpis": {
+            "net_sales": round(net, 2),
+            "net_sales_delta_pct": sales_delta,
+            "transactions": txns,
+            "transactions_delta_pct": txn_delta,
+            "aov": round(aov, 2),
+            "upt": round(upt, 2),
+            "active_customers": active,
+            "total_customers": total_customers,
+            "repeat_rate_pct": repeat_rate,
+            "nps_score": nps_score,
+            "api_health_pct": api_health,
+            "outstanding_points": outstanding_points,
+            "outstanding_liability_inr": outstanding_inr,
+            "open_complaints": open_tickets,
+        },
+        "cohort_distribution": cohort,
+        "sparkline": sparkline,
+        "alerts": alerts,
+    }
+
+
 @router.get("/city-performance")
 async def city_performance(period: str = "30d", user: dict = Depends(get_current_user)):
     start, end = _date_range(period)

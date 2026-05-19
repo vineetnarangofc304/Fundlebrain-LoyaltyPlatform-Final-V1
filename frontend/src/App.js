@@ -27,6 +27,7 @@ import CRMLogin from "@/pages/auth/CRMLogin";
 // Admin
 import AdminLayout from "@/pages/admin/AdminLayout";
 import ExecutiveCockpit from "@/pages/admin/ExecutiveCockpit";
+import CommandCenter from "@/pages/admin/dashboards/CommandCenter";
 import Customer360 from "@/pages/admin/Customer360";
 import CustomerDetail from "@/pages/admin/CustomerDetail";
 import LoyaltyConfigurator from "@/pages/admin/LoyaltyConfigurator";
@@ -88,7 +89,8 @@ function App() {
 
           {/* Admin */}
           <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
-            <Route index element={<ExecutiveCockpit />} />
+            <Route index element={<CommandCenter />} />
+            <Route path="cockpit" element={<ExecutiveCockpit />} />
             <Route path="dashboards/sales" element={<SalesDashboard />} />
             <Route path="dashboards/customers" element={<CustomerDashboard />} />
             <Route path="dashboards/loyalty" element={<LoyaltyDashboard />} />

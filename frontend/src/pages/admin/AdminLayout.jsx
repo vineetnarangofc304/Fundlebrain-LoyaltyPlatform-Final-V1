@@ -11,7 +11,7 @@ const SECTIONS = [
   {
     label: "DASHBOARDS",
     items: [
-      { to: "/admin", end: true, icon: LayoutDashboard, label: "Executive Cockpit", testid: "nav-cockpit" },
+      { to: "/admin", end: true, icon: LayoutDashboard, label: "Command Center", testid: "nav-command-center" },
       { to: "/admin/dashboards/sales", icon: TrendingUp, label: "Sales", testid: "nav-dash-sales" },
       { to: "/admin/dashboards/customers", icon: UserRound, label: "Customer Analytics", testid: "nav-dash-customers" },
       { to: "/admin/dashboards/loyalty", icon: Award, label: "Loyalty", testid: "nav-dash-loyalty" },

@@ -1,0 +1,66 @@
+{
+  "summary": "Iteration 3 full-stack testing of Universal Drilldown + AI Insight + Command Center. Backend: 30/31 pytest tests PASS. One P0 failure exposes a real seed-data security bug: store_manager users have NO store_id field on their user document, so store-scoped drilldown is silently bypassed and a store manager can read transactions for ALL 23 stores. Drilldown CSV streams 10k cap correctly, _id scrubbed everywhere, password_hash scrubbed from users collection, unknown collection returns 400, no-auth returns 401. AI insight cache flow works: first call cached=false, second identical call cached=true with expires_in_seconds<=3600, force=true regenerates. Command Center returns all required KPIs/cohort_distribution/sparkline/alerts for all 6 periods (today/7d/30d/90d/mtd/ytd) and live-compute total_customers matches drilldown total. Frontend: Command Center loads at /admin, all 12 KPI tiles render, period dropdown reloads data, sparkline+cohort+alerts strip render, AI insight strip displays real GPT-5.2 text, DrillDownModal opens on KPI click, pagination Next/Prev works, Refresh/CSV/Close buttons work, sidebar shows 'Command Center'. Regression: all 12 legacy dashboard endpoints (kpis, sales-trend, store-performance, category-mix, tier-distribution, top-skus, sales-dashboard, customer-dashboard, loyalty-dashboard, campaign-dashboard, store-dashboard, nps-dashboard) and /admin/cockpit fallback route still pass.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/dashboard/drilldown (collection=transactions)",
+        "issue": "Store scope NOT applied for store_manager. drilldown_routes._store_scope() conditions on user.get('store_id'), but the seeded user store.mumbai@kazo.com has no store_id field on the users document — verified via direct Mongo query (returned: id, email, name, role='store_manager', is_active, created_at, last_login_* — no store_id). Effect: store manager retrieves transactions for all 23 stores. Same risk for support_tickets collection. Fix: backfill users.store_id during seed (and require it for store_manager/store_staff role at user-create time) OR enforce in code by 403-ing when the role requires a store_id but none is set.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/dashboard/drilldown/csv",
+        "issue": "page_size in request body is ignored — the CSV endpoint always returns up to 10,000 rows regardless of page_size. Field is accepted via DrillRequest inheritance but unused. Either honour it (cap-and-cap) or remove from request schema for clarity."
+      },
+      {
+        "endpoint": "POST /api/dashboard/insight",
+        "issue": "In-memory cache (_INSIGHT_CACHE dict) — not shared across workers/replicas and lost on reload. For single-process dev OK; flag for production (use Redis)."
+      },
+      {
+        "endpoint": "GET /api/dashboard/command-center",
+        "issue": "Cohort window for 'last_30d' is defined as (created_at >= -30d AND < -7d), 'last_90d' as (-90d AND < -30d) — these are mutually-exclusive ranges (correct), but the labels 'Last 30d / Last 90d' read like cumulative windows in the UI and may mislead viewers. Consider relabelling to '8-30d / 31-90d' for clarity."
+      },
+      {
+        "endpoint": "GET /api/dashboard/command-center",
+        "issue": "sales_delta_pct uses prev_net as denominator only when prev_net is truthy. If previous window has zero revenue (very common for 'today'/'mtd' early in window), delta returns null silently — frontend should render 'NEW' not '—'. Currently UI shows nothing."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Command Center page heading", "issues": ["Page title rendered as 'Executive Cockpit' on the OLD /admin/cockpit fallback route. New /admin route correctly shows 'Command Center'. Confirmed sidebar label updated to 'Command Center'."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration3_test.py",
+    "/app/test_reports/pytest/iteration3_results.xml"
+  ],
+  "action_items": [
+    "[P0] Backfill users.store_id on store.mumbai@kazo.com and ALL store_manager/store_staff seeded users; add a validation at user-creation time so a store-scoped role cannot exist without store_id. Re-run TestDrilldown.test_drilldown_store_scope_applied to verify.",
+    "[P1] Decide CSV semantics — either respect page_size in /api/dashboard/drilldown/csv or drop the field from CSVDrillRequest schema.",
+    "[P2] Move AI insight cache to Redis (or Mongo TTL collection) before production multi-worker deploy.",
+    "[P2] Reconsider cohort labels in Command Center bar chart (currently sequential windows shown as cumulative-sounding labels)."
+  ],
+  "critical_code_review_comments": [
+    "drilldown_routes.py: _scrub correctly drops password_hash/otp/password and find() projection excludes _id — both layers belt-and-braces, good.",
+    "drilldown_routes.py: COLLECTION_ROLES whitelist correctly restricts users + audit_logs to admins, api_logs to admins+crm_manager — but transactions/support_tickets are NOT restricted by role at all, relying solely on _store_scope. With the seed-data bug above, this becomes a data-leak path. Add a second guard: if role in {store_manager, store_staff} and not user.get('store_id'): raise 403.",
+    "dashboard_routes.command_center: liab pipeline reads lifetime_points_earned / lifetime_points_redeemed but those keys are not used in the response — dead code, remove from $group.",
+    "drilldown_routes.drilldown_csv: io.StringIO loaded fully into memory before returning — fine at 10k rows, but the StreamingResponse iterator yields a single chunk so it isn't actually streaming. Either chunk by 1k rows for true streaming or rename to non-streaming.",
+    "Command Center frontend: setInterval(load, 30000) does not pause when tab is hidden — will keep hitting backend in background. Add document.visibilityState check.",
+    "DrillDownModal.exportCSV: catches all errors and shows a generic 'CSV export failed' — should surface server error detail for debuggability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration3_test.py (created)",
+    "/app/test_reports/pytest/iteration3_results.xml (generated)"
+  ],
+  "success_rate": {"backend": "97% (30/31)", "frontend": "100% (all UI flows verified)"},
+  "test_credentials": "admin@kazo.com / Kazo@2026 + store.mumbai@kazo.com / Kazo@2026 — from /app/memory/test_credentials.md",
+  "seed_data_creation": "None. Tests are read-only against existing seeded data (1504 customers, 8003 transactions, 26 stores).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/iteration3_test.py /app/backend/tests/iteration2_test.py /app/backend/tests/backend_test.py -v` for full regression (114 tests across 3 iterations). All independent and idempotent. After E1 backfills store_id on store_manager users, the only failing test (TestDrilldown.test_drilldown_store_scope_applied) should pass.",
+  "rca of the issue": "Bug: store_manager drilldown ignores store scope. RCA: drilldown_routes._store_scope() reads user.store_id from the JWT-resolved user document fetched by auth.get_current_user. The bug is NOT in route code — it is in seed-data: users.find_one({'email':'store.mumbai@kazo.com'}) returns a document WITHOUT a store_id field, so the conditional `user.get('store_id')` is None and the scope is never injected. Reproduction: login as store.mumbai@kazo.com → POST /api/dashboard/drilldown with collection=transactions → response.rows contains 23 distinct store_ids. Mitigation: (a) backfill users.store_id at seed time for all store-scoped roles, (b) in drilldown_routes._store_scope raise 403 when role demands a store_id but none is set on the user, (c) consider mapping store_manager_email → store_id in /app/scripts/seed*.py."
+}
