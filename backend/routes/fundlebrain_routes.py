@@ -33,7 +33,14 @@ def _quintile(value: float, breakpoints: List[float]) -> int:
 def _segment_label(r: int, f: int, m: int) -> str:
     """11-segment classifier (Champions / Loyalists / Big Spenders / Promising /
     New / Potential Loyalists / At Risk / Cant Lose / Hibernating / About to Sleep /
-    Lost). r/f/m are quintiles 1..5 where 5 is best."""
+    Lost). r/f/m are quintiles 1..5 where 5 is best.
+
+    NOTE: Conditions are intentionally evaluated in priority order with
+    early-return. Some r/f/m combinations could theoretically match multiple
+    branches (e.g. r=2,f=4,m=4 matches both 'Cant Lose Them' and 'At Risk');
+    the earlier branch wins. This is per the RFM spec and matches industry
+    convention — do not refactor to "exclusive" segments without a product call.
+    """
     if r >= 4 and f >= 4 and m >= 4:
         return "Champions"
     if r >= 4 and f >= 3:
@@ -255,9 +262,19 @@ async def store_performance_v2(
     start = (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
     prev_start = (datetime.now(timezone.utc) - timedelta(days=period_days * 2)).isoformat()
 
+    # Store-scoped roles: only their own store
+    role = user.get("role")
+    user_store_id = user.get("store_id")
+    if role in {"store_manager", "store_staff"}:
+        if not user_store_id:
+            raise HTTPException(403, "Store-scoped role requires store_id on user profile")
+        scope_match: Dict[str, Any] = {"store_id": user_store_id}
+    else:
+        scope_match = {}
+
     # ---- Leaderboard ----
     pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": {"bill_date": {"$gte": start}, **scope_match}},
         {"$group": {
             "_id": "$store_id",
             "net": {"$sum": "$net_amount"},
@@ -273,7 +290,7 @@ async def store_performance_v2(
 
     # Previous-period comparison
     prev_pipe = [
-        {"$match": {"bill_date": {"$gte": prev_start, "$lt": start}}},
+        {"$match": {"bill_date": {"$gte": prev_start, "$lt": start}, **scope_match}},
         {"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
     prev_rows = await transactions_col.aggregate(prev_pipe).to_list(200)
@@ -307,7 +324,7 @@ async def store_performance_v2(
 
     # ---- By city ----
     city_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": {"bill_date": {"$gte": start}, **scope_match}},
         {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "store"}},
         {"$unwind": "$store"},
         {"$group": {
@@ -331,7 +348,7 @@ async def store_performance_v2(
 
     # ---- Day-of-week analysis ----
     dow_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": {"bill_date": {"$gte": start}, **scope_match}},
         {"$project": {
             "dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$bill_date"}}},
             "hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}},
@@ -355,7 +372,7 @@ async def store_performance_v2(
 
     # ---- Hour × day heatmap (24×7) ----
     heat_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": {"bill_date": {"$gte": start}, **scope_match}},
         {"$project": {
             "dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$bill_date"}}},
             "hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}},

@@ -178,7 +178,9 @@ function Leaderboard({ rows, onOpen }) {
                 <td>{s.region}</td>
                 <td className="text-right font-mono font-semibold">{fmtINR(s.net)}</td>
                 <td className="text-right font-mono text-xs">
-                  {s.delta_pct == null ? "—" : (
+                  {s.delta_pct == null ? (
+                    <span className="text-neutral-400">NEW</span>
+                  ) : (
                     <span className={s.delta_pct >= 0 ? "text-emerald-700" : "text-rose-700"}>
                       {s.delta_pct >= 0 ? "▲" : "▼"} {Math.abs(s.delta_pct).toFixed(1)}%
                     </span>

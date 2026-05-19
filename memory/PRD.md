@@ -52,16 +52,29 @@ Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manag
 - ✅ **Active customers** now computed from ground-truth transactions (`distinct customer_id` in window) instead of stale `last_visit_at`
 - ✅ **Reusable `DrillDownModal.jsx` + `AIInsightStrip.jsx`** components for every upcoming dashboard
 - ✅ **Security fix** — `_store_scope` now denies (403) when store-bound role has no `store_id`; startup migration backfills `store_id` for `store.mumbai@kazo.com` and `staff.delhi@kazo.com`
-- ⏳ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)
+- ✅ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)
+
+### Iteration 4 (May 2026) — ✅ FundleBrain Phase 3A complete (3 new dashboards + colour system)
+- ✅ **Customer 360 v2** — `GET /api/dashboard/customer-360/{id}`: live RFM score + 11-segment label, lifetime aggregates from raw transactions, monthly spend chart (area + bar overlay), store affinity, category affinity, recent transactions, points ledger, NPS history, AI Customer Intelligence Report
+- ✅ **Store Performance v2** — `GET /api/dashboard/store-performance-v2`: Leaderboard (ranked, vs-prev delta with NEW fallback), By City (multi-coloured bars + scorecard), Day Analysis (weekday bar + 7×24 heatmap). store_manager/store_staff scoped to own store.
+- ✅ **RFM & Churn Dashboard** — `GET /api/dashboard/rfm`: live 5×5 RFM heatmap (health-coded), 11 named segment cards (clickable → drilldown), 3 churn buckets, quintile cutoffs panel, 6 KPI tiles
+- ✅ **Brand colour system** — accent palette CSS vars (indigo/teal/amber/rose/slate/emerald + burgundy/champagne). `KPICard` accepts `accent` prop (left strip + soft gradient). Shared `SectionHeading` + `CHART_PALETTE`.
+- ✅ **AI Intelligence Report** rolled out on all 3 new dashboards (cached 1hr per payload)
+- ✅ Iteration 4 testing: 22/22 backend pytest pass + 100% frontend flows verified (`/app/test_reports/iteration_4.json`)
 
 ## Prioritized backlog
 
-### P0 — FundleBrain Phase 3A (next up)
-- [ ] **Customer 360 v2** — RFM segment badge, lifetime stats, monthly spend chart
-- [ ] **Store Performance v2** — Leaderboard / By City / Day Analysis tabs
-- [ ] **RFM & Churn Dashboard** — live RFM quintile bucketing, 5×5 heatmap, 11 segments
+### P0 — FundleBrain Phase 3A — ✅ DONE
+- [x] Customer 360 v2
+- [x] Store Performance v2
+- [x] RFM & Churn Dashboard
 
-### P1 — FundleBrain Phase 3B
+### P0 — Next up (Phase 3B)
+- [ ] Points Economics v2 — earn-burn gauge, liability value, monthly flow, top redeemers
+- [ ] Cohort Migration — triangular retention heatmap by signup month
+- [ ] Campaign ROI v2 — Sent→Delivered→Clicked→Converted funnel + retention heatmap
+
+### P1 — FundleBrain Phase 3B (remaining)
 - [ ] Points Economics v2 — earn-burn gauge, liability value, monthly flow, top redeemers
 - [ ] Cohort Migration — triangular retention heatmap by signup month
 - [ ] Campaign ROI v2 — Sent→Delivered→Clicked→Converted funnel + retention heatmap
