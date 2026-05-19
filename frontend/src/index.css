@@ -115,30 +115,42 @@ body {
     box-shadow: 0 4px 14px -8px rgba(15, 23, 42, 0.18);
 }
 
-/* Themed KPI cards — left accent strip + soft tinted background */
+/* Themed KPI cards — coloured border, soft tinted background, top accent strip */
 .kpi-card[data-accent]::before {
     content: '';
     position: absolute;
-    top: 0; left: 0; bottom: 0;
-    width: 3px;
+    top: 0; left: 0; right: 0;
+    height: 3px;
     background: var(--accent, var(--kazo-burgundy));
 }
-.kpi-card[data-accent="indigo"]   { --accent: var(--accent-indigo);  background: linear-gradient(180deg, var(--accent-indigo-soft) 0%, #fff 60%); }
-.kpi-card[data-accent="teal"]     { --accent: var(--accent-teal);    background: linear-gradient(180deg, var(--accent-teal-soft) 0%, #fff 60%); }
-.kpi-card[data-accent="amber"]    { --accent: var(--accent-amber);   background: linear-gradient(180deg, var(--accent-amber-soft) 0%, #fff 60%); }
-.kpi-card[data-accent="rose"]     { --accent: var(--accent-rose);    background: linear-gradient(180deg, var(--accent-rose-soft) 0%, #fff 60%); }
-.kpi-card[data-accent="slate"]    { --accent: var(--accent-slate);   background: linear-gradient(180deg, var(--accent-slate-soft) 0%, #fff 60%); }
-.kpi-card[data-accent="burgundy"] { --accent: var(--kazo-burgundy);  background: linear-gradient(180deg, #fdf2f5 0%, #fff 60%); }
-.kpi-card[data-accent="emerald"]  { --accent: var(--accent-emerald); background: linear-gradient(180deg, var(--accent-emerald-soft) 0%, #fff 60%); }
+.kpi-card[data-accent]:hover {
+    border-color: var(--accent, var(--kazo-burgundy));
+    box-shadow: 0 4px 14px -6px var(--accent-shadow, rgba(87, 19, 38, 0.25));
+}
+.kpi-card[data-accent="indigo"]   { --accent: var(--accent-indigo);  --accent-shadow: rgba(30, 58, 138, 0.22);  border-color: rgba(30, 58, 138, 0.18);  background: linear-gradient(180deg, var(--accent-indigo-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="teal"]     { --accent: var(--accent-teal);    --accent-shadow: rgba(14, 124, 123, 0.22); border-color: rgba(14, 124, 123, 0.18); background: linear-gradient(180deg, var(--accent-teal-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="amber"]    { --accent: var(--accent-amber);   --accent-shadow: rgba(180, 83, 9, 0.22);   border-color: rgba(180, 83, 9, 0.18);   background: linear-gradient(180deg, var(--accent-amber-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="rose"]     { --accent: var(--accent-rose);    --accent-shadow: rgba(159, 18, 57, 0.22);  border-color: rgba(159, 18, 57, 0.18);  background: linear-gradient(180deg, var(--accent-rose-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="slate"]    { --accent: var(--accent-slate);   --accent-shadow: rgba(51, 65, 85, 0.22);   border-color: rgba(51, 65, 85, 0.18);   background: linear-gradient(180deg, var(--accent-slate-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="burgundy"] { --accent: var(--kazo-burgundy);  --accent-shadow: rgba(87, 19, 38, 0.25);   border-color: rgba(87, 19, 38, 0.20);   background: linear-gradient(180deg, #fdf2f5 0%, #fff 60%); }
+.kpi-card[data-accent="emerald"]  { --accent: var(--accent-emerald); --accent-shadow: rgba(4, 120, 87, 0.22);   border-color: rgba(4, 120, 87, 0.18);   background: linear-gradient(180deg, var(--accent-emerald-soft) 0%, #fff 60%); }
 
-/* Chart container w/ subtle gradient backdrop */
+/* Chart card — soft top tint with subtle coloured border */
 .chart-card {
     background: linear-gradient(180deg, #fff 0%, #fbfaf8 100%);
-    border: 1px solid var(--card-border);
+    border: 1px solid rgba(87, 19, 38, 0.12);
+    border-top: 2px solid var(--kazo-burgundy);
     border-radius: 2px;
+    transition: border-color 0.15s ease;
 }
+.chart-card[data-accent="indigo"]   { border-color: rgba(30, 58, 138, 0.15);  border-top-color: var(--accent-indigo); }
+.chart-card[data-accent="teal"]     { border-color: rgba(14, 124, 123, 0.15); border-top-color: var(--accent-teal); }
+.chart-card[data-accent="amber"]    { border-color: rgba(180, 83, 9, 0.15);   border-top-color: var(--accent-amber); }
+.chart-card[data-accent="rose"]     { border-color: rgba(159, 18, 57, 0.15);  border-top-color: var(--accent-rose); }
+.chart-card[data-accent="emerald"]  { border-color: rgba(4, 120, 87, 0.15);   border-top-color: var(--accent-emerald); }
+.chart-card[data-accent="slate"]    { border-color: rgba(51, 65, 85, 0.15);   border-top-color: var(--accent-slate); }
 
-/* Tabs (used by Store Performance v2 and others) */
+/* Tabs — branded pill bar */
 .k-tabs {
     display: inline-flex;
     border: 1px solid var(--card-border);

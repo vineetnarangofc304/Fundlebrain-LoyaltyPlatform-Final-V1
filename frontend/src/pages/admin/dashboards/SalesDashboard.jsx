@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "../_shared";
 import { fmtINR, fmtNum } from "@/lib/format";
-import { LineChart, Line, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
-
-const COLORS = ["#0F172A", "#571326", "#C7A76D", "#94A3B8", "#1f2937"];
+import { LineChart, Line, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
 
 export default function SalesDashboard() {
   const [period, setPeriod] = useState(30);
@@ -26,7 +24,7 @@ export default function SalesDashboard() {
 
   return (
     <div data-testid="sales-dashboard">
-      <PageHeader title="Sales Dashboard" subtitle="REVENUE INTELLIGENCE"
+      <PageHeader title="Sales Dashboard" subtitle="REVENUE INTELLIGENCE · LIVE"
         actions={
           <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="sales-period">
             <option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>365 days</option>
@@ -34,77 +32,93 @@ export default function SalesDashboard() {
         } />
       <div className="p-8 space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard label="Total Revenue" value={fmtINR(totalRevenue)} testid="kpi-total-rev" />
-          <KPICard label="Total Transactions" value={fmtNum(totalTxns)} testid="kpi-total-txns" />
-          <KPICard label="Avg / Day" value={fmtINR(avgPerDay)} testid="kpi-avg-day" />
-          <KPICard label="Active Days" value={trend.length} testid="kpi-active-days" />
+          <KPICard label="Total Revenue" value={fmtINR(totalRevenue)} accent="burgundy" testid="kpi-total-rev" />
+          <KPICard label="Total Transactions" value={fmtNum(totalTxns)} accent="indigo" testid="kpi-total-txns" />
+          <KPICard label="Avg / Day" value={fmtINR(avgPerDay)} accent="teal" testid="kpi-avg-day" />
+          <KPICard label="Active Days" value={trend.length} accent="slate" testid="kpi-active-days" />
         </div>
 
-        <div className="bg-white border border-black/10 p-5">
-          <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-1">REVENUE TREND</div>
-          <h3 className="font-display text-xl mb-4">Daily net revenue · last {period} days</h3>
+        <div className="chart-card p-5" data-accent="burgundy">
+          <SectionHeading eyebrow="REVENUE TREND" title={`Daily net revenue · last ${period} days`} accent="burgundy" />
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={trend}>
+            <AreaChart data={trend}>
+              <defs>
+                <linearGradient id="salesGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#571326" stopOpacity={0.4} />
+                  <stop offset="100%" stopColor="#571326" stopOpacity={0} />
+                </linearGradient>
+              </defs>
               <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />
               <XAxis dataKey="date" stroke="#64748b" fontSize={11} tickFormatter={(d) => d?.slice(5)} />
               <YAxis stroke="#64748b" fontSize={11} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}K`} />
               <Tooltip formatter={(v) => fmtINR(v)} />
-              <Line type="monotone" dataKey="net" stroke="#571326" strokeWidth={2} dot={false} />
-            </LineChart>
+              <Area type="monotone" dataKey="net" stroke="#571326" strokeWidth={2.5} fill="url(#salesGrad)" />
+            </AreaChart>
           </ResponsiveContainer>
         </div>
 
         <div className="grid lg:grid-cols-2 gap-4">
-          <div className="bg-white border border-black/10 p-5">
-            <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-1">HOURLY DISTRIBUTION</div>
-            <h3 className="font-display text-xl mb-4">Sales by hour of day</h3>
+          <div className="chart-card p-5" data-accent="indigo">
+            <SectionHeading eyebrow="HOURLY DISTRIBUTION" title="Sales by hour of day" accent="indigo" />
             <ResponsiveContainer width="100%" height={260}>
               <BarChart data={data.hourly}>
                 <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />
                 <XAxis dataKey="hour" stroke="#64748b" fontSize={11} tickFormatter={(h) => `${h}h`} />
                 <YAxis stroke="#64748b" fontSize={11} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}K`} />
                 <Tooltip formatter={(v) => fmtINR(v)} />
-                <Bar dataKey="net" fill="#571326" />
+                <Bar dataKey="net" radius={[3, 3, 0, 0]}>
+                  {data.hourly.map((r, i) => {
+                    const max = Math.max(...data.hourly.map((x) => x.net));
+                    const alpha = max ? 0.35 + 0.65 * (r.net / max) : 0.35;
+                    return <Cell key={i} fill={`rgba(30, 58, 138, ${alpha.toFixed(2)})`} />;
+                  })}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="bg-white border border-black/10 p-5">
-            <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-1">DAY OF WEEK</div>
-            <h3 className="font-display text-xl mb-4">Sales by weekday</h3>
+          <div className="chart-card p-5" data-accent="teal">
+            <SectionHeading eyebrow="DAY OF WEEK" title="Sales by weekday" accent="teal" />
             <ResponsiveContainer width="100%" height={260}>
               <BarChart data={data.weekday}>
                 <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />
                 <XAxis dataKey="day" stroke="#64748b" fontSize={11} />
                 <YAxis stroke="#64748b" fontSize={11} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}K`} />
                 <Tooltip formatter={(v) => fmtINR(v)} />
-                <Bar dataKey="net" fill="#0F172A" />
+                <Bar dataKey="net" radius={[3, 3, 0, 0]}>
+                  {data.weekday.map((r, i) => {
+                    const max = Math.max(...data.weekday.map((x) => x.net));
+                    const alpha = max ? 0.35 + 0.65 * (r.net / max) : 0.35;
+                    return <Cell key={i} fill={`rgba(14, 124, 123, ${alpha.toFixed(2)})`} />;
+                  })}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="bg-white border border-black/10 p-5">
-            <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-1">PAYMENT MIX</div>
-            <h3 className="font-display text-xl mb-4">By payment mode</h3>
+          <div className="chart-card p-5" data-accent="amber">
+            <SectionHeading eyebrow="PAYMENT MIX" title="By payment mode" accent="amber" />
             <ResponsiveContainer width="100%" height={260}>
               <PieChart>
-                <Pie data={data.payment_mix} dataKey="net" nameKey="mode" cx="50%" cy="50%" outerRadius={85} label={(p) => p.mode}>
-                  {data.payment_mix.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                <Pie data={data.payment_mix} dataKey="net" nameKey="mode" cx="50%" cy="50%" outerRadius={90} innerRadius={50} paddingAngle={2} label={(p) => p.mode}>
+                  {data.payment_mix.map((_, i) => <Cell key={i} fill={CHART_SERIES[i % CHART_SERIES.length]} />)}
                 </Pie>
                 <Tooltip formatter={(v) => fmtINR(v)} />
               </PieChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="bg-white border border-black/10 p-5">
-            <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-1">DISCOUNT BUCKETS</div>
-            <h3 className="font-display text-xl mb-4">Discount distribution</h3>
+          <div className="chart-card p-5" data-accent="rose">
+            <SectionHeading eyebrow="DISCOUNT BUCKETS" title="Discount distribution" accent="rose" />
             <table className="data-table">
               <thead><tr><th>Bucket</th><th className="text-right">Txns</th><th className="text-right">Net</th></tr></thead>
               <tbody>
-                {data.discount_distribution.map((r) => (
+                {data.discount_distribution.map((r, i) => (
                   <tr key={r.bucket}>
-                    <td><span className="pill pill-neutral">{r.bucket}</span></td>
+                    <td>
+                      <span className="inline-block w-2 h-2 rounded-full mr-2 align-middle" style={{ background: CHART_SERIES[i % CHART_SERIES.length] }} />
+                      {r.bucket}
+                    </td>
                     <td className="text-right font-mono">{fmtNum(r.count)}</td>
                     <td className="text-right font-mono">{fmtINR(r.net)}</td>
                   </tr>

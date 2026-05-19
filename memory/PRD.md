@@ -54,6 +54,14 @@ Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manag
 - ✅ **Security fix** — `_store_scope` now denies (403) when store-bound role has no `store_id`; startup migration backfills `store_id` for `store.mumbai@kazo.com` and `staff.delhi@kazo.com`
 - ✅ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)
 
+### Iteration 6 (May 2026) — ✅ Cross-dashboard colour refresh
+- ✅ **All older dashboards refreshed** with the brand accent system: Sales, Customer Analytics, Loyalty, Campaign Performance, NPS now use `chart-card` with coloured top border + tinted KPI cards + multi-colour bar series + section-heading colour bars.
+- ✅ **Coloured outlines** — KPI cards now have tinted accent borders (indigo/teal/amber/rose/burgundy/emerald/slate) instead of plain black/10. Chart cards have coloured top strip + matching soft border.
+- ✅ **Bar charts** are now intensity-coded (lighter for low values, darker for peaks) in Sales hourly/weekday charts.
+- ✅ **NPS trend** now has reference lines at 50 (Excellent in emerald) and 0 (in rose); NPS-by-store column colour-coded green/amber/rose by score.
+- ✅ **Loyalty Issued vs Redeemed** chart upgraded to stacked area chart with three gradients (burgundy/champagne/indigo).
+- ✅ Visual lint passed across all dashboards (12 dashboards now visually unified).
+
 ### Iteration 5 (May 2026) — ✅ FundleBrain Phase 3B + colour upgrade (5 dashboards)
 - ✅ **Cohorts & Segmentation** — `GET /api/dashboard/cohorts-segmentation`: one-timer revenue-at-risk panel with 15%-recovery estimate + recency buckets, frequency bands (One-timer/Light/Regular/Loyal/VIP) with ATV, spend bands, tier donut, retention triangle (12×12 cohort heatmap, signup-month × month-offset), acquisition trend. Verified: bands mutually exclusive (sum = transacted), offset-0 = 100%.
 - ✅ **Points Economics v2** — `GET /api/dashboard/points-economics`: earn-vs-burn gauge with gradient bar, outstanding liability, 12-month earn/burn stacked flow, breakage risk (180d stale), top redeemers leaderboard.
