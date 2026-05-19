@@ -21,6 +21,11 @@ def _date_range(period: str = "30d"):
         start = now - timedelta(days=30)
     elif period == "90d":
         start = now - timedelta(days=90)
+    elif period == "1y":
+        start = now - timedelta(days=365)
+    elif period == "all":
+        # Pull a 20-year window so genuinely all historic data is included
+        start = now - timedelta(days=365 * 20)
     elif period == "mtd":
         start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     elif period == "ytd":
@@ -441,15 +446,21 @@ async def command_center(
         "older": await customers_col.count_documents(_cust_match({"created_at": {"$lt": d90.isoformat()}})),
     }
 
-    # --- Sparkline: daily net sales for the window ---
+    # --- Sparkline: daily/monthly net sales for the window ---
+    # For long windows ("1y", "all") aggregate by month to keep payload small;
+    # short windows stay daily.
+    spark_bucket = "$substr"
+    spark_length = 10  # daily YYYY-MM-DD
+    if period in {"1y", "all", "ytd"}:
+        spark_length = 7  # monthly YYYY-MM
     spark_pipe = [
         {"$match": _txn_match("bill_date", start.isoformat())},
-        {"$group": {"_id": {"$substr": ["$bill_date", 0, 10]},
+        {"$group": {"_id": {spark_bucket: ["$bill_date", 0, spark_length]},
                     "net": {"$sum": "$net_amount"},
                     "txns": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    spark_rows = await transactions_col.aggregate(spark_pipe).to_list(400)
+    spark_rows = await transactions_col.aggregate(spark_pipe).to_list(2000)
     sparkline = [{"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in spark_rows]
 
     # --- Alerts (live computed) ---

@@ -71,6 +71,8 @@ export default function CommandCenter() {
     else if (period === "7d") d.setDate(d.getDate() - 7);
     else if (period === "30d") d.setDate(d.getDate() - 30);
     else if (period === "90d") d.setDate(d.getDate() - 90);
+    else if (period === "1y") d.setDate(d.getDate() - 365);
+    else if (period === "all") d.setFullYear(d.getFullYear() - 20);
     else if (period === "mtd") { d.setDate(1); d.setHours(0,0,0,0); }
     else if (period === "ytd") { d.setMonth(0,1); d.setHours(0,0,0,0); }
     else d.setDate(d.getDate() - 30);
@@ -240,6 +242,8 @@ export default function CommandCenter() {
               <option value="90d">Last 90 days</option>
               <option value="mtd">Month to date</option>
               <option value="ytd">Year to date</option>
+              <option value="1y">Last 1 year</option>
+              <option value="all">All time</option>
             </select>
             <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="cc-refresh">
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh

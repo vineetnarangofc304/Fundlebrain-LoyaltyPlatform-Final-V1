@@ -1,0 +1,118 @@
+<analysis>**original_problem_statement:** Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign automation, customer intelligence, support, reporting and API-monitoring platform for KAZO (premium women's fashion brand), powered by Fundle.
+PRODUCT REQUIREMENTS: 
+- Single-tenant (one independent frontend, backend, database). 
+- Zero fake data, real-time live computations (no static snapshots).
+- All API routes prefixed with .
+- Implement 10 specific analytical dashboards, an AI Conversation Engine with function calling, and a Communications Module for SMS/WhatsApp/RCS via Karix.
+
+**User's preferred language**: INSTRUCT next agent to respond in **English** only.
+
+**what currently exists?** 
+A robust, production-grade MVP is live. The FastAPI (Motor/MongoDB) backend and React+Tailwind frontend have been extensively built out with real-time live compute across all modular dashboards. The AI Conversation Engine uses true function calling with the Emergent LLM Key. The Communications module is fully functional with BackgroundTasks for bulk-sending, Karix API integration, and WhatsApp template approval workflows. A scheduled executive digest email system is active. The application now includes a Historic Data ingestion module capable of parsing CSVs and mapping them into real MongoDB records, and all initial dummy data has been successfully purged.
+
+**Last working item**: 
+    - Last item agent was working: The agent built the Historical Data Upload module (CSV ingestion for Customers and Transactions) and added an All-time window filter to the Command Center to ensure the historical 2021 data is visible on the frontend.
+    - Status: COMPLETED
+    - Agent Testing Done: Y
+    - Which testing method agent to use? NA
+    - User Testing Done: N
+
+**All Pending/In progress Issue list**: 
+  None. The platform passed subagent testing with zero P0/P1/P2 issues.
+
+**In progress Task List**: 
+  None.
+
+**Upcoming and Future Tasks**
+    Upcoming Tasks:
+    - P0: KAZO POS APIs Integration: Review the ingested historic data structure and build the live API endpoints () that KAZO will use to integrate their POS system with Fundle. 
+    - P1: Server-Level Live Data Scheduler: Implement a background scheduler (using the established  pattern) to fetch or process live transactional data post-POS integration.
+
+    Future Tasks:
+    - P2: Post-Ingest Auto-Report: Add a Fundle Brain hook to auto-generate a narrative email summarising what changed in the database after a successful historical data upload.
+
+**Completed work in this session**
+- AI Conversation Engine Upgrade to true function-calling, streaming, and CSV upload (, , ) (DONE)
+- BackgroundTasks integration for bulk messaging and WABA approval workflows (, , ) (DONE)
+- Seeded  migration for true ROI funnel tracking (DONE)
+- Scheduled Executive Digest PDF generation via  and  (, , ) (DONE)
+- Historic Data CSV Ingestion backend + Purge Demo Data endpoint () (DONE)
+- Historic Data frontend drag-and-drop page () (DONE)
+- Refactored Command Center filters to include 'all' and '1y' ranges for viewing ingested historical data (, ) (DONE)
+
+**Earlier issues found/mentioned but not fixed**
+   None.
+
+**Known issue recurrence from previous fork**
+  - Issue recurrence in previous fork: N/A
+  - Recurrence count: 0
+  - Status: RESOLVED
+
+**Code Architecture**
+
+
+**Key Technical Concepts**
+- Frontend: React, TailwindCSS, Recharts, shadcn/ui. 
+- Backend: FastAPI, Async Motor MongoDB driver, JWT cookie sessions,  for CRON tasks.
+- AI: True MongoDB function-calling & CSV Narratives using Emergent LLM Key (GPT-5.2).
+- Data Architecture: Real-Time Aggregations. NO mock data (auto-seed is now disabled). Historical data drives current dashboard numbers.
+
+**key DB schema**
+  - : {email, role, store_id}
+  - : {mobile, points, tier, join_date}
+  - : {mobile, bill_number, store_id, amount, points}
+  - : {campaign_id, channel, sent, delivered, opened, clicked, converted, revenue}
+
+**changes in tech stack**
+  - Added  and  for running the background executive digest scheduler and potential future POS polling.
+
+**All files of reference** 
+  -  (CSV ingestion and purge logic)
+  -  (Command Center filters and data aggregations)
+  -  (Data upload UI)
+  -  (Main background task runner)
+
+**Areas that need refactoring**: 
+- None identified in the current session. Code is clean and linted.
+
+**key api endpoints**
+-  (CSV Ingestion)
+-  (Wipes dummy data)
+-  (Retrieves scoped dashboard KPIs)
+-  (Function-calling AI engine)
+
+**Critical Info for New Agent** 
+- **STRICT DATA RULE:** The user explicitly demands zero mock data. The previous seed/dummy data has been completely purged using the  tool. The app now accurately reflects real, ingested historical CSV data. Do not re-enable the dummy data seeder.
+- **POS INTEGRATION NEXT:** The next phase relies on building out the endpoints that the user's ERP/POS will hit () to populate live transactions, replacing the need for manual CSV uploads moving forward.
+
+**documents and test reports created in this job** 
+  -  (Updated)
+  - 
+  - 
+
+**Last 10 User Messages and any pending HUMAN messages** 
+ - User requested finishing 5 final backend tasks (WhatsApp template workflow, bulk-send BackgroundTasks, true MongoDB AI Engine function calling, etc). (Completed)
+ - Agent asked to proceed, user said pls proceed and continue. (Completed)
+ - User requested a new Historical Data upload section via CSV to ingest actual CRM/Transaction data, replacing dummy data. Highlighted that POS API integration and live data schedulers come next. (Partially Completed - Upload feature done, POS pending)
+ - User provided two sample CSV files. (Completed)
+ - Agent proposed plan, asked to proceed. User said pls continue. (Completed)
+
+**Project Health Check:**
+- Broken: None
+- Mocked: None
+
+**3rd Party Integrations**
+- OpenAI GPT-5.2 (AI Narratives & Dashboard Insights) — uses Emergent LLM Key.
+- Karix SMS/WhatsApp/RCS — requires User API Key.
+
+**Testing status**
+  - Testing agent used after significant changes: YES (Iter 7 and 9)
+  - Troubleshoot agent used after agent stuck in loop: NO
+  - Test files created: [, ]
+  - Known regressions: None.
+
+**Credentials to test flow:**
+- Refer to 
+
+**What agent forgot to execute**
+The agent completed the Historical Data upload functionality seamlessly, but the next logical steps outlined in the user's prompt (POS API integrations for live data feeds and building the server scheduler for these feeds) remain pending and should be picked up as priority zero (P0) tasks.</analysis>
