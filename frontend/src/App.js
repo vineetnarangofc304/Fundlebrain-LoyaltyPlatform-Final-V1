@@ -1,53 +1,106 @@
-import { useEffect } from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { Toaster } from "sonner";
+import { AuthProvider, useAuth } from "@/lib/auth";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+// Public pages
+import PublicLayout from "@/pages/public/PublicLayout";
+import Home from "@/pages/public/Home";
+import LoyaltyBenefits from "@/pages/public/LoyaltyBenefits";
+import HowItWorks from "@/pages/public/HowItWorks";
+import Rewards from "@/pages/public/Rewards";
+import ReferralProgram from "@/pages/public/ReferralProgram";
+import StoreLocator from "@/pages/public/StoreLocator";
+import FAQs from "@/pages/public/FAQs";
+import Privacy from "@/pages/public/Privacy";
+import Terms from "@/pages/public/Terms";
+import Contact from "@/pages/public/Contact";
+import EarnPoints from "@/pages/public/EarnPoints";
+import RedeemPoints from "@/pages/public/RedeemPoints";
+import AboutProgram from "@/pages/public/AboutProgram";
 
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
+// Auth
+import EnterpriseLogin from "@/pages/auth/EnterpriseLogin";
+import StoreLogin from "@/pages/auth/StoreLogin";
+import CRMLogin from "@/pages/auth/CRMLogin";
 
-  useEffect(() => {
-    helloWorldApi();
-  }, []);
+// Admin
+import AdminLayout from "@/pages/admin/AdminLayout";
+import ExecutiveCockpit from "@/pages/admin/ExecutiveCockpit";
+import Customer360 from "@/pages/admin/Customer360";
+import CustomerDetail from "@/pages/admin/CustomerDetail";
+import LoyaltyConfigurator from "@/pages/admin/LoyaltyConfigurator";
+import CouponEngine from "@/pages/admin/CouponEngine";
+import CampaignManager from "@/pages/admin/CampaignManager";
+import FundleBrain from "@/pages/admin/FundleBrain";
+import APIMonitor from "@/pages/admin/APIMonitor";
+import UserManagement from "@/pages/admin/UserManagement";
+import StoresPage from "@/pages/admin/Stores";
+import NPSPage from "@/pages/admin/NPS";
+import TicketsPage from "@/pages/admin/Tickets";
+import ReportsPage from "@/pages/admin/Reports";
+import StoreOps from "@/pages/store/StoreOps";
 
-  return (
-    <div>
-      <header className="App-header">
-        <a
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
+function ProtectedRoute({ children, roles }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><div className="font-display text-2xl">Loading…</div></div>;
+  if (!user) return <Navigate to="/enterprise/login" replace />;
+  if (roles && !roles.includes(user.role)) return <Navigate to="/admin" replace />;
+  return children;
+}
 
 function App() {
   return (
-    <div className="App">
+    <AuthProvider>
       <BrowserRouter>
+        <Toaster position="top-right" richColors />
         <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
+          {/* Public site */}
+          <Route element={<PublicLayout />}>
+            <Route path="/" element={<Home />} />
+            <Route path="/about-program" element={<AboutProgram />} />
+            <Route path="/loyalty-benefits" element={<LoyaltyBenefits />} />
+            <Route path="/rewards" element={<Rewards />} />
+            <Route path="/how-it-works" element={<HowItWorks />} />
+            <Route path="/earn-points" element={<EarnPoints />} />
+            <Route path="/redeem-points" element={<RedeemPoints />} />
+            <Route path="/referral-program" element={<ReferralProgram />} />
+            <Route path="/store-locator" element={<StoreLocator />} />
+            <Route path="/faqs" element={<FAQs />} />
+            <Route path="/privacy" element={<Privacy />} />
+            <Route path="/terms" element={<Terms />} />
+            <Route path="/contact" element={<Contact />} />
           </Route>
+
+          {/* Auth */}
+          <Route path="/enterprise/login" element={<EnterpriseLogin />} />
+          <Route path="/store/login" element={<StoreLogin />} />
+          <Route path="/crm/login" element={<CRMLogin />} />
+
+          {/* Admin */}
+          <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
+            <Route index element={<ExecutiveCockpit />} />
+            <Route path="customers" element={<Customer360 />} />
+            <Route path="customers/:id" element={<CustomerDetail />} />
+            <Route path="loyalty" element={<LoyaltyConfigurator />} />
+            <Route path="coupons" element={<CouponEngine />} />
+            <Route path="campaigns" element={<CampaignManager />} />
+            <Route path="ai" element={<FundleBrain />} />
+            <Route path="api-monitor" element={<APIMonitor />} />
+            <Route path="users" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><UserManagement /></ProtectedRoute>} />
+            <Route path="stores" element={<StoresPage />} />
+            <Route path="nps" element={<NPSPage />} />
+            <Route path="tickets" element={<TicketsPage />} />
+            <Route path="reports" element={<ReportsPage />} />
+          </Route>
+
+          {/* Store ops portal */}
+          <Route path="/store" element={<ProtectedRoute roles={["store_manager","store_staff","super_admin","brand_admin"]}><StoreOps /></ProtectedRoute>} />
+
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
-    </div>
+    </AuthProvider>
   );
 }
 

@@ -1,0 +1,42 @@
+{
+  "summary": "Comprehensive backend testing of KAZO Fundle Platform completed. 54/54 pytest tests pass covering auth, users, dashboard, customers, loyalty, coupons, campaigns, AI chat, API monitor, stores, POS (unauth), public APIs, NPS, tickets, and reports. All seeded data is correctly returned (1500 customers, 25 stores, 8000+ txns). AI chat correctly queries real MongoDB and returns 'churning_customers' in data_used (no fabrication). Portal gating works correctly. POS endpoints unauthenticated by design. CSV export and audit logs working.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/customers/{id}/award-points", "issue": "Uses query parameters (points, note) instead of JSON body. Unusual for POST mutating endpoints - clients must use ?points=N. Consider switching to Pydantic request body for consistency with other POST endpoints."},
+      {"endpoint": "POST /api/customers/{id}/deduct-points", "issue": "Same as above - query params instead of body."},
+      {"endpoint": "GET /api/dashboard/kpis", "issue": "Returns 'api' key (not 'api_keys' as mentioned in spec). Spec wording vs actual key mismatch - functionality works. Sales section uses 'gross'/'net' keys (no 'total_revenue' alias)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Consider refactoring award-points/deduct-points to accept JSON body (PointsAdjustmentRequest) instead of query params for API consistency.",
+    "Optionally add 'total_revenue' alias to dashboard kpis.sales to match common naming, and ensure spec mentions 'api' key correctly."
+  ],
+  "critical_code_review_comments": [
+    "award_points / deduct_points endpoints accept `points` as a query parameter on a POST. Non-idiomatic; recommended to use Pydantic body model.",
+    "Auth route portal gating allows brand_admin/super_admin into store/crm portals (intentional multi-portal access) — confirmed working per design.",
+    "Coupon validate-by-code returns 200 even for non-applicable contexts in some cases; consider stricter validation responses.",
+    "All MongoDB queries correctly exclude _id projection. JWT auth + bcrypt + cookie session implemented correctly.",
+    "AI chat tool-calls real Mongo and does NOT fabricate data — verified data_used.churning_customers contains real customer documents."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (created)",
+    "/app/test_reports/pytest/pytest_results.xml (generated)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "skipped"},
+  "test_credentials": "Used credentials from /app/memory/test_credentials.md: admin@kazo.com/Kazo@2026 (primary), crm@kazo.com (portal gating), store.mumbai@kazo.com (store portal), superadmin@fundle.io/Fundle@2026 (super role).",
+  "seed_data_creation": "Created via tests (auto-cleanup not performed): a few TEST_-prefixed users, coupons, campaigns, customer point ledger entries, public register-interest customer. Volume is small (<10 docs) and prefixed with TEST_ for easy cleanup.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend is fully functional. Run `pytest /app/backend/tests/backend_test.py -v` to regress. Note: tests rely on seeded data (1500 customers, 25 stores). AI chat consumes EMERGENT_LLM_KEY budget — earlier run hit a budget limit but is now resolved/replenished. If AI test fails with 500 'Budget has been exceeded', report it as quota/key issue, not code bug. POS endpoints are unauthenticated by design.",
+  "rca of the issue": "N/A - no production bugs found. Initial test failures were schema-mismatches in the test file itself (wrong field names) — fixed by aligning with actual Pydantic models: CampaignCreate(channels[], audience_type, message_template), CouponCreate(coupon_type, valid_to, min_bill_amount, usage_limit), POS issue-points(bill_number), award/deduct-points(query params)."
+}
