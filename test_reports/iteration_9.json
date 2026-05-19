@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 9 (Historic Data Upload / POS migration Phase 1) full-stack testing. Backend: 21/21 pytest tests PASS in 6.15s covering schema endpoints (customers/transactions/stores/items/invalid), CSV ingest (customers dry-run + live, transactions live), error handling for malformed CSV, jobs list, purge-preview, purge-without-confirm 400 guard, RBAC (store_manager 403), dashboard endpoints, and regression on /api/ai/chat, /api/templates, /api/reports/digests. Frontend: All UI surfaces verified end-to-end. Sidebar DATA section with 'Historical Upload' link renders; /admin/historic-data page shows 4 dataset tiles (Customers / Transactions / Stores / Items SKUs), upload card with dropzone + duplicate-handling Upsert select + Mode Dry-run select + Preview button, schema panel with Mobile required pill + 20 recognised grey pills + dark sample-row code block + 3 notes, and Ingest history table with 10 prior jobs. Tile switching works: clicking Transactions tile updates schema panel to PK=Bill Number, 3 required pills (Bill Number / Customer Mobile Number / Date), 20 recognised columns including 'Outlet(Only For Shopify Marker)' / 'Zone New' / 'Class', new sample row for City Centre Mall Guwahati, and 3 transaction-specific notes. Purge modal opens with current data counts, accepts 'PURGE' confirmation text, Cancel closes it (NOT actually purged per spec). File upload flow verified — uploaded /tmp/kazo_customers.csv via set_input_files, clicked Preview, new job 'kazo_customers.csv' appears at top of history with 'Previewed' purple pill, mode=dry-run, rows 16/16, 0 inserted/updated/skipped (correct for dry-run).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Login / CommandCenter (carried-over)", "issues": ["Persistent hydration warning '<span> cannot be a child of <option>' on CommandCenter cc-store select — carried over from iter 6/7/8, caused by Visual Editor wrapping option children. Not a regression."]},
+      {"screen": "HistoricDataPage", "issues": ["Command Center kpis.transactions=0 and kpis.net_sales=0 even though 15 transactions exist — this is expected/correct behaviour because the dashboard filters by 'last 30d' period and all historic transactions are from 2021 dates. May confuse end-users; consider exposing a 'lifetime' or 'all data' toggle. Lifetime metrics (total_customers=16, outstanding_points=1250) DO show correctly."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration9_test.py",
+    "/app/test_reports/pytest/iteration9_results.xml"
+  ],
+  "action_items": [
+    "(Optional UX) Consider adding a 'all-time' period option to Command Center so the 2021-dated KAZO transactions appear in net_sales / transaction count KPIs (they currently show 0 because the default 30d window excludes them).",
+    "(Optional) Carried-over hydration warning <span> inside <option> on CommandCenter cc-store select — non-blocking, but worth cleaning when Visual Editor wrappers are revisited."
+  ],
+  "critical_code_review_comments": [
+    "historic_routes.py: Schema endpoint correctly returns customers schema with 20 recognised columns matching the KAZO CSV header exactly (Mobile, ONLINE, Name, Country Code, ..., DOB).",
+    "historic_routes.py: _map_customer_row + _map_transaction_row correctly extract from KAZO column names including the verbose 'Outlet(Only For Shopify Marker)' / 'Net Amount Before Tax Kazo' / 'Total Revenue Kazo' header variants — verified live with sample CSV.",
+    "historic_routes.py: _run_ingest_job uses pymongo.UpdateOne in bulk_write with upsert=True keyed on mobile/bill_number/code/sku — correct duplicate handling, idempotent on re-runs.",
+    "historic_routes.py: dry_run path correctly skips the _flush write step so inserted/updated stay 0 — verified (job status='previewed', processed=16, inserted=0).",
+    "historic_routes.py: Transactions ingest auto-creates Store docs from outlet names via store_cache pass + back-fills store_id on inserted transactions via UpdateMany — clean two-phase approach.",
+    "historic_routes.py: parse_date supports 9 patterns including DD-MM-YYYY (KAZO format), DD/MM/YYYY, ISO; returns None for blanks instead of fake fallback — strict-no-dummy-data rule honoured.",
+    "historic_routes.py: RBAC check on /ingest restricts to {super_admin, brand_admin, crm_manager, marketing_manager} — store_manager correctly receives 403, verified.",
+    "historic_routes.py: purge_demo guards with confirm=true (HTTP 400 otherwise) + preserves users/loyalty_config/templates/provider_config by default — sane defaults.",
+    "MongoDB note: For customers re-uploaded with identical data, modified_count returns 0 (Mongo only increments modified_count when fields actually change). Test was adjusted to verify processed=16 + errors_count=0 instead of inserted+updated==processed.",
+    "Behaviour observation: After ingest of real KAZO data (16 customers, 15 transactions, 8 stores), Command Center returns total_customers=16 correctly, but net_sales/transactions KPIs are 0 due to 30-day period filter (txns are from 2021). Consider exposing an 'all-time' toggle."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration9_test.py (created)",
+    "/app/test_reports/pytest/iteration9_results.xml (generated)"
+  ],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "100% (sidebar DATA section, Historical Upload page render, 4 dataset tiles, schema panel switches Customers→Transactions correctly, upload dropzone, dry-run Preview submits job with status='Previewed', Purge modal opens with counts and accepts 'PURGE' confirmation, Cancel closes modal without purging)"},
+  "test_credentials": "admin@kazo.com / Kazo@2026 (brand_admin), store.mumbai@kazo.com / Kazo@2026 (store_manager for RBAC)",
+  "seed_data_creation": "Real KAZO CSVs ingested via /api/historic-data/ingest: 16 customers + 15 transactions + auto-created stores. Two extra preview-only jobs (bad.csv 2/2 errors, kazo_customers.csv 16/16) added to historic_ingest_jobs during testing. No customer or transaction docs created beyond what the spec wanted.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 9 ships clean. Re-run tests: `pytest /app/backend/tests/iteration9_test.py -v`. Frontend testids on /admin/historic-data not yet exhaustively tagged — selectors used were text-content based (dataset tile names, Purge demo data, Preview button, file input[type=file]) and they all worked. If main agent wants to add data-testid to dataset-tile-{customers,transactions,stores,items}, upload-dropzone, duplicate-mode-select, mode-select, preview-button, purge-modal-confirm-input, purge-cancel-btn — that would harden future testing. Note: Command Center KPIs return 0 transactions / 0 net_sales because the 2021-dated KAZO data falls outside the default 30d period window. This is correct backend behaviour, not a bug; just be aware when verifying 'real numbers'. total_customers=16 confirms data is live. Carried-over hydration warning <span> in <option> on CommandCenter persists.",
+  "rca of the issue": "No P0/P1/P2 issues. Two minor UX observations (Command Center 30d-window vs 2021 historic data, carried-over hydration warning) noted as optional follow-ups."
+}

@@ -3,7 +3,7 @@ import { useAuth, hasRole } from "@/lib/auth";
 import {
   LayoutDashboard, TrendingUp, UserRound, Award, BarChart3, Store as StoreIcon, MessageCircle,
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
-  Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight
+  Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload
 } from "lucide-react";
 import { useState } from "react";
 
@@ -50,6 +50,12 @@ const SECTIONS = [
     label: "AI TOOLS",
     items: [
       { to: "/admin/ai", icon: Brain, label: "Fundle Brain", testid: "nav-ai" },
+    ],
+  },
+  {
+    label: "DATA",
+    items: [
+      { to: "/admin/historic-data", icon: Database, label: "Historical Upload", testid: "nav-historic-data" },
     ],
   },
   {

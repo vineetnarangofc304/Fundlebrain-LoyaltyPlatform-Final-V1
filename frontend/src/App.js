@@ -59,6 +59,7 @@ import TemplatesPage from "@/pages/admin/communications/TemplatesPage";
 import ProviderSettingsPage from "@/pages/admin/communications/ProviderSettingsPage";
 import BulkJobsPage from "@/pages/admin/communications/BulkJobsPage";
 import DigestsPage from "@/pages/admin/DigestsPage";
+import HistoricDataPage from "@/pages/admin/HistoricDataPage";
 import StoreOps from "@/pages/store/StoreOps";
 
 function ProtectedRoute({ children, roles }) {
@@ -132,6 +133,7 @@ function App() {
             <Route path="tickets/:id" element={<TicketDetail />} />
             <Route path="reports" element={<ReportsPage />} />
             <Route path="reports/digests" element={<DigestsPage />} />
+            <Route path="historic-data" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><HistoricDataPage /></ProtectedRoute>} />
           </Route>
 
           {/* Store ops portal */}
