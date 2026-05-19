@@ -49,6 +49,7 @@ import LoyaltyDashboard from "@/pages/admin/dashboards/LoyaltyDashboard";
 import CampaignDashboard from "@/pages/admin/dashboards/CampaignDashboard";
 import StoreDashboard from "@/pages/admin/dashboards/StoreDashboard";
 import NPSDashboard from "@/pages/admin/dashboards/NPSDashboard";
+import RFMDashboard from "@/pages/admin/dashboards/RFMDashboard";
 import StoreOps from "@/pages/store/StoreOps";
 
 function ProtectedRoute({ children, roles }) {
@@ -97,6 +98,7 @@ function App() {
             <Route path="dashboards/campaigns" element={<CampaignDashboard />} />
             <Route path="dashboards/stores" element={<StoreDashboard />} />
             <Route path="dashboards/nps" element={<NPSDashboard />} />
+            <Route path="dashboards/rfm" element={<RFMDashboard />} />
             <Route path="customers" element={<Customer360 />} />
             <Route path="customers/:id" element={<CustomerDetail />} />
             <Route path="loyalty" element={<LoyaltyConfigurator />} />

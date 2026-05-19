@@ -13,6 +13,20 @@
     --kazo-champagne: #C7A76D;
     --kazo-champagne-light: #E0CFA3;
 
+    /* Accent palette — used across analytics for category coding (subtle, editorial) */
+    --accent-indigo: #1E3A8A;       /* primary cool — revenue, AOV  */
+    --accent-indigo-soft: #EEF2FF;
+    --accent-teal:   #0E7C7B;       /* customers, retention         */
+    --accent-teal-soft: #E6F5F5;
+    --accent-amber:  #B45309;       /* loyalty, points              */
+    --accent-amber-soft: #FEF6E7;
+    --accent-rose:   #9F1239;       /* risk, churn, alerts          */
+    --accent-rose-soft: #FFF1F2;
+    --accent-slate:  #334155;       /* ops, neutral data            */
+    --accent-slate-soft: #F1F5F9;
+    --accent-emerald:#047857;       /* positive deltas              */
+    --accent-emerald-soft: #ECFDF5;
+
     /* Dashboard */
     --sidebar-bg: #0F172A;
     --sidebar-fg: #E2E8F0;
@@ -91,12 +105,57 @@ body {
     border: 1px solid var(--card-border);
     border-radius: 2px;
     padding: 18px 20px;
-    transition: border-color 0.15s ease, transform 0.15s ease;
+    transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.2s ease;
+    position: relative;
+    overflow: hidden;
 }
 .kpi-card:hover {
     border-color: var(--kazo-burgundy);
     cursor: pointer;
+    box-shadow: 0 4px 14px -8px rgba(15, 23, 42, 0.18);
 }
+
+/* Themed KPI cards — left accent strip + soft tinted background */
+.kpi-card[data-accent]::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    width: 3px;
+    background: var(--accent, var(--kazo-burgundy));
+}
+.kpi-card[data-accent="indigo"]   { --accent: var(--accent-indigo);  background: linear-gradient(180deg, var(--accent-indigo-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="teal"]     { --accent: var(--accent-teal);    background: linear-gradient(180deg, var(--accent-teal-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="amber"]    { --accent: var(--accent-amber);   background: linear-gradient(180deg, var(--accent-amber-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="rose"]     { --accent: var(--accent-rose);    background: linear-gradient(180deg, var(--accent-rose-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="slate"]    { --accent: var(--accent-slate);   background: linear-gradient(180deg, var(--accent-slate-soft) 0%, #fff 60%); }
+.kpi-card[data-accent="burgundy"] { --accent: var(--kazo-burgundy);  background: linear-gradient(180deg, #fdf2f5 0%, #fff 60%); }
+.kpi-card[data-accent="emerald"]  { --accent: var(--accent-emerald); background: linear-gradient(180deg, var(--accent-emerald-soft) 0%, #fff 60%); }
+
+/* Chart container w/ subtle gradient backdrop */
+.chart-card {
+    background: linear-gradient(180deg, #fff 0%, #fbfaf8 100%);
+    border: 1px solid var(--card-border);
+    border-radius: 2px;
+}
+
+/* Tabs (used by Store Performance v2 and others) */
+.k-tabs {
+    display: inline-flex;
+    border: 1px solid var(--card-border);
+    background: #fff;
+}
+.k-tabs button {
+    padding: 8px 16px;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #64748b;
+    border-right: 1px solid var(--card-border);
+    transition: all 0.15s ease;
+}
+.k-tabs button:last-child { border-right: none; }
+.k-tabs button:hover { background: var(--accent-slate-soft); color: var(--kazo-black); }
+.k-tabs button.active { background: var(--kazo-black); color: #fff; }
 
 /* Editorial hero */
 .editorial-headline {

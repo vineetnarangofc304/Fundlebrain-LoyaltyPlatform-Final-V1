@@ -17,6 +17,7 @@ const SECTIONS = [
       { to: "/admin/dashboards/loyalty", icon: Award, label: "Loyalty", testid: "nav-dash-loyalty" },
       { to: "/admin/dashboards/campaigns", icon: BarChart3, label: "Campaign Performance", testid: "nav-dash-campaigns" },
       { to: "/admin/dashboards/stores", icon: StoreIcon, label: "Store Performance", testid: "nav-dash-stores" },
+      { to: "/admin/dashboards/rfm", icon: Layers, label: "RFM & Churn", testid: "nav-dash-rfm" },
       { to: "/admin/dashboards/nps", icon: MessageCircle, label: "NPS & Feedback", testid: "nav-dash-nps" },
     ],
   },

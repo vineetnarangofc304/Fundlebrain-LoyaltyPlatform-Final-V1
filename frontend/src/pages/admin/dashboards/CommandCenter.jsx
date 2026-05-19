@@ -288,6 +288,7 @@ export default function CommandCenter() {
             delta={k.net_sales_delta_pct}
             hint={`vs prev ${period}`}
             onClick={openSalesDrill}
+            accent="burgundy"
             testid="cc-kpi-net-sales"
           />
           <KPICard
@@ -295,6 +296,7 @@ export default function CommandCenter() {
             value={fmtINR(k.aov)}
             hint="₹ per txn"
             onClick={openSalesDrill}
+            accent="indigo"
             testid="cc-kpi-aov"
           />
           <KPICard
@@ -302,6 +304,7 @@ export default function CommandCenter() {
             value={fmtNum(k.active_customers)}
             hint={`of ${fmtNum(k.total_customers)}`}
             onClick={openActiveCustomers}
+            accent="teal"
             testid="cc-kpi-active"
           />
           <KPICard
@@ -309,6 +312,7 @@ export default function CommandCenter() {
             value={fmtPct(k.repeat_rate_pct)}
             hint={`≥2 txns in ${period}`}
             onClick={() => navigate("/admin/dashboards/customers")}
+            accent="emerald"
             testid="cc-kpi-repeat-rate"
           />
           <KPICard
@@ -316,12 +320,14 @@ export default function CommandCenter() {
             value={k.nps_score == null ? "N/A" : k.nps_score}
             hint={`${period}`}
             onClick={() => navigate("/admin/dashboards/nps")}
+            accent="amber"
             testid="cc-kpi-nps"
           />
           <KPICard
             label="API Health"
             value={fmtPct(k.api_health_pct, 2)}
             onClick={openAPIFailures}
+            accent="slate"
             testid="cc-kpi-api"
           />
         </div>
@@ -333,6 +339,7 @@ export default function CommandCenter() {
             value={fmtNum(k.transactions)}
             delta={k.transactions_delta_pct}
             onClick={openSalesDrill}
+            accent="burgundy"
             testid="cc-kpi-txns"
           />
           <KPICard
@@ -340,12 +347,14 @@ export default function CommandCenter() {
             value={k.upt?.toFixed(2)}
             hint="units per txn"
             onClick={openSalesDrill}
+            accent="indigo"
             testid="cc-kpi-upt"
           />
           <KPICard
             label="Outstanding Points"
             value={fmtNum(k.outstanding_points)}
             onClick={() => navigate("/admin/dashboards/loyalty")}
+            accent="amber"
             testid="cc-kpi-out-points"
           />
           <KPICard
@@ -353,18 +362,21 @@ export default function CommandCenter() {
             value={fmtINR(k.outstanding_liability_inr)}
             hint="@ ₹0.25/pt"
             onClick={() => navigate("/admin/dashboards/loyalty")}
+            accent="amber"
             testid="cc-kpi-liability"
           />
           <KPICard
             label="Open Complaints"
             value={fmtNum(k.open_complaints)}
             onClick={openOpenComplaints}
+            accent="rose"
             testid="cc-kpi-complaints"
           />
           <KPICard
             label="Total Customers"
             value={fmtNum(k.total_customers)}
             onClick={() => navigate("/admin/customers")}
+            accent="teal"
             testid="cc-kpi-total-customers"
           />
         </div>

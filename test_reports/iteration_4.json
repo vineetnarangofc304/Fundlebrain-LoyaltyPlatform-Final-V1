@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 4 full-stack testing of FundleBrain v2 (Customer 360 v2, Store Performance v2, RFM & Churn). Backend: 22/22 pytest tests PASS — all three new endpoints return correct payloads (customer-360 with lifetime/rfm/monthly/store_affinity/category_affinity/recent/ledger/nps; store-performance-v2 with 168-cell heatmap + leaderboard sorted by net + by_city.stores count + by_day; rfm with 25 heatmap cells whose count-sum equals total_customers exactly, 11 named segments matching SEGMENT_ORDER, churn buckets low/medium/high). RFM segment-sum is within tolerance vs total_customers (intentionally permissive classifier). 404 returned for unknown customer id. All three new endpoints reject unauthenticated requests. Regression PASS for command-center + sales/customer/loyalty/campaign analytics endpoints (note: those live under /api/analytics/* not /api/dashboard/*). Frontend (Playwright via REACT_APP_BACKEND_URL): admin login OK, Command Center renders 12 KPI cards with data-accent ∈ {burgundy, indigo, teal, emerald, amber, slate, rose}, sidebar nav-dash-rfm shows 'RFM & Churn' between Store Performance and NPS, RFM dashboard renders 5×5 coloured heatmap + 6 KPI tiles (Total 1504 / Champions 226 / At Risk 95 / Lost 246 / New 153 / High-risk Churn 147) + 3 churn progress bars + 11 segment cards + Fundle Brain AI insight at top, Store Performance v2 renders all 3 tabs (Leaderboard/By City/Day Analysis) + KPI strip with accent borders, Customer 360 v2 opens for Priya Prasad showing cust-rfm-segment='Champions' + RFM tiles R5/F5/M5 + Lifetime KPIs (₹1.03L / 2,76,509 / 10 / ₹10.3K) with coloured accents + monthly AreaChart with Bar overlay + AI insight strip. All 4 regression dashboards (sales/customers/loyalty/campaigns) load without error.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/dashboard/customer-360/{id}", "issue": "_rfm_breakpoints() pulls ALL customers from the collection on EVERY request to compute quintile cuts. With 1504 customers this is fine, but at 100k+ it becomes slow. Consider memoising for ~5 min or computing once per request when both customer-360 and rfm are likely hit together."},
+      {"endpoint": "GET /api/dashboard/store-performance-v2", "issue": "delta_pct returns null when prev_net is 0; frontend currently displays nothing for those rows — match Command Center convention and label as 'NEW' (also noted in iter3)."},
+      {"endpoint": "GET /api/dashboard/rfm", "issue": "Segment classifier _segment_label has overlapping conditions for r=2,f>=4,m>=4 (Cant Lose Them) vs r<=2,f>=3 (At Risk) — early-return wins but spec explicitly allows this. Documented but worth a comment in code for future maintainers."},
+      {"endpoint": "GET /api/dashboard/store-performance-v2", "issue": "by_city.unique_customers and leaderboard.unique_customers count distinct customer_ids including nulls/empty strings via filter — looks correct but no test for guest-checkout (null customer_id) handling."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CommandCenter.jsx line ~226 — <select data-testid='cc-store'><option>", "issue": "React hydration warning in console: '<span> cannot be a child of <option>'. The Visual-Editor wrapper is injecting a <span style={display:'contents'}> around the option label text. Functional impact: none (page renders), but pollutes the console and breaks SSR/hydration assumptions. Likely caused by JSX expression like `<option value={s.id}>{s.name}</option>` being instrumented; check for stray fragments/spans inside <option>.", "selector": "[data-testid='cc-store'] > option", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Customer 360 v2 — AI Insight Report", "issues": ["On first load the strip shows 'Fundle Brain is analysing the live data…' — fine, but spinner/loading affordance is missing. User may think the panel is blank."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration4_test.py",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [
+    "[P3] Fix hydration warning in CommandCenter.jsx <select cc-store> options (cosmetic console noise).",
+    "[P3] Add 'NEW' label fallback in StoreDashboard leaderboard when delta_pct is null.",
+    "[P3] Add inline comment in _segment_label noting the intentional early-return overlap.",
+    "[P3] Consider 5-min memoisation of _rfm_breakpoints() if customer base grows >50k."
+  ],
+  "critical_code_review_comments": [
+    "fundlebrain_routes.py customer-360: bill_date is treated as a STRING for $substr (line 80) AND as a date via $dateFromString in store-performance-v2 (line 336). Both work because bill_date is stored as ISO string, but mixing the two patterns is fragile — pick one and document.",
+    "fundlebrain_routes.py rfm endpoint: heatmap count-sum equals total_customers exactly (verified via test). Good. Segment-sum can drift due to permissive classifier (acceptable per spec).",
+    "fundlebrain_routes.py: no role-based access guard on these three endpoints — any authenticated user (including store_manager and analytics_viewer) sees ALL 1504 customers' aggregates. Customer-360 also exposes full PII (mobile, email, ledger). Consider RBAC: store_manager should only see customers tied to their store.",
+    "fundlebrain_routes.py customer-360 line 188: customer.pop('password_hash', None) — defensive scrub is good, but customers collection should never have password_hash in the first place. Audit seed to confirm.",
+    "fundlebrain_routes.py store-performance-v2: heatmap is always 168 cells (7×24), even when period_days=7 and most cells are 0 — payload size is fixed and small (~10KB) so this is fine."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration4_test.py (created)",
+    "/app/test_reports/pytest/iteration4_results.xml (generated)"
+  ],
+  "success_rate": {"backend": "100% (22/22)", "frontend": "100% (all 10 UI flows verified)"},
+  "test_credentials": "admin@kazo.com / Kazo@2026 from /app/memory/test_credentials.md",
+  "seed_data_creation": "None. Read-only tests against existing seeded data (1504 customers, 8003 transactions, 26 stores). High-value customer auto-discovered via drilldown sort.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v` for full regression across iter2/3/4 (~136 tests). Iter4 endpoints are independent and read-only. Customer 360 v2 uses RFM badge testid 'cust-rfm-segment'. Sidebar testid 'nav-dash-rfm'. Command Center KPI cards expose data-accent attribute (burgundy/indigo/teal/emerald/amber/slate/rose). Iter5 will add Points Economics v2, Cohort Migration, Campaign ROI v2 — do not pre-test those.",
+  "rca of the issue": "No P0/P1 issues found in this iteration. Hydration warning in Command Center is purely cosmetic console noise and does not affect functionality."
+}
