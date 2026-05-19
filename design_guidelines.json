@@ -1,0 +1,105 @@
+{
+  "theme_and_archetype": {
+    "public_site": {
+      "theme": "dark_and_light_hybrid",
+      "archetype": "Archetype 5: Jewel & Luxury",
+      "description": "Cinematic, high-contrast editorial look. Storytelling-first, large imagery, minimal navigation."
+    },
+    "admin_dashboard": {
+      "theme": "light_workspace_with_dark_sidebar",
+      "archetype": "Archetype 4: Swiss & High-Contrast (adapted for Enterprise)",
+      "description": "High information density, sharp rectangular cards, operational focus, data-heavy."
+    }
+  },
+  "typography": {
+    "headings": {
+      "font_family": "Cormorant Garamond",
+      "weights": ["300", "400", "600"],
+      "usage": "Editorial, elegant, Vogue-style headings for public site and dashboard section titles.",
+      "styles": "tracking-tight for large headings. DO NOT USE INTER."
+    },
+    "body": {
+      "font_family": "Manrope",
+      "weights": ["400", "500", "700"],
+      "usage": "Clean, highly legible sans-serif for dashboard UI elements, tables, and dense data."
+    }
+  },
+  "colors": {
+    "brand": {
+      "black": "#0A0A0A",
+      "cream": "#F9F8F6",
+      "burgundy": "#571326",
+      "champagne": "#C7A76D"
+    },
+    "dashboard": {
+      "sidebar_bg": "#0F172A",
+      "sidebar_fg": "#E2E8F0",
+      "sidebar_radius": "6px",
+      "workspace_bg": "#F9F8F6",
+      "workspace_fg": "#0A0A0A",
+      "card_bg": "#FFFFFF",
+      "card_border": "#E5E7EB"
+    }
+  },
+  "layout_and_spacing": {
+    "public_site": {
+      "grid_mode": "Mode A: The 'Tetris' Grid",
+      "spacing_scale": "Generous (p-12, p-24, gap-12)",
+      "container": "Max-width with significant breathing room and asymmetry."
+    },
+    "admin_dashboard": {
+      "grid_mode": "Mode B: The 'Control Room' Grid",
+      "spacing_scale": "Tight and dense (p-4, p-6, gap-4)",
+      "cards": "Sharp edges (rounded-none or max rounded-sm), 1px subtle borders, no soft shadows.",
+      "kpi_tiles": "Large numeric metrics, sparklines (via Recharts), up/down delta indicators."
+    }
+  },
+  "components": {
+    "buttons": {
+      "public": "Solid black or burgundy, sharp corners, dramatic hover states (opacity or subtle scale).",
+      "admin": "Shadcn defaults modified for sharp edges (rounded-sm), high contrast."
+    },
+    "sidebar": {
+      "background": "#0F172A",
+      "border_radius": "rounded-[6px]",
+      "branding": "Include 'Powered by Fundle' clearly at the bottom."
+    },
+    "charts": {
+      "library": "recharts",
+      "palette": ["#0F172A", "#571326", "#C7A76D", "#94A3B8"]
+    }
+  },
+  "image_urls": {
+    "public_hero": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/e79d70f1-3e69-4d31-89bd-3394bf0b0e8f/images/78c63bea378c62b7998687065d6e72a793a918832cab75549bf67f8c89f11216.png",
+      "description": "Cinematic editorial photograph of a premium Indian women's western wear fashion model."
+    },
+    "luxury_texture": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/e79d70f1-3e69-4d31-89bd-3394bf0b0e8f/images/a4dd983df23375d64a8141f5a63c1af5c10acb725b7ce0279647c84ec4772a05.png",
+      "description": "Close-up macro shot of premium fabric texture in champagne and black tones."
+    },
+    "boutique_interior": {
+      "url": "https://images.pexels.com/photos/33327425/pexels-photo-33327425.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Chic interior of a modern fashion retail store."
+    },
+    "editorial_model_2": {
+      "url": "https://images.pexels.com/photos/7778893/pexels-photo-7778893.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Model posing in silver dress during a fashion photo shoot."
+    }
+  },
+  "motion": {
+    "public_site": "Smooth scrolling (Lenis style), slow image pans, fade-up on scroll for text blocks.",
+    "admin_dashboard": "Minimal micro-interactions, instant feedback on clicks, no long transitions."
+  },
+  "instructions_to_main_agent": [
+    "Install Google Fonts 'Cormorant Garamond' and 'Manrope' into the global stylesheet.",
+    "Use Lucide-React for all icons, matching stroke widths to font weights.",
+    "Ensure all interactive and informational elements contain a 'data-testid' attribute (e.g., data-testid='kpi-sales-total').",
+    "Build the dashboard layout with a dark sidebar (#0F172A, 6px corners) and a light workspace background.",
+    "KPI cards should feature Recharts sparklines and percentage delta arrows (green/red).",
+    "Include 'Powered by Fundle' tagline in the admin sidebar.",
+    "Do not use Shadcn card component globally if it forces a specific radius. Override global radii to be sharp (0px to 2px) in the admin workspace, except the sidebar which must be 6px.",
+    "For the public site, utilize the cinematic editorial images and deep burgundy / champagne accents against the cream/black base.",
+    "For routing setup, ensure distinct navigation paths: Public (/), Enterprise Admin (/admin), Store Ops (/store), CRM (/crm)."
+  ]
+}
