@@ -78,10 +78,26 @@ api_router.include_router(historic_router)
 
 app.include_router(api_router)
 
+# CORS — must allow specific origins (NOT '*') because frontend sends credentials.
+# Combine explicit env list with a permissive regex covering custom + emergent domains.
+_env_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip() and o.strip() != '*']
+_default_origins = [
+    "https://kazoloyalty.fundlebrain.ai",
+    "https://kazo-loyalty-hub.emergent.host",
+    "https://kazo-loyalty-hub.preview.emergentagent.com",
+    "http://localhost:3000",
+]
+_allowed_origins = list({*_env_origins, *_default_origins})
+_origin_regex = os.environ.get(
+    'CORS_ORIGIN_REGEX',
+    r"https?://(.*\.)?(fundlebrain\.ai|emergent\.host|emergentagent\.com|localhost(:\d+)?)$",
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=_allowed_origins,
+    allow_origin_regex=_origin_regex,
     allow_methods=["*"],
     allow_headers=["*"],
 )

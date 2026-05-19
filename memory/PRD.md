@@ -70,6 +70,8 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 - [x] Historical CSV upload UI + background ingest (iteration 9)
 - [x] Purge demo data (iteration 9)
 - [x] All-time period option so dashboards reflect historic uploads (iteration 9)
+- [x] Fix CORS for custom domain `kazoloyalty.fundlebrain.ai` — replaced wildcard `*` (incompatible with credentialed XHR) with explicit allowlist + regex covering `*.fundlebrain.ai`, `*.emergent.host`, `*.emergentagent.com` (2026-05-19). Requires redeploy.
+- [x] Idempotent seed of all 11 demo users on backend boot (2026-05-19)
 
 ### P1 — Next
 - [ ] **KAZO POS API integration** (Phase 2) — User to share KAZO POS API docs/Swagger/Postman. Will build: (a) push endpoints we expose for KAZO POS to call, (b) optional pull-scheduler that polls KAZO POS for live transactions, (c) reconciliation between live + historic.

@@ -4,7 +4,7 @@ import time
 import pytest
 import requests
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://fundle-crm-engine.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-loyalty-hub.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 
 
