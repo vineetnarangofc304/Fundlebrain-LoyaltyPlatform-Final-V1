@@ -20,11 +20,13 @@ export default function Home() {
   const [form, setForm] = useState({ name: "", mobile: "", email: "", city: "" });
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
+  const [cms, setCms] = useState(null);
 
   useEffect(() => {
-    document.title = "KAZO Rewards — Where Style Earns You More";
+    document.title = "KAZO Rewards — Powered by Fundle";
+    api.get("/cms/content").then((r) => setCms(r.data)).catch(() => {});
     const m = document.querySelector('meta[name="description"]');
-    const desc = "Join the official KAZO loyalty programme. Earn points on every purchase, unlock exclusive tier privileges, birthday bonuses, and access VIP collections across India.";
+    const desc = "Join the official KAZO loyalty programme. Earn points on every purchase, unlock exclusive tier privileges, birthday bonuses, and access VIP collections across India. Powered by Fundle.";
     if (m) m.setAttribute("content", desc);
     else {
       const meta = document.createElement("meta");
@@ -33,6 +35,8 @@ export default function Home() {
       document.head.appendChild(meta);
     }
   }, []);
+
+  const c = cms?.home || {};
 
   const submit = async (e) => {
     e.preventDefault();
