@@ -1220,15 +1220,23 @@ async def executive_summary(period_days: int = 30, user: dict = Depends(get_curr
 @router.get("/executive-summary/pdf")
 async def executive_summary_pdf(period_days: int = 30, user: dict = Depends(get_current_user)):
     """Generate a brand-themed PDF using ReportLab."""
+    from fastapi.responses import StreamingResponse
+    buf = await _build_executive_summary_pdf_bytes(period_days, user)
+    fname = f"KAZO_Executive_Summary_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.pdf"
+    return StreamingResponse(buf, media_type="application/pdf",
+                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+async def _build_executive_summary_pdf_bytes(period_days: int, user: dict):
+    """Build the executive summary PDF and return a BytesIO at position 0."""
     from io import BytesIO
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch, cm
+    from reportlab.lib.units import cm
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                                     TableStyle, PageBreak)
-    from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
-    from fastapi.responses import StreamingResponse
+                                     TableStyle)
+    from reportlab.lib.enums import TA_LEFT
 
     data = await executive_summary(period_days, user)  # type: ignore
     k = data["kpis"]
@@ -1248,8 +1256,7 @@ async def executive_summary_pdf(period_days: int = 30, user: dict = Depends(get_
     h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold",
                          fontSize=24, textColor=BURGUNDY, alignment=TA_LEFT, spaceAfter=4)
     sub = ParagraphStyle("sub", parent=styles["Normal"], fontName="Helvetica",
-                          fontSize=8, textColor=GREY, alignment=TA_LEFT, spaceAfter=20,
-                          tracking=2)
+                          fontSize=8, textColor=GREY, alignment=TA_LEFT, spaceAfter=20)
     section = ParagraphStyle("section", parent=styles["Heading2"], fontName="Helvetica-Bold",
                               fontSize=13, textColor=SLATE, spaceBefore=18, spaceAfter=8)
     body = ParagraphStyle("body", parent=styles["Normal"], fontName="Helvetica",
@@ -1261,7 +1268,6 @@ async def executive_summary_pdf(period_days: int = 30, user: dict = Depends(get_
         f"POWERED BY FUNDLE &nbsp;·&nbsp; LAST {period_days} DAYS &nbsp;·&nbsp; GENERATED {datetime.now(timezone.utc).strftime('%d %b %Y · %H:%M UTC')}",
         sub))
 
-    # KPI strip
     delta_str = f"{k['net_sales_delta_pct']:+.1f}%" if k.get("net_sales_delta_pct") is not None else "NEW"
     kpi_rows = [
         ["Net Sales", f"₹ {k['net_sales']:,.0f}", "Transactions", f"{k['transactions']:,}"],
@@ -1280,14 +1286,11 @@ async def executive_summary_pdf(period_days: int = 30, user: dict = Depends(get_
         ("TEXTCOLOR", (2, 0), (2, -1), GREY),
         ("FONTNAME", (1, 0), (1, -1), "Helvetica-Bold"),
         ("FONTNAME", (3, 0), (3, -1), "Helvetica-Bold"),
-        ("ALIGN", (1, 0), (1, -1), "LEFT"),
-        ("ALIGN", (3, 0), (3, -1), "LEFT"),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
         ("TOPPADDING", (0, 0), (-1, -1), 8),
     ]))
     story.append(kpi_table)
 
-    # Top stores
     story.append(Paragraph("TOP 5 STORES", section))
     rows = [["Rank", "Store", "City", "Net ₹"]]
     for i, s in enumerate(data["top_stores"], 1):
@@ -1306,7 +1309,6 @@ async def executive_summary_pdf(period_days: int = 30, user: dict = Depends(get_
     ]))
     story.append(t)
 
-    # Top cities
     story.append(Paragraph("TOP 5 CITIES", section))
     rows = [["Rank", "City", "Net ₹"]]
     for i, c in enumerate(data["top_cities"], 1):
@@ -1334,7 +1336,6 @@ async def executive_summary_pdf(period_days: int = 30, user: dict = Depends(get_
 
     doc.build(story)
     buf.seek(0)
-    fname = f"KAZO_Executive_Summary_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.pdf"
-    return StreamingResponse(buf, media_type="application/pdf",
-                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    return buf
+
 

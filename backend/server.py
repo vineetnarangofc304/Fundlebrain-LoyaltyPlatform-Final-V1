@@ -151,8 +151,30 @@ async def startup():
         await loyalty_config_col.insert_one(doc)
         logger.info("Seeded loyalty config")
 
+    # Seed campaign_metrics (idempotent: derives per-channel funnel rows
+    # from existing campaign aggregates so Campaign ROI v2 funnel populates)
+    try:
+        from seed_campaign_metrics import seed_campaign_metrics
+        res = await seed_campaign_metrics()
+        if res["rows_inserted"]:
+            logger.info(f"Seeded campaign_metrics: {res}")
+    except Exception as e:
+        logger.warning(f"Could not seed campaign_metrics: {e}")
+
+    # Start weekly executive-digest scheduler (Mon 09:00 IST)
+    try:
+        from scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        logger.warning(f"Could not start digest scheduler: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown():
+    try:
+        from scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
     from database import client
     client.close()

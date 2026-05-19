@@ -1,13 +1,56 @@
 """Report builder + audit logs + transactions."""
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import base64
 import csv
 import io
 from fastapi import APIRouter, Depends, Response, HTTPException, Query
-from database import transactions_col, audit_logs_col, customers_col, stores_col
+from fastapi.responses import StreamingResponse
+from database import transactions_col, audit_logs_col, customers_col, stores_col, db
 from auth import get_current_user
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+digest_reports_col = db["digest_reports"]
+
+
+# ---------------- Scheduled executive digest ----------------
+@router.get("/digests")
+async def list_digests(limit: int = 30, user: dict = Depends(get_current_user)):
+    rows = await digest_reports_col.find(
+        {}, {"_id": 0, "pdf_base64": 0}
+    ).sort("generated_at", -1).limit(min(limit, 60)).to_list(60)
+    return {"rows": rows, "total": len(rows)}
+
+
+@router.get("/digests/latest")
+async def latest_digest(user: dict = Depends(get_current_user)):
+    d = await digest_reports_col.find_one({}, {"_id": 0, "pdf_base64": 0},
+                                            sort=[("generated_at", -1)])
+    if not d:
+        raise HTTPException(404, "No digest generated yet — first run will be Monday 09:00 IST or trigger via /reports/digests/run-now")
+    return d
+
+
+@router.get("/digests/{digest_id}/download")
+async def download_digest(digest_id: str, user: dict = Depends(get_current_user)):
+    d = await digest_reports_col.find_one({"id": digest_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Digest not found")
+    pdf_bytes = base64.b64decode(d["pdf_base64"])
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{d["filename"]}"'},
+    )
+
+
+@router.post("/digests/run-now")
+async def run_digest_now(period_days: int = 7, user: dict = Depends(get_current_user)):
+    if user["role"] not in {"super_admin", "brand_admin"}:
+        raise HTTPException(403, "Only brand_admin / super_admin can trigger digest")
+    from scheduler import _build_and_store_digest
+    res = await _build_and_store_digest(period_days=period_days,
+                                          triggered_by=f"manual:{user['email']}")
+    return res
 
 
 @router.get("/transactions")

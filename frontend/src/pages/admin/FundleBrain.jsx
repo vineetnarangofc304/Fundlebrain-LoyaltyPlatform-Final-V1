@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { PageHeader } from "./_shared";
-import { Brain, Send, Loader2, Sparkles, Trash2 } from "lucide-react";
+import { Brain, Send, Loader2, Sparkles, Trash2, Upload, Wrench } from "lucide-react";
 import { toast } from "sonner";
 
 const MODELS = [
@@ -18,6 +18,8 @@ export default function FundleBrain() {
   const [loading, setLoading] = useState(false);
   const [model, setModel] = useState("gpt-5.2");
   const [suggested, setSuggested] = useState([]);
+  const [csvBusy, setCsvBusy] = useState(false);
+  const fileRef = useRef(null);
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -54,7 +56,11 @@ export default function FundleBrain() {
     setInput("");
     try {
       const r = await api.post("/ai/chat", { session_id: sessionId, message: msg, model });
-      setMessages((m) => [...m, { role: "assistant", content: r.data.reply, data: r.data.data_used, timestamp: new Date().toISOString() }]);
+      setMessages((m) => [...m, {
+        role: "assistant", content: r.data.reply,
+        tool_trace: r.data.tool_trace || [],
+        timestamp: new Date().toISOString(),
+      }]);
       if (!sessionId) {
         setSessionId(r.data.session_id);
         const sr = await api.get("/ai/sessions");
@@ -68,11 +74,43 @@ export default function FundleBrain() {
     }
   };
 
+  const handleCsvUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";  // reset
+    const q = window.prompt(`Question for CSV "${file.name}":`, "Summarise key insights and recommend actions.");
+    if (!q) return;
+    setCsvBusy(true);
+    setMessages((m) => [...m, { role: "user", content: `[CSV: ${file.name}] ${q}`, timestamp: new Date().toISOString() }]);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("question", q);
+      fd.append("model", model);
+      if (sessionId) fd.append("session_id", sessionId);
+      const r = await api.post("/ai/chat/upload-csv", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setMessages((m) => [...m, {
+        role: "assistant", content: r.data.reply,
+        csv_meta: r.data.csv_meta,
+        timestamp: new Date().toISOString(),
+      }]);
+      if (!sessionId) {
+        setSessionId(r.data.session_id);
+        const sr = await api.get("/ai/sessions");
+        setSessions(sr.data);
+      }
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "CSV upload failed");
+    } finally {
+      setCsvBusy(false);
+    }
+  };
+
   return (
     <div data-testid="fundle-brain-page">
       <PageHeader
         title="Fundle Brain"
-        subtitle="AI ANALYTICS · QUERIES REAL DATA"
+        subtitle="AI ANALYTICS · TRUE MONGODB FUNCTION-CALLING · CSV NARRATION"
         actions={
           <>
             <select className="k-input !w-auto !py-1.5" value={model} onChange={(e) => setModel(e.target.value)} data-testid="model-selector">
@@ -104,7 +142,7 @@ export default function FundleBrain() {
               <div className="max-w-2xl mx-auto pt-12 fade-up">
                 <Brain className="w-12 h-12 kazo-text-burgundy mb-4" />
                 <h2 className="editorial-headline text-4xl mb-2">Fundle Brain</h2>
-                <p className="text-neutral-600 mb-8 max-w-md">Ask anything about your loyalty, customers, sales, or campaigns. I query your live Kazo database — no hallucinations.</p>
+                <p className="text-neutral-600 mb-8 max-w-md">Ask anything about your loyalty, customers, sales, or campaigns. I call <b>live MongoDB functions</b> to answer — no hallucinations. You can also upload a CSV and I will narrate it.</p>
                 <div className="text-xs uppercase tracking-widest text-neutral-500 mb-3">SUGGESTED QUESTIONS</div>
                 <div className="grid gap-2">
                   {suggested.map((s, i) => (
@@ -120,18 +158,36 @@ export default function FundleBrain() {
                 <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} fade-up`}>
                   <div className={`max-w-2xl ${m.role === "user" ? "kazo-bg-black text-white" : "bg-white border border-black/10"} p-4 leading-relaxed text-sm whitespace-pre-wrap`}>
                     {m.role === "assistant" && <div className="text-[10px] uppercase tracking-widest kazo-text-champagne mb-2 flex items-center gap-1"><Brain className="w-3 h-3" /> FUNDLE BRAIN</div>}
+                    {m.tool_trace && m.tool_trace.length > 0 && (
+                      <div className="mb-2 -mt-1 flex flex-wrap gap-1.5" data-testid={`tool-trace-${i}`}>
+                        {m.tool_trace.map((t, j) => (
+                          <span key={j} className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono bg-indigo-50 border border-indigo-200 text-indigo-800">
+                            <Wrench className="w-2.5 h-2.5" /> {t.tool}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {m.csv_meta && (
+                      <div className="mb-2 text-[10px] font-mono text-neutral-500">
+                        CSV · {m.csv_meta.filename} · {m.csv_meta.rows} rows · cols: {m.csv_meta.columns?.join(", ")}
+                      </div>
+                    )}
                     {m.content}
                   </div>
                 </div>
               ))}
-              {loading && (
-                <div className="flex justify-start"><div className="bg-white border border-black/10 p-4 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Analysing your data…</div></div>
+              {(loading || csvBusy) && (
+                <div className="flex justify-start"><div className="bg-white border border-black/10 p-4 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> {csvBusy ? "Reading CSV and querying MongoDB…" : "Calling MongoDB tools…"}</div></div>
               )}
               <div ref={bottomRef} />
             </div>
           </div>
           <div className="border-t border-black/10 bg-white p-4">
             <div className="max-w-3xl mx-auto flex gap-2">
+              <input ref={fileRef} type="file" accept=".csv" onChange={handleCsvUpload} className="hidden" data-testid="csv-file-input" />
+              <button onClick={() => fileRef.current?.click()} disabled={loading || csvBusy} className="k-btn k-btn-outline k-btn-sm" title="Upload CSV for narration" data-testid="csv-upload-btn">
+                <Upload className="w-4 h-4" />
+              </button>
               <input className="k-input" placeholder="Ask Fundle Brain anything about your data…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} disabled={loading} data-testid="ai-input" />
               <button className="k-btn kazo-bg-burgundy" onClick={() => send()} disabled={loading || !input.trim()} data-testid="ai-send-btn"><Send className="w-4 h-4" /></button>
             </div>

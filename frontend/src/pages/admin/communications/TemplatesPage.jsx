@@ -106,7 +106,7 @@ export default function TemplatesPage() {
             ) : (
               <table className="data-table">
                 <thead>
-                  <tr><th>Name</th><th>Event Trigger</th><th>Status</th><th>Last updated</th><th>Body preview</th><th></th></tr>
+                  <tr><th>Name</th><th>Event Trigger</th><th>Status</th>{activeCh !== "sms" && <th>WABA</th>}<th>Last updated</th><th>Body preview</th><th></th></tr>
                 </thead>
                 <tbody>
                   {rows.map((t) => (
@@ -114,6 +114,13 @@ export default function TemplatesPage() {
                       <td className="font-medium">{t.name}</td>
                       <td className="text-xs"><span className="pill pill-neutral">{(EVENTS.find(e=>e.key===t.event_trigger)?.label) || t.event_trigger}</span></td>
                       <td><StatusPill status={t.status} /></td>
+                      {activeCh !== "sms" && (
+                        <td className="text-xs">
+                          {t.waba_approval_status === "approved" && <span className="pill" style={{ background: "#ECFDF5", color: "#047857", border: "1px solid #A7F3D0" }} data-testid={`waba-${t.id}-approved`}>✓ Approved</span>}
+                          {t.waba_approval_status === "rejected" && <span className="pill" style={{ background: "#FEF2F2", color: "#B91C1C", border: "1px solid #FECACA" }}>✕ Rejected</span>}
+                          {(!t.waba_approval_status || t.waba_approval_status === "pending") && <span className="pill" style={{ background: "#FFFBEB", color: "#B45309", border: "1px solid #FDE68A" }}>⧗ Pending</span>}
+                        </td>
+                      )}
                       <td className="text-xs text-neutral-500">{fmtDateTime(t.updated_at)}</td>
                       <td className="text-xs text-neutral-700 max-w-xl truncate">{t.body}</td>
                       <td className="text-right">
@@ -154,8 +161,29 @@ function TemplateEditor({ template, onClose, onSaved }) {
   const [testParams, setTestParams] = useState({});
   const [testSending, setTestSending] = useState(false);
   const [testResult, setTestResult] = useState(null);
+  const [approvalEdit, setApprovalEdit] = useState({ open: false, status: "pending", note: "" });
+  const [approvalSaving, setApprovalSaving] = useState(false);
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const submitApproval = async () => {
+    if (!form.id) { toast.error("Save the template first"); return; }
+    setApprovalSaving(true);
+    try {
+      const r = await api.patch(`/templates/${form.id}/waba-approval`, {
+        waba_approval_status: approvalEdit.status,
+        waba_approval_note: approvalEdit.note,
+        waba_template_id: form.waba_template_id,
+        waba_params_order: form.waba_params_order || [],
+        waba_language: form.waba_language || "en",
+        waba_category: form.waba_category || null,
+      });
+      setForm((f) => ({ ...f, ...r.data }));
+      setApprovalEdit({ open: false, status: r.data.waba_approval_status, note: "" });
+      toast.success("Approval status updated");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Update failed"); }
+    finally { setApprovalSaving(false); }
+  };
 
   const insertVar = (key) => {
     const tag = `{{${key}}}`;
@@ -252,10 +280,44 @@ function TemplateEditor({ template, onClose, onSaved }) {
                 </select>
               </label>
               {form.channel !== "sms" && (
-                <label className="text-xs col-span-2">
-                  <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Karix Approved Template ID (waba/rcs)</div>
-                  <input className="k-input" value={form.waba_template_id || ""} onChange={(e) => update("waba_template_id", e.target.value)} placeholder="e.g. testing_fundle" data-testid="t-waba-id" />
-                </label>
+                <>
+                  <label className="text-xs col-span-2">
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Karix Approved Template ID (waba/rcs)</div>
+                    <input className="k-input" value={form.waba_template_id || ""} onChange={(e) => update("waba_template_id", e.target.value)} placeholder="e.g. testing_fundle" data-testid="t-waba-id" />
+                  </label>
+                  <label className="text-xs">
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">WABA Language</div>
+                    <input className="k-input" value={form.waba_language || "en"} onChange={(e) => update("waba_language", e.target.value)} placeholder="en | en_US" data-testid="t-waba-lang" />
+                  </label>
+                  <label className="text-xs">
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">WABA Category</div>
+                    <select className="k-input" value={form.waba_category || ""} onChange={(e) => update("waba_category", e.target.value)} data-testid="t-waba-cat">
+                      <option value="">— select —</option>
+                      <option value="MARKETING">MARKETING</option>
+                      <option value="UTILITY">UTILITY</option>
+                      <option value="AUTHENTICATION">AUTHENTICATION</option>
+                    </select>
+                  </label>
+                  <label className="text-xs col-span-2">
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">WABA Param Order (positional, comma-separated keys)</div>
+                    <input className="k-input font-mono" value={(form.waba_params_order || []).join(", ")} onChange={(e) => update("waba_params_order", e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} placeholder="name, coupon_code, valid_to" data-testid="t-waba-order" />
+                    <div className="text-[10px] text-neutral-400 mt-1">These map to Karix positional params {"{{1}}, {{2}}, ..."} of the approved WABA template body.</div>
+                  </label>
+                  <div className="col-span-2 p-3 border border-amber-200 bg-amber-50/40 flex items-center justify-between" data-testid="waba-approval-strip">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-amber-700">WABA Approval Status</div>
+                      <div className="text-sm font-medium mt-0.5">
+                        {form.waba_approval_status === "approved" && <span className="text-emerald-700">✓ Approved</span>}
+                        {form.waba_approval_status === "rejected" && <span className="text-rose-700">✕ Rejected</span>}
+                        {(!form.waba_approval_status || form.waba_approval_status === "pending") && <span className="text-amber-700">⧗ Pending Meta approval</span>}
+                        {form.waba_approval_by && <span className="text-[10px] text-neutral-500 ml-2">by {form.waba_approval_by}</span>}
+                      </div>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button onClick={() => setApprovalEdit({ open: true, status: form.waba_approval_status || "pending" })} className="k-btn k-btn-outline k-btn-sm" data-testid="waba-set-approval">Set status</button>
+                    </div>
+                  </div>
+                </>
               )}
               {form.channel === "sms" && (
                 <>
@@ -352,6 +414,41 @@ function TemplateEditor({ template, onClose, onSaved }) {
             {saving ? "Saving…" : isNew ? "Create template" : "Save changes"}
           </button>
         </div>
+
+        {/* WABA approval status modal */}
+        {approvalEdit.open && (
+          <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4" onClick={() => setApprovalEdit({ ...approvalEdit, open: false })}>
+            <div className="bg-white w-full max-w-md" onClick={(e) => e.stopPropagation()} data-testid="approval-modal">
+              <div className="p-5 border-b border-black/10">
+                <div className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-0.5">META / KARIX WABA</div>
+                <h3 className="font-display text-xl">Set approval status</h3>
+              </div>
+              <div className="p-5 space-y-3">
+                <label className="text-xs block">
+                  <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Status</div>
+                  <select className="k-input" value={approvalEdit.status} onChange={(e) => setApprovalEdit({ ...approvalEdit, status: e.target.value })} data-testid="approval-status-select">
+                    <option value="pending">Pending review</option>
+                    <option value="approved">Approved by Meta</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                </label>
+                <label className="text-xs block">
+                  <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Note (optional)</div>
+                  <textarea rows={3} className="k-input" value={approvalEdit.note} onChange={(e) => setApprovalEdit({ ...approvalEdit, note: e.target.value })} placeholder="e.g. Approved by Meta on 2026-05-19, ticket #1234" />
+                </label>
+                <div className="text-[11px] text-neutral-500 leading-relaxed">
+                  Bulk send is blocked unless WhatsApp / RCS templates are <b>approved</b>. Status here mirrors your Meta Business Manager / Karix portal state.
+                </div>
+              </div>
+              <div className="p-5 border-t border-black/10 flex justify-end gap-2">
+                <button onClick={() => setApprovalEdit({ ...approvalEdit, open: false })} className="k-btn k-btn-ghost">Cancel</button>
+                <button onClick={submitApproval} disabled={approvalSaving} className="k-btn kazo-bg-burgundy" data-testid="approval-save-btn">
+                  {approvalSaving ? "Saving…" : "Save status"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

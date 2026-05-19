@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 8 full-stack testing of (A) AI Engine v2 with OpenAI function-calling + streaming SSE + CSV upload, (B) Campaign ROI v2 seed (campaign_metrics), (C) Bulk-send background tasks, (D) WABA approval guard + workflow, (E) Scheduled exec digest + APIs. Backend: 14/14 pytest tests PASS (16.02s). All 5 new feature areas verified end-to-end including tools_used population, SSE event:token/event:done emission (event:tool also seen), csv_meta.rows=3, dry_run audience_size_total + would_send_via='sms' + sample<=3, background job lifecycle queued→completed with processed=0 for nonexistent_tier audience, WABA 400 guard then PATCH-approval flow, PDF generation (KAZO_Executive_Digest_20260519_1028.pdf, ~3.2KB, magic %PDF verified). Regression on 12 existing endpoints: all 200. Frontend: Sidebar shows both new entries ('Bulk Send Jobs' under COMMUNICATIONS, 'Exec Digests' under REPORTS). Bulk Send Jobs page renders, table shows 3 completed jobs with green Completed status pills + channel/audience/processed/sent/failed columns + 'Background dispatch · LIVE' header + auto-refresh notice. Executive Digests page renders 3 KPI tiles (Schedule Mon 09:00 IST, Runs 5→6, Latest 19 May 2026 10:27am, 3.2KB), 'Generate now' button works (new row added, toast 'Generated KAZO_Executive_Digest_20260519_1028.pdf'), 6 Download PDF buttons present. WhatsApp Templates tab works — created TEST_WA_it8 status=active, table row shows 'Pending' amber WABA pill (correct guard indicator). Fundle Brain page renders with input + CSV upload icon + suggested-questions panel.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Login (carried-over)", "issues": ["Persistent hydration warning '<span> cannot be a child of <option>' from CommandCenter — same as iteration 6/7, caused by Visual Editor wrapping option children; not regression."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration8_test.py",
+    "/app/test_reports/pytest/iteration8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "ai_routes.py multi-turn _run_tool_loop correctly returns tools_used array surfaced to UI for chip rendering — confirmed via /api/ai/chat with 'top 3 stores' prompt (tools_used contains store_performance).",
+    "ai_routes.py SSE chat_stream emits event:tool / event:token / event:done in correct order — confirmed via streaming consumer test reading text/event-stream chunks.",
+    "ai_routes.py chat_upload_csv accepts multipart/form-data with `file` + `question` fields; returns csv_meta.rows=3 for a 3-row CSV — works as spec.",
+    "communications_routes.py refactor to FastAPI BackgroundTasks resolves the iteration 6 P2 finding (bulk-send blocking). Job lifecycle: POST returns immediately with {job_id, status:'queued'}, background worker updates to 'completed' within <10s for empty audience — verified.",
+    "communications_routes.py WABA guard correctly returns 400 with message referencing 'waba_template_id' when an active whatsapp template lacks approval — proper defense before any Karix dispatch.",
+    "scheduler.py _build_and_store_digest stores PDF as base64 in MongoDB but the list/latest endpoints correctly exclude pdf_base64 from responses — verified explicit absence in iter8 test.",
+    "reports_routes.py digest download returns Content-Type application/pdf with %PDF magic header — straightforward and correct.",
+    "seed_campaign_metrics.py seed produced non-zero sent/delivered/clicked/converted across all 11 campaigns; leaderboard returns 10 rows (≥9 spec) — campaign ROI funnel renders real numbers."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration8_test.py (created)",
+    "/app/test_reports/pytest/iteration8_results.xml (generated)"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% on all UI surfaces inspected (sidebar entries, Bulk Send Jobs page render+rows+pills, Exec Digests page render+generate+download buttons, WhatsApp template create + WABA pending pill, Fundle Brain page render)"},
+  "test_credentials": "admin@kazo.com / Kazo@2026 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Tests create TEST_-prefixed templates (TEST_it8_bulk_sms reused, TEST_it8_waba deleted in-finally, TEST_WA_it8 created via UI then deleted via curl cleanup). Bulk job rows from background-job lifecycle test remain (audience=nonexistent_tier → 0 SMS sent, no real Karix dispatch). 1 exec-digest stored in MongoDB during run-now test (~3.2KB).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 8 all 5 features verified: AI v2 function-calling (tools_used populated), SSE streaming (event:token + event:done observed; event:tool seen for store query), CSV upload (csv_meta.rows correct), campaign_metrics seed (funnel non-zero, leaderboard >=9), bulk-send refactored to BackgroundTasks (job_id + queued→completed lifecycle), WABA approval guard (400 without waba_template_id, then PATCH /api/templates/{id}/waba-approval works), exec digest run-now produces real PDF with %PDF magic and Content-Type application/pdf. To re-run: `pytest /app/backend/tests/iteration8_test.py -v`. Frontend testids confirmed: tab-whatsapp, new-template-btn, t-name, t-body, t-status, save-template-btn. AI page input uses placeholder 'Ask Fundle Brain anything about your data...' — selector via [data-testid] preferred over generic textarea matcher. UI WABA Set-status modal opens by clicking the table row (not a top-level button) — keep in mind for future UI tests. The hydration warning <span> cannot be a child of <option> remains carried-over from CommandCenter (iter6/7).",
+  "rca of the issue": "No P0/P1/P2 issues found. All iteration 8 features ship as specified."
+}

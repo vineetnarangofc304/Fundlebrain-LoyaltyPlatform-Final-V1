@@ -42,6 +42,7 @@ const SECTIONS = [
     label: "COMMUNICATIONS",
     items: [
       { to: "/admin/communications/templates", icon: MessageSquare, label: "Templates", testid: "nav-comm-templates" },
+      { to: "/admin/communications/bulk-jobs", icon: Send, label: "Bulk Send Jobs", testid: "nav-comm-jobs" },
       { to: "/admin/communications/settings", icon: Settings, label: "Provider Settings", testid: "nav-comm-settings" },
     ],
   },
@@ -70,6 +71,7 @@ const SECTIONS = [
     label: "REPORTS",
     items: [
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },
+      { to: "/admin/reports/digests", icon: FileText, label: "Exec Digests", testid: "nav-reports-digests" },
       { to: "/admin/formula-catalog", icon: FileText, label: "Formula Catalog", testid: "nav-formula" },
     ],
   },

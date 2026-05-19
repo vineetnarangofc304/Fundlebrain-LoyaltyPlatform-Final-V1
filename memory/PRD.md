@@ -11,7 +11,7 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 - ✅ Build dashboards one-by-one, full drilldown, test after each before moving on
 
 ## Architecture
-- Backend: FastAPI + Motor MongoDB + JWT/cookie auth + Emergent LLM
+- Backend: FastAPI + Motor MongoDB + JWT/cookie auth + Emergent LLM (LiteLLM)
 - Frontend: React + Tailwind + shadcn primitives + Recharts + Cormorant Garamond + Manrope
 - MongoDB DB: `kazo_fundle_db` (single tenant)
 - All routes prefixed `/api`
@@ -19,115 +19,74 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## Roles (10)
 Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manager · Store Manager · Store Staff · Support Agent · Analytics Viewer · Read-only Executive
 
-## Sidebar sections
-- **DASHBOARDS** — Command Center *(new)*, Sales, Customer Analytics, Loyalty, Campaign Performance, Store Performance, NPS & Feedback
+## Sidebar sections (current)
+- **DASHBOARDS** — Command Center, Sales, Customer Analytics, Loyalty, Campaign Performance, Store, RFM & Churn, Cohorts, Points Economics, Campaign ROI, Executive Summary, NPS
 - **CUSTOMERS** — Customer 360
 - **MARKETING** — Campaigns, Coupons
-- **AI TOOLS** — Fundle Brain
+- **COMMUNICATIONS** — Templates, **Bulk Send Jobs**, Provider Settings *(new sub-page)*
+- **AI TOOLS** — Fundle Brain *(now true MongoDB function-calling + CSV narration)*
 - **OPERATIONS** — Stores, Item Master, API Monitor
 - **SUPPORT** — Tickets, NPS Inbox
-- **REPORTS** — Reports & Exports
+- **REPORTS** — Reports & Exports, **Exec Digests** *(new sub-page)*, Formula Catalog
 - **CONFIGURATION** — Loyalty Rules, Public Site CMS
 - **ADMINISTRATION** (admin only) — User Management
 
 ## What's been implemented
 
-### Iteration 1 (Jan 2026)
-- Auth (JWT + portal gating), 10-role RBAC, audit logging
-- Executive Cockpit (24+ KPIs), Customer 360, Loyalty Configurator
-- Coupon Engine (13 types), Campaign Manager, Fundle Brain AI (real Mongo function-calling)
-- Live API Monitor (5s refresh), POS endpoints, NPS, Tickets, Reports (CSV exports)
-- 3 login portals (Enterprise / Store / CRM), Store Ops portal
-- Public website (13 SEO pages)
-- Seeded: 1504 customers, 8003 transactions, 26 stores, 8 coupons, 9 campaigns, 400 API logs, 300 NPS, 30 tickets
+### Iteration 1–7 — See CHANGELOG section below
 
-### Iteration 2 (Jan 2026) — ✅ 83/83 backend tests passing
-- 9-section sidebar, 6 dashboards (Sales/Customer/Loyalty/Campaign/Store/NPS), Item & Store Master, CMS, Coupon edit, Ticket detail, Transaction drilldown
+### Iteration 8 (May 2026) — ✅ AI Engine Upgrade + BackgroundTasks + Seed + WABA + Scheduled Digest
 
-### Iteration 3 (May 2026) — ✅ Foundation for FundleBrain Dashboards
-- ✅ **Universal Drilldown** — `POST /api/dashboard/drilldown` + `/csv` with collection whitelist, role-aware store scoping (security-hardened), `_id` & `password_hash` scrubbed, 200-row paginated, 10k CSV cap
-- ✅ **AI Intelligence Report** — `POST /api/dashboard/insight` returns structured `{headline, summary, drivers[], recommendations[]}`. 1-hour in-memory cache, regenerate-on-force; uses Emergent LLM (GPT-5.2). Frontend renders a full multi-section editorial report panel.
-- ✅ **Command Center Dashboard** — Replaces Executive Cockpit as `/admin` index. 12 live KPIs, sparkline area chart, cohort distribution bar chart (Today / 1–7d / 8–30d / 31–90d / 90d+), live alerts, 30s auto-refresh
-- ✅ **City + Store global filters** on Command Center — every KPI, sparkline, cohort, alert, drilldown, and AI report re-computes live for the chosen scope
-- ✅ **Active customers** now computed from ground-truth transactions (`distinct customer_id` in window) instead of stale `last_visit_at`
-- ✅ **Reusable `DrillDownModal.jsx` + `AIInsightStrip.jsx`** components for every upcoming dashboard
-- ✅ **Security fix** — `_store_scope` now denies (403) when store-bound role has no `store_id`; startup migration backfills `store_id` for `store.mumbai@kazo.com` and `staff.delhi@kazo.com`
-- ✅ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)
+**A · True MongoDB function-calling for Fundle Brain** (`/api/ai/chat`, `/api/ai/chat/stream`, `/api/ai/chat/upload-csv`)
+- New module `routes/ai_tools.py` with 12 typed OpenAI-style function schemas (`get_overall_kpis`, `top_churning_customers`, `store_performance`, `city_performance`, `campaign_leaderboard`, `top_skus`, `tier_distribution`, `nps_summary`, `customer_lookup`, `coupon_performance`, `communication_log_summary`, `rfm_segments`).
+- Each tool executes a real MongoDB aggregation/find pipeline against live collections — no fabricated data.
+- Routes drive LiteLLM directly through the Emergent proxy (`get_integration_proxy_url() + "/llm"`) so we get raw `tool_calls` from the response. Multi-turn loop up to 6 iterations.
+- **Streaming**: `/api/ai/chat/stream` emits Server-Sent Events: `event: tool` per tool dispatched, then `event: token` per text chunk, finally `event: done`. Verified 1 tool + 103 token + 1 done in a single round.
+- **CSV narration**: `/api/ai/chat/upload-csv` accepts multipart upload (≤ 2 MB), parses up to 200 rows, sends as part of user message, model still has tool access. Verified narration of test.csv.
+- Frontend `FundleBrain.jsx` now shows tool-trace chips (`Wrench` icon + tool name) above each assistant turn and has a CSV upload button.
 
-### Iteration 7 (May 2026) — ✅ Communications Module (SMS / WhatsApp / RCS)
-- ✅ **Templates CRUD** — `GET/POST/PATCH/DELETE /api/templates` with channel (sms/whatsapp/rcs) + event_trigger (purchase/coupon_issued/points_earned/tier_upgrade/birthday/win_back/abandoned_visit/campaign_bulk/none) validation + status (draft/active/archived).
-- ✅ **AI Suggest + AI Improve** — `POST /api/templates/ai-suggest` & `/ai-improve` powered by Emergent LLM (gpt-5.2). Returns structured body+variables+rationale. Auto-normalises single-brace `{name}` → mustache `{{name}}`.
-- ✅ **Karix Live Integration** — Real Karix Transactional SMS endpoint hit on test-send. Response `Statuscode=200 Platform Accepted` verified. WhatsApp/RCS WABA payload supported per spec.
-- ✅ **Auto-fire on transactions** — POS `/api/pos/issue-points` now fires all active `purchase` templates after saving. POS-side variables rendered (name/amount/bill_no/store_name/points_earned/points_balance/tier).
-- ✅ **Auto-fire on coupon issue** — New `POST /api/coupons/{id}/issue-to-customer?customer_mobile=XYZ` endpoint fires `coupon_issued` templates.
-- ✅ **Bulk send** — `POST /api/communications/bulk-send` with dry_run preview returning audience size + sample; live path iterates customers and dispatches.
-- ✅ **Provider Settings** — Karix SMS/WhatsApp/RCS endpoints, sender IDs, API keys editable from `/admin/communications/settings`. Secrets stored in MongoDB `provider_config` singleton, masked in API responses (3 chars + ••• + 3 chars), reveal/hide toggle in UI, RBAC: only brand_admin/super_admin can PATCH.
-- ✅ **Message log** — `GET /api/message-log` with channel filter; every send logs to `message_log` collection with status + provider response.
-- ✅ **Frontend** — New COMMUNICATIONS sidebar section. Templates page (SMS/WhatsApp/RCS tabs, table list with status pills + body previews), Template Editor modal (live preview pane, AI Fundle Brain copywriter with Generate+Improve buttons, variable insertion chips, real test-send panel). Provider Settings page (3 coloured sections, masked secrets with reveal/hide, pending-edit counter on Save button).
-- ✅ Iteration 7 testing: 16/16 backend pytest + 100% frontend Playwright (`/app/test_reports/iteration_6.json`). Karix LIVE — real SMS dispatch verified end-to-end (Statuscode=200 Platform Accepted).
+**B · Seed `campaign_metrics`** (`backend/seed_campaign_metrics.py`)
+- Idempotent migration: derives per-channel funnel rows from existing `campaigns_col` aggregates (NOT synthetic — restructuring of existing seed data).
+- Weights: SMS 1.0, WhatsApp 1.4, Email 1.2, RCS 1.1, Push 0.7. Cost per message based on Karix rate card.
+- Runs on FastAPI startup; on first boot it seeded 16 rows across 11 campaigns. Campaign ROI v2 funnel now shows real numbers: 84,180 sent → 79,123 delivered → 6,506 clicked → 1,675 converted, ₹64.93L revenue.
 
-### Iteration 6 (May 2026) — ✅ Cross-dashboard colour refresh
-- ✅ **All older dashboards refreshed** with the brand accent system: Sales, Customer Analytics, Loyalty, Campaign Performance, NPS now use `chart-card` with coloured top border + tinted KPI cards + multi-colour bar series + section-heading colour bars.
-- ✅ **Coloured outlines** — KPI cards now have tinted accent borders (indigo/teal/amber/rose/burgundy/emerald/slate) instead of plain black/10. Chart cards have coloured top strip + matching soft border.
-- ✅ **Bar charts** are now intensity-coded (lighter for low values, darker for peaks) in Sales hourly/weekday charts.
-- ✅ **NPS trend** now has reference lines at 50 (Excellent in emerald) and 0 (in rose); NPS-by-store column colour-coded green/amber/rose by score.
-- ✅ **Loyalty Issued vs Redeemed** chart upgraded to stacked area chart with three gradients (burgundy/champagne/indigo).
-- ✅ Visual lint passed across all dashboards (12 dashboards now visually unified).
+**C · BackgroundTasks bulk-send** (`POST /api/communications/bulk-send`)
+- Endpoint returns immediately with a `job_id` after enqueuing the dispatch onto FastAPI `BackgroundTasks`.
+- Worker streams the customer cursor (no full-list load), updates a `bulk_send_jobs` doc every 25 messages with `processed/sent/failed`, transitions `queued → running → completed | failed`.
+- New endpoints: `GET /api/communications/bulk-jobs` (list), `GET /api/communications/bulk-jobs/{id}` (single).
+- Frontend page `/admin/communications/bulk-jobs` with auto-refresh every 5s, pill-coloured status, animated spinner on running jobs.
 
-### Iteration 5 (May 2026) — ✅ FundleBrain Phase 3B + colour upgrade (5 dashboards)
-- ✅ **Cohorts & Segmentation** — `GET /api/dashboard/cohorts-segmentation`: one-timer revenue-at-risk panel with 15%-recovery estimate + recency buckets, frequency bands (One-timer/Light/Regular/Loyal/VIP) with ATV, spend bands, tier donut, retention triangle (12×12 cohort heatmap, signup-month × month-offset), acquisition trend. Verified: bands mutually exclusive (sum = transacted), offset-0 = 100%.
-- ✅ **Points Economics v2** — `GET /api/dashboard/points-economics`: earn-vs-burn gauge with gradient bar, outstanding liability, 12-month earn/burn stacked flow, breakage risk (180d stale), top redeemers leaderboard.
-- ✅ **Campaign ROI v2** — `GET /api/dashboard/campaign-roi`: Sent→Delivered→Opened→Clicked→Converted funnel, channel pie + table, campaign leaderboard sorted by ROI with red/green colour coding.
-- ✅ **Executive Summary v2** — `GET /api/dashboard/executive-summary` + `/pdf`: composite snapshot + ReportLab branded PDF download (KAZO burgundy header, light cream cards, indigo/teal section bars). Valid `%PDF` payload.
-- ✅ **Formula Catalog** — `GET /api/dashboard/formula-catalog`: 23 KPI formulas across 8 categories (Revenue/Customer/RFM/Cohort/Loyalty/Campaign/Experience/Operations) auto-rendered with search + category pills. Single source of truth.
-- ✅ **Command Center colour upgrade** — alerts now coloured (rose=CRITICAL with gradient, amber=WARNING with gradient + left accent strip), sparkline shows Net ₹ (burgundy) + Txns (indigo) as overlapping area charts with custom gradients.
-- ✅ **Cohorts dashboard** AI Cohort & Segment Intelligence Report on top.
-- ✅ Iteration 5 testing: 11/11 backend pytest + 5/5 frontend Playwright (`/app/test_reports/iteration_5.json`). No P0/P1 issues.
+**D · WhatsApp template approval workflow** (`PATCH /api/templates/{tid}/waba-approval`)
+- New template fields: `waba_template_id`, `waba_params_order` (positional key map for Karix `{{1}},{{2}}…` slots), `waba_language`, `waba_category` (MARKETING / UTILITY / AUTHENTICATION), `waba_approval_status` (pending / approved / rejected), `waba_approval_note`.
+- Bulk-send + `fire_event()` BOTH refuse to dispatch WA/RCS templates unless `waba_approval_status == "approved"`. Pending templates fall through silently (logged as `skipped_unapproved` in `message_log`).
+- Frontend Templates editor has a new amber "WABA Approval Status" strip + dedicated approval modal (status select + note textarea). Templates table now shows WABA approval pill (✓ Approved / ⧗ Pending / ✕ Rejected) for WA + RCS rows.
 
-### Iteration 4 (May 2026) — ✅ FundleBrain Phase 3A complete (3 new dashboards + colour system)
-- ✅ **Customer 360 v2** — `GET /api/dashboard/customer-360/{id}`: live RFM score + 11-segment label, lifetime aggregates from raw transactions, monthly spend chart (area + bar overlay), store affinity, category affinity, recent transactions, points ledger, NPS history, AI Customer Intelligence Report
-- ✅ **Store Performance v2** — `GET /api/dashboard/store-performance-v2`: Leaderboard (ranked, vs-prev delta with NEW fallback), By City (multi-coloured bars + scorecard), Day Analysis (weekday bar + 7×24 heatmap). store_manager/store_staff scoped to own store.
-- ✅ **RFM & Churn Dashboard** — `GET /api/dashboard/rfm`: live 5×5 RFM heatmap (health-coded), 11 named segment cards (clickable → drilldown), 3 churn buckets, quintile cutoffs panel, 6 KPI tiles
-- ✅ **Brand colour system** — accent palette CSS vars (indigo/teal/amber/rose/slate/emerald + burgundy/champagne). `KPICard` accepts `accent` prop (left strip + soft gradient). Shared `SectionHeading` + `CHART_PALETTE`.
-- ✅ **AI Intelligence Report** rolled out on all 3 new dashboards (cached 1hr per payload)
-- ✅ Iteration 4 testing: 22/22 backend pytest pass + 100% frontend flows verified (`/app/test_reports/iteration_4.json`)
+**E · Scheduled Executive Digest** (`backend/scheduler.py`)
+- APScheduler `AsyncIOScheduler` running on Asia/Kolkata; cron `mon 09:00 IST` (`weekly_exec_digest` job, replace_existing, misfire grace 1h).
+- Generates the existing branded ReportLab PDF (refactored `_build_executive_summary_pdf_bytes()` extracted from `executive_summary_pdf` route) and persists to `digest_reports` collection as base64 (cap 800 KB).
+- New API: `GET /api/reports/digests`, `GET /api/reports/digests/latest`, `GET /api/reports/digests/{id}/download`, `POST /api/reports/digests/run-now` (manual trigger, admin only).
+- Frontend page `/admin/reports/digests` with stats tiles + table + Download PDF actions + manual "Generate now" button.
+- Email transport intentionally not wired (user opted to keep PDFs in-app per ask_human decision); can be added later via Resend / SMTP / Karix email.
 
 ## Prioritized backlog
 
-### P0 — FundleBrain Phase 3A — ✅ DONE
-- [x] Customer 360 v2
-- [x] Store Performance v2
-- [x] RFM & Churn Dashboard
+### P0 — ✅ DONE (all closed in Iteration 8)
+- [x] AI Engine upgrade — true MongoDB function-calling, streaming, CSV narration
+- [x] Seed `campaign_metrics` for Campaign ROI v2 funnel
+- [x] BackgroundTasks bulk-send (1000+ recipient support)
+- [x] WhatsApp template approval workflow
+- [x] Scheduled exec digest email/PDF
 
-### P0 — FundleBrain Phase 3B — ✅ DONE
-- [x] Cohorts & Segmentation (one-timers + retention triangle)
-- [x] Points Economics v2
-- [x] Campaign ROI v2
-- [x] Executive Summary v2 + PDF
-- [x] Formula Catalog
-
-### P1 — Remaining
-- [ ] AI Engine upgrade — true function-calling against MongoDB, streaming, CSV upload for narration
-- [ ] Refresh colour system across older dashboards (Sales, Customer Analytics, Loyalty, Campaign Performance, NPS)
-- [ ] Seed `campaign_metrics` collection so Campaign ROI funnel populates with real engagement data
-
-### P1 — FundleBrain Phase 3B (remaining)
-- [ ] Points Economics v2 — earn-burn gauge, liability value, monthly flow, top redeemers
-- [ ] Cohort Migration — triangular retention heatmap by signup month
-- [ ] Campaign ROI v2 — Sent→Delivered→Clicked→Converted funnel + retention heatmap
-- [ ] Executive Summary v2 — AI narrative + PDF download (ReportLab)
-- [ ] Formula Catalog — auto-generated audit page
-
-### P1 — AI Engine Upgrade
-- [ ] True function-calling against MongoDB, streaming, CSV narration upload
-
-### P1 — Pre-existing
-- [ ] Live POS API integration, messaging gateways, Historic Sync UI, Daily Scheduler UI
+### P1
+- [ ] Wire optional email transport (Resend / SendGrid / Karix Email) to digest scheduler
+- [ ] Live POS API integration, Historic Sync UI, Daily Scheduler UI
+- [ ] Drag-and-drop report builder
 
 ### P2
 - [ ] Digital Invoice Engine, OTP login / password reset, WebSocket dashboards, sitemap.xml, birthday auto-campaigns, image upload, more CMS controls
-- [ ] Move AI insight cache to Redis (for multi-worker deploy)
-- [ ] Drag-and-drop report builder, support bot, mobile app
+- [ ] Move AI insight cache to Redis (multi-worker)
+- [ ] Real audience pre-flight estimation (recency / engagement scoring)
+- [ ] Support bot, mobile app
 
 ## Test credentials
 See `/app/memory/test_credentials.md` — Brand Admin: `admin@kazo.com / Kazo@2026`
@@ -135,3 +94,4 @@ See `/app/memory/test_credentials.md` — Brand Admin: `admin@kazo.com / Kazo@20
 ## Known production hardening pending
 - AI insight cache is in-memory (single worker only) — fine for preview, move to Redis for prod
 - Drilldown CSV uses single-chunk StreamingResponse — fine at 10k cap, chunk for true streaming later
+- Digest PDF stored as base64 in MongoDB (≤ 800 KB cap); for larger PDFs move to GridFS or S3

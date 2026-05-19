@@ -11,13 +11,16 @@ import re
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, BackgroundTasks
 from pydantic import BaseModel
 
 from database import (
-    templates_col, provider_config_col, message_log_col, customers_col, stores_col,
+    templates_col, provider_config_col, message_log_col, customers_col, stores_col, db,
 )
 from auth import get_current_user
+
+# Bulk-send job state collection
+bulk_jobs_col = db["bulk_send_jobs"]
 from routes.ai_routes import EMERGENT_LLM_KEY, SYSTEM_PROMPT
 
 router = APIRouter(tags=["communications"])
@@ -37,6 +40,11 @@ class TemplateIn(BaseModel):
     sender_id: Optional[str] = None        # for SMS (DLT)
     dlt_entity_id: Optional[str] = None
     waba_template_id: Optional[str] = None  # for WhatsApp
+    waba_params_order: List[str] = []       # ordered list of variable keys for WABA positional params
+    waba_language: Optional[str] = "en"
+    waba_category: Optional[str] = None     # MARKETING | UTILITY | AUTHENTICATION
+    waba_approval_status: str = "pending"   # pending | approved | rejected (set by admin)
+    waba_approval_note: Optional[str] = None
     preview_url: bool = False
     status: str = "draft"
     note: Optional[str] = None
@@ -445,15 +453,57 @@ async def fire_event(event_trigger: str, mobile: str, params: Dict[str, Any]):
                 text = _render(t["body"], params)
                 await send_sms_karix(mobile, text, template_id=t["id"], event_trigger=event_trigger)
             elif t["channel"] in {"whatsapp", "rcs"} and t.get("waba_template_id"):
-                # Convert dict params to ordered list for WABA
-                await send_whatsapp_karix(mobile, t["waba_template_id"], params,
+                # Only fire WABA templates that have been approved
+                if t.get("waba_approval_status") != "approved":
+                    await _log(t["channel"], "skipped_unapproved", mobile, {}, None,
+                                t["id"], event_trigger)
+                    continue
+                wa_params = _waba_positional_params(t, params)
+                await send_whatsapp_karix(mobile, t["waba_template_id"], wa_params,
                                             template_id=t["id"], event_trigger=event_trigger)
         except Exception as e:
             await _log(t["channel"], "fire_exception", mobile, {}, str(e),
                         t["id"], event_trigger)
 
 
-# ---------------- Bulk send (for campaigns) ----------------
+# ---------------- WABA approval workflow ----------------
+WABA_STATUSES = {"pending", "approved", "rejected"}
+
+
+class WABAApprovalIn(BaseModel):
+    waba_approval_status: str
+    waba_template_id: Optional[str] = None
+    waba_params_order: Optional[List[str]] = None
+    waba_language: Optional[str] = None
+    waba_category: Optional[str] = None
+    waba_approval_note: Optional[str] = None
+
+
+@router.patch("/templates/{tid}/waba-approval")
+async def set_waba_approval(tid: str, body: WABAApprovalIn,
+                              user: dict = Depends(get_current_user)):
+    if user["role"] not in {"super_admin", "brand_admin", "marketing_manager"}:
+        raise HTTPException(403, "Only marketing_manager / brand_admin / super_admin can set WABA approval")
+    t = await templates_col.find_one({"id": tid})
+    if not t:
+        raise HTTPException(404, "Template not found")
+    if t.get("channel") not in {"whatsapp", "rcs"}:
+        raise HTTPException(400, "WABA approval only applies to whatsapp / rcs templates")
+    if body.waba_approval_status not in WABA_STATUSES:
+        raise HTTPException(400, f"Status must be one of {sorted(WABA_STATUSES)}")
+    update: Dict[str, Any] = {"waba_approval_status": body.waba_approval_status,
+                              "waba_approval_at": datetime.now(timezone.utc).isoformat(),
+                              "waba_approval_by": user["email"]}
+    for f in ("waba_template_id", "waba_params_order", "waba_language",
+              "waba_category", "waba_approval_note"):
+        v = getattr(body, f, None)
+        if v is not None:
+            update[f] = v
+    await templates_col.update_one({"id": tid}, {"$set": update})
+    return await templates_col.find_one({"id": tid}, {"_id": 0})
+
+
+# ---------------- Bulk send (FastAPI BackgroundTasks) ----------------
 class BulkSendIn(BaseModel):
     template_id: str
     audience: Dict[str, Any] = {}  # MongoDB filter for customers collection
@@ -461,8 +511,83 @@ class BulkSendIn(BaseModel):
     limit: int = 1000
 
 
+def _params_for_customer(c: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": (c.get("name") or "").split(" ")[0] or "there",
+        "tier": c.get("tier", "silver"),
+        "points_balance": c.get("points_balance", 0),
+        "city": c.get("city", ""),
+    }
+
+
+def _waba_positional_params(template: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, str]:
+    """Build positional WABA params {"1": ..., "2": ...} based on waba_params_order."""
+    order = template.get("waba_params_order") or []
+    if not order:
+        # fall back to mapping each declared variable in order
+        order = [v.get("key") for v in (template.get("variables") or []) if v.get("key")]
+    return {str(i + 1): str(params.get(k, "")) for i, k in enumerate(order)}
+
+
+async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dict[str, Any],
+                                limit: int):
+    """Background worker: pulls audience, dispatches messages, updates job state."""
+    started = datetime.now(timezone.utc).isoformat()
+    await bulk_jobs_col.update_one(
+        {"id": job_id},
+        {"$set": {"status": "running", "started_at": started}},
+    )
+    try:
+        t = await templates_col.find_one({"id": template_id}, {"_id": 0})
+        if not t:
+            raise RuntimeError("Template missing")
+        cursor = customers_col.find(audience_filter or {},
+            {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
+              "points_balance": 1, "city": 1}).limit(min(limit, 50000))
+        sent, failed, processed = 0, 0, 0
+        async for c in cursor:
+            processed += 1
+            params = _params_for_customer(c)
+            try:
+                if t["channel"] == "sms":
+                    res = await send_sms_karix(c["mobile"], _render(t["body"], params),
+                                                 template_id=t["id"], event_trigger="campaign_bulk")
+                elif t["channel"] in {"whatsapp", "rcs"} and t.get("waba_template_id"):
+                    res = await send_whatsapp_karix(c["mobile"], t["waba_template_id"],
+                                                     _waba_positional_params(t, params),
+                                                     template_id=t["id"],
+                                                     event_trigger="campaign_bulk")
+                else:
+                    res = {"ok": False, "error": "unsupported"}
+                if res.get("ok"):
+                    sent += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                failed += 1
+                await _log(t["channel"], "bulk_exception", c.get("mobile", ""), {},
+                            str(e), t["id"], "campaign_bulk")
+            # Heartbeat every 25 processed
+            if processed % 25 == 0:
+                await bulk_jobs_col.update_one({"id": job_id},
+                    {"$set": {"processed": processed, "sent": sent, "failed": failed}})
+        await bulk_jobs_col.update_one(
+            {"id": job_id},
+            {"$set": {"status": "completed",
+                       "completed_at": datetime.now(timezone.utc).isoformat(),
+                       "processed": processed, "sent": sent, "failed": failed}},
+        )
+    except Exception as e:
+        await bulk_jobs_col.update_one(
+            {"id": job_id},
+            {"$set": {"status": "failed", "error": str(e),
+                       "completed_at": datetime.now(timezone.utc).isoformat()}},
+        )
+
+
 @router.post("/communications/bulk-send")
-async def bulk_send(body: BulkSendIn, user: dict = Depends(get_current_user)):
+async def bulk_send(body: BulkSendIn, background_tasks: BackgroundTasks,
+                     user: dict = Depends(get_current_user)):
     if user["role"] not in {"super_admin", "brand_admin", "marketing_manager"}:
         raise HTTPException(403, "Forbidden")
     t = await templates_col.find_one({"id": body.template_id}, {"_id": 0})
@@ -470,34 +595,59 @@ async def bulk_send(body: BulkSendIn, user: dict = Depends(get_current_user)):
         raise HTTPException(404, "Template not found")
     if t.get("status") != "active":
         raise HTTPException(400, "Template must be active to bulk send")
+    if t["channel"] in {"whatsapp", "rcs"}:
+        if not t.get("waba_template_id"):
+            raise HTTPException(400, "WhatsApp/RCS template requires a Karix-approved waba_template_id")
+        if t.get("waba_approval_status") != "approved":
+            raise HTTPException(400, "Template WABA approval status must be 'approved' before bulk send")
 
-    # Resolve audience (always cap at limit; brand admin must opt-in for live send)
-    audience = await customers_col.find(body.audience or {},
-                                          {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
-                                           "points_balance": 1, "city": 1}
-                                          ).limit(min(body.limit, 5000)).to_list(5000)
+    # Resolve audience size for preview (cap at min(limit, 5000) for dry-run preview)
+    preview_cap = min(body.limit, 5000)
+    audience = await customers_col.find(
+        body.audience or {},
+        {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
+         "points_balance": 1, "city": 1}
+    ).limit(preview_cap).to_list(preview_cap)
+    audience_size = await customers_col.count_documents(body.audience or {})
+
     if body.dry_run:
-        return {"dry_run": True, "audience_size": len(audience),
-                 "sample": audience[:3], "would_send_via": t["channel"]}
+        return {"dry_run": True, "audience_size_total": audience_size,
+                "audience_size_capped": min(audience_size, body.limit),
+                "sample": audience[:3], "would_send_via": t["channel"]}
 
-    sent, failed = 0, 0
-    for c in audience:
-        params = {
-            "name": (c.get("name") or "").split(" ")[0] or "there",
-            "tier": c.get("tier", "silver"),
-            "points_balance": c.get("points_balance", 0),
-            "city": c.get("city", ""),
-        }
-        if t["channel"] == "sms":
-            res = await send_sms_karix(c["mobile"], _render(t["body"], params),
-                                         template_id=t["id"], event_trigger="campaign_bulk")
-        elif t["channel"] in {"whatsapp", "rcs"} and t.get("waba_template_id"):
-            res = await send_whatsapp_karix(c["mobile"], t["waba_template_id"], params,
-                                              template_id=t["id"], event_trigger="campaign_bulk")
-        else:
-            res = {"ok": False, "error": "unsupported"}
-        if res.get("ok"):
-            sent += 1
-        else:
-            failed += 1
-    return {"dry_run": False, "audience_size": len(audience), "sent": sent, "failed": failed}
+    # Enqueue background job
+    job_id = uuid.uuid4().hex
+    job_doc = {
+        "id": job_id,
+        "template_id": body.template_id,
+        "template_name": t.get("name"),
+        "channel": t["channel"],
+        "audience_filter": body.audience,
+        "audience_size_total": audience_size,
+        "limit": body.limit,
+        "status": "queued",
+        "processed": 0, "sent": 0, "failed": 0,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+        "queued_by": user["email"],
+    }
+    await bulk_jobs_col.insert_one(job_doc)
+    background_tasks.add_task(_run_bulk_send_job, job_id, body.template_id,
+                               body.audience, body.limit)
+    job_doc.pop("_id", None)
+    return {"dry_run": False, "job_id": job_id, "status": "queued",
+             "audience_size_total": audience_size,
+             "limit": body.limit, "job": job_doc}
+
+
+@router.get("/communications/bulk-jobs")
+async def list_bulk_jobs(limit: int = 50, user: dict = Depends(get_current_user)):
+    rows = await bulk_jobs_col.find({}, {"_id": 0}).sort("queued_at", -1).limit(min(limit, 100)).to_list(100)
+    return {"rows": rows, "total": len(rows)}
+
+
+@router.get("/communications/bulk-jobs/{job_id}")
+async def get_bulk_job(job_id: str, user: dict = Depends(get_current_user)):
+    j = await bulk_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    if not j:
+        raise HTTPException(404, "Job not found")
+    return j
