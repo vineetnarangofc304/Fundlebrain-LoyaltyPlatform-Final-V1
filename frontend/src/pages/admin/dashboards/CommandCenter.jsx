@@ -255,28 +255,44 @@ export default function CommandCenter() {
         {/* Alerts */}
         {data.alerts.length > 0 && (
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-3" data-testid="cc-alerts">
-            {data.alerts.map((a, i) => (
-              <button
-                key={i}
-                onClick={() => navigate(a.link)}
-                className="text-left bg-white border border-black/10 hover:border-black/30 p-4 flex items-start gap-3 transition-colors"
-                data-testid={`cc-alert-${i}`}
-              >
-                {a.severity === "high" ? (
-                  <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
-                )}
-                <div className="flex-1 min-w-0">
-                  <div className="text-[11px] uppercase tracking-widest text-neutral-500">
-                    {a.severity === "high" ? "CRITICAL" : "WARNING"}
+            {data.alerts.map((a, i) => {
+              const isHigh = a.severity === "high";
+              return (
+                <button
+                  key={i}
+                  onClick={() => navigate(a.link)}
+                  className="text-left p-4 flex items-start gap-3 transition-all relative overflow-hidden hover:shadow-md border"
+                  style={{
+                    background: isHigh
+                      ? "linear-gradient(135deg, #FFF1F2 0%, #fff 100%)"
+                      : "linear-gradient(135deg, #FEF6E7 0%, #fff 100%)",
+                    borderColor: isHigh ? "rgba(159, 18, 57, 0.3)" : "rgba(180, 83, 9, 0.3)",
+                  }}
+                  data-testid={`cc-alert-${i}`}
+                >
+                  <span
+                    className="absolute top-0 left-0 bottom-0 w-1"
+                    style={{ background: isHigh ? "#9F1239" : "#B45309" }}
+                  />
+                  {isHigh ? (
+                    <AlertTriangle className="w-4 h-4 text-rose-700 mt-0.5 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-amber-700 mt-0.5 shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0 pl-1">
+                    <div
+                      className="text-[10px] uppercase tracking-[0.22em] font-semibold"
+                      style={{ color: isHigh ? "#9F1239" : "#B45309" }}
+                    >
+                      {isHigh ? "CRITICAL" : "WARNING"}
+                    </div>
+                    <div className="font-medium text-sm mt-0.5">{a.title}</div>
+                    <div className="text-xs text-neutral-600 mt-0.5">{a.detail}</div>
                   </div>
-                  <div className="font-medium text-sm">{a.title}</div>
-                  <div className="text-xs text-neutral-600 mt-0.5">{a.detail}</div>
-                </div>
-                <ChevronRight className="w-4 h-4 text-neutral-400" />
-              </button>
-            ))}
+                  <ChevronRight className="w-4 h-4 text-neutral-400" />
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -383,37 +399,55 @@ export default function CommandCenter() {
 
         {/* Sparkline + Cohorts */}
         <div className="grid lg:grid-cols-3 gap-4">
-          <div className="bg-white border border-black/10 p-5 lg:col-span-2" data-testid="cc-sparkline">
+          <div className="chart-card p-5 lg:col-span-2" data-testid="cc-sparkline">
             <div className="flex items-center justify-between mb-2">
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-1">SALES TREND</div>
-                <h3 className="font-display text-xl">Net revenue · {period}</h3>
+              <div className="flex items-center gap-3">
+                <span className="inline-block w-6 h-px" style={{ background: "#571326" }} />
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-0.5">SALES TREND</div>
+                  <h3 className="font-display text-xl">Net revenue · {period}</h3>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 text-[10px] uppercase tracking-widest text-neutral-500">
+                <span className="flex items-center gap-1"><span className="w-3 h-1" style={{ background: "#571326" }} />Net ₹</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-1" style={{ background: "#1E3A8A" }} />Txns</span>
               </div>
             </div>
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={data.sparkline}>
                 <defs>
                   <linearGradient id="gradNet" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#571326" stopOpacity={0.35} />
+                    <stop offset="0%" stopColor="#571326" stopOpacity={0.45} />
                     <stop offset="100%" stopColor="#571326" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="gradTxns" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#1E3A8A" stopOpacity={0.25} />
+                    <stop offset="100%" stopColor="#1E3A8A" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />
                 <XAxis dataKey="date" stroke="#64748b" fontSize={11} tickFormatter={(d) => d?.slice(5)} />
-                <YAxis stroke="#64748b" fontSize={11} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`} />
+                <YAxis yAxisId="l" stroke="#571326" fontSize={11} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`} />
+                <YAxis yAxisId="r" orientation="right" stroke="#1E3A8A" fontSize={11} />
                 <Tooltip
                   contentStyle={{ borderRadius: 2, fontSize: 12 }}
                   formatter={(v, key) => (key === "net" ? fmtINR(v) : v)}
                   labelFormatter={(d) => `Date: ${d}`}
                 />
-                <Area type="monotone" dataKey="net" stroke="#571326" strokeWidth={2} fill="url(#gradNet)" />
+                <Area yAxisId="l" type="monotone" dataKey="net" stroke="#571326" strokeWidth={2.5} fill="url(#gradNet)" />
+                <Area yAxisId="r" type="monotone" dataKey="txns" stroke="#1E3A8A" strokeWidth={2} fill="url(#gradTxns)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="bg-white border border-black/10 p-5" data-testid="cc-cohorts">
-            <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-1">ACQUISITION COHORTS</div>
-            <h3 className="font-display text-xl mb-4">Customers by signup window</h3>
+          <div className="chart-card p-5" data-testid="cc-cohorts">
+            <div className="flex items-center gap-3 mb-3">
+              <span className="inline-block w-6 h-px" style={{ background: "#1E3A8A" }} />
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-0.5">ACQUISITION COHORTS</div>
+                <h3 className="font-display text-xl">Customers by signup window</h3>
+              </div>
+            </div>
             <ResponsiveContainer width="100%" height={230}>
               <BarChart data={cohortBars} margin={{ top: 8, right: 0, left: -10, bottom: 0 }}>
                 <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />
@@ -422,6 +456,7 @@ export default function CommandCenter() {
                 <Tooltip formatter={(v) => fmtNum(v)} />
                 <Bar
                   dataKey="value"
+                  radius={[3, 3, 0, 0]}
                   onClick={(d) => {
                     const ranges = {
                       today: { gte: new Date(new Date().setHours(0,0,0,0)).toISOString() },

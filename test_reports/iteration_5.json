@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 5 full-stack testing of 5 NEW dashboards (Cohorts & Segmentation, Points Economics v2, Campaign ROI v2, Executive Summary + PDF, Formula Catalog). Backend: 11/11 pytest tests PASS — all six new endpoints return correct payloads. Frontend: 5/5 dashboards render with rich, branded UI. RetentionTriangle offset-0 = 100% verified. FrequencySegments count-sum = transacted_customers (1492) verified (mutually-exclusive bands). FormulaCatalog returns exactly 23 formulas across 8 categories (Revenue/Customer/RFM/Cohort/Loyalty/Campaign/Experience/Operations). Executive Summary PDF downloads as valid application/pdf, starts with %PDF magic header, size > 1KB. All endpoints reject unauthenticated requests (401/403).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/dashboard/cohorts-segmentation", "issue": "monthly_visits pipeline pulls up to 500k rows ($group by {cid, month}) into memory on every request — fine at 8K transactions / 1504 customers, but at scale push aggregation down (use $addToSet of months per customer)."},
+      {"endpoint": "GET /api/dashboard/campaign-roi", "issue": "campaigns with NULL roi_pct (cost=0) are sorted to end via 'or -999' trick — works, but is confusing. Consider explicit two-pass sort (numeric DESC then nulls)."},
+      {"endpoint": "GET /api/dashboard/executive-summary/pdf", "issue": "Re-invokes executive_summary() inside the PDF route to fetch payload — duplicates one full aggregation pass. Cache or pass payload via internal helper."},
+      {"endpoint": "GET /api/dashboard/points-economics", "issue": "breakage_pipe doesn't exclude customers whose last_visit_at is a future-dated string due to bad data — defensive but unlikely. Worth a $lte:now guard."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CommandCenter.jsx <select data-testid='cc-store'><option>", "issue": "Persists from iter4: React hydration warning '<span> cannot be a child of <option>'. Visual-Editor wrapper injecting <span style=display:contents> inside <option>. Cosmetic console-only, no functional impact.", "selector": "[data-testid='cc-store'] option", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Campaign ROI", "issues": ["All metrics are zero (correct per seed — no campaign_metrics data). 'CTR/CVR/ROI: 0% / 0% / —' is displayed correctly; AI brief acknowledges the gap. Design is intact."]},
+      {"screen": "Cohorts dashboard", "issues": ["VIP band shows count=0 (no customer has >31 visits in current data) — chart bar/row collapses elegantly. Working as intended."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration5_test.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [
+    "[P3] No P0/P1 issues. Hydration warning in CommandCenter <select> is the only outstanding cosmetic bug (carried over from iter4).",
+    "[P3] Cache or deduplicate aggregation between /executive-summary and /executive-summary/pdf to avoid double-aggregating on every PDF download.",
+    "[P3] Consider RBAC on the 4 new dashboard endpoints (any authenticated user including analytics_viewer / store_manager currently sees full org aggregates)."
+  ],
+  "critical_code_review_comments": [
+    "fundlebrain_routes.py cohorts-segmentation: retention_triangle correctness verified — every cohort's offset-0 retention is exactly 100% (signup-month definition). max_offset capped at 11 — good.",
+    "fundlebrain_routes.py cohorts-segmentation: frequency bands are mutually exclusive (count-sum equals transacted_customers exactly, verified). spend bands use $min$le$max boundary semantics with half-open intervals — boundary at ₹5000 falls into tier_2, correct.",
+    "fundlebrain_routes.py points-economics: outstanding_inr = outstanding_points * burn_ratio is consistent with the formula catalog entry — single source of truth. Good.",
+    "fundlebrain_routes.py campaign-roi: when total['cost']=0, overall_roi_pct=None; frontend handles N/A correctly. Sorting leaderboard uses sentinel -999 for None ROI — works but fragile; prefer explicit comparator.",
+    "fundlebrain_routes.py executive-summary/pdf: in-process call to executive_summary(period_days, user) re-runs all aggregations. Move shared payload to a helper to halve DB load.",
+    "fundlebrain_routes.py: FORMULA_CATALOG is hard-coded at 23 entries — single source of truth, kept in sync with the Formula Catalog UI. Total verified at 23 across 8 expected categories."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration5_test.py (created)",
+    "/app/test_reports/pytest/iteration5_results.xml (generated)"
+  ],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "100% (5/5 new dashboards render with data)"},
+  "test_credentials": "admin@kazo.com / Kazo@2026 from /app/memory/test_credentials.md",
+  "seed_data_creation": "None. Read-only tests against existing seed (1504 customers, 8003 transactions, 26 stores, 12 campaigns with 0 metrics, 8 coupons).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All five new dashboards verified end-to-end. Sidebar testids: nav-dash-cohorts, nav-dash-points, nav-dash-campaign-roi, nav-dash-exec, nav-formula. Campaign ROI funnel will continue to show zeros until campaign_metrics is seeded — that is by design, not a bug. PDF endpoint streams application/pdf with attachment filename KAZO_Executive_Summary_<ts>.pdf. The hydration warning in CommandCenter <select> persists and is cosmetic. Run `pytest /app/backend/tests/iteration5_test.py -v` to retest in <5s.",
+  "rca of the issue": "No P0/P1 issues found. Carried-over LOW-priority hydration warning is caused by Visual Editor instrumentation wrapping <option> children in a <span style=display:contents>, which is invalid HTML inside <option>. Not introduced in iter5."
+}

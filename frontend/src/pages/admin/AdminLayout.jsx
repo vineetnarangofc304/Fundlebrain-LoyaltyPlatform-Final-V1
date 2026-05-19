@@ -18,6 +18,10 @@ const SECTIONS = [
       { to: "/admin/dashboards/campaigns", icon: BarChart3, label: "Campaign Performance", testid: "nav-dash-campaigns" },
       { to: "/admin/dashboards/stores", icon: StoreIcon, label: "Store Performance", testid: "nav-dash-stores" },
       { to: "/admin/dashboards/rfm", icon: Layers, label: "RFM & Churn", testid: "nav-dash-rfm" },
+      { to: "/admin/dashboards/cohorts", icon: Users, label: "Cohorts & Segments", testid: "nav-dash-cohorts" },
+      { to: "/admin/dashboards/points", icon: Award, label: "Points Economics", testid: "nav-dash-points" },
+      { to: "/admin/dashboards/campaign-roi", icon: BarChart3, label: "Campaign ROI", testid: "nav-dash-campaign-roi" },
+      { to: "/admin/dashboards/executive-summary", icon: FileText, label: "Executive Summary", testid: "nav-dash-exec" },
       { to: "/admin/dashboards/nps", icon: MessageCircle, label: "NPS & Feedback", testid: "nav-dash-nps" },
     ],
   },
@@ -59,6 +63,7 @@ const SECTIONS = [
     label: "REPORTS",
     items: [
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },
+      { to: "/admin/formula-catalog", icon: FileText, label: "Formula Catalog", testid: "nav-formula" },
     ],
   },
   {
