@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
 import { fmtDateTime } from "@/lib/format";
 import { toast } from "sonner";
+import { ExternalLink } from "lucide-react";
 
 export default function TicketsPage() {
   const [items, setItems] = useState([]);
@@ -24,7 +26,7 @@ export default function TicketsPage() {
     <div data-testid="tickets-page">
       <PageHeader title="Support Tickets" subtitle="CUSTOMER ISSUES" />
       <div className="p-8">
-        <div className="flex gap-2 mb-4">
+        <div className="flex gap-2 mb-4 flex-wrap">
           {["", "open", "in_progress", "escalated", "resolved", "closed"].map((s) => (
             <button key={s} className={`pill ${filter.status === s ? "kazo-bg-burgundy text-white" : "pill-neutral"}`} onClick={() => setFilter({ status: s })} data-testid={`tickets-filter-${s || "all"}`}>{s || "All"}</button>
           ))}
@@ -35,7 +37,12 @@ export default function TicketsPage() {
             <tbody>
               {items.map((t) => (
                 <tr key={t.id}>
-                  <td><div className="font-medium">{t.subject}</div><div className="text-xs text-neutral-500 line-clamp-1">{t.description}</div></td>
+                  <td>
+                    <Link to={`/admin/tickets/${t.id}`} className="font-medium hover:underline kazo-text-burgundy flex items-center gap-1" data-testid={`ticket-link-${t.id}`}>
+                      {t.subject} <ExternalLink className="w-3 h-3" />
+                    </Link>
+                    <div className="text-xs text-neutral-500 line-clamp-1">{t.description}</div>
+                  </td>
                   <td className="font-mono text-xs">{t.customer_mobile}</td>
                   <td><span className="pill pill-neutral">{t.category}</span></td>
                   <td><StatusPill status={t.priority} /></td>
@@ -48,6 +55,7 @@ export default function TicketsPage() {
                   </td>
                 </tr>
               ))}
+              {items.length === 0 && <tr><td colSpan={7} className="text-center py-10 text-neutral-500">No tickets</td></tr>}
             </tbody>
           </table>
         </div>

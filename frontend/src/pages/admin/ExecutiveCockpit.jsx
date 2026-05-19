@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { LineChart, Line, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell, Legend, CartesianGrid } from "recharts";
 import api from "@/lib/api";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
@@ -8,6 +9,7 @@ import { RefreshCw } from "lucide-react";
 const COLORS = ["#0F172A", "#571326", "#C7A76D", "#94A3B8", "#1f2937", "#7c2d4a"];
 
 export default function ExecutiveCockpit() {
+  const navigate = useNavigate();
   const [period, setPeriod] = useState("30d");
   const [kpis, setKpis] = useState(null);
   const [trend, setTrend] = useState([]);
@@ -71,37 +73,37 @@ export default function ExecutiveCockpit() {
       <div className="p-8 space-y-8">
         {/* Top KPI grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <KPICard label="Total Customers" value={fmtNum(kpis.customers.total)} hint="Across all stores" testid="kpi-total-customers" />
-          <KPICard label="Active Customers" value={fmtNum(kpis.customers.active)} hint={`${period}`} testid="kpi-active-customers" />
-          <KPICard label="New Customers" value={fmtNum(kpis.customers.new)} hint={`${period}`} testid="kpi-new-customers" />
-          <KPICard label="Repeat Customers" value={fmtNum(kpis.customers.repeat)} hint="≥2 visits" testid="kpi-repeat-customers" />
-          <KPICard label="Churned" value={fmtNum(kpis.customers.churned)} hint=">180 days" testid="kpi-churned-customers" />
-          <KPICard label="Loyalty Penetration" value={fmtPct(kpis.loyalty.penetration_pct)} testid="kpi-loyalty-pct" />
+          <KPICard label="Total Customers" value={fmtNum(kpis.customers.total)} hint="Across all stores" onClick={() => navigate("/admin/customers")} testid="kpi-total-customers" />
+          <KPICard label="Active Customers" value={fmtNum(kpis.customers.active)} hint={`${period}`} onClick={() => navigate("/admin/dashboards/customers")} testid="kpi-active-customers" />
+          <KPICard label="New Customers" value={fmtNum(kpis.customers.new)} hint={`${period}`} onClick={() => navigate("/admin/dashboards/customers")} testid="kpi-new-customers" />
+          <KPICard label="Repeat Customers" value={fmtNum(kpis.customers.repeat)} hint="≥2 visits" onClick={() => navigate("/admin/customers")} testid="kpi-repeat-customers" />
+          <KPICard label="Churned" value={fmtNum(kpis.customers.churned)} hint=">180 days" onClick={() => navigate("/admin/customers?churn_risk=high")} testid="kpi-churned-customers" />
+          <KPICard label="Loyalty Penetration" value={fmtPct(kpis.loyalty.penetration_pct)} onClick={() => navigate("/admin/dashboards/loyalty")} testid="kpi-loyalty-pct" />
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <KPICard label="Net Sales" value={fmtINR(kpis.sales.net)} delta={kpis.sales.delta_pct} testid="kpi-net-sales" />
-          <KPICard label="Gross Sales" value={fmtINR(kpis.sales.gross)} testid="kpi-gross-sales" />
-          <KPICard label="Transactions" value={fmtNum(kpis.sales.txn_count)} delta={kpis.sales.txn_delta_pct} testid="kpi-txns" />
-          <KPICard label="AOV" value={fmtINR(kpis.sales.aov)} hint="₹/transaction" testid="kpi-aov" />
-          <KPICard label="UPT" value={kpis.sales.upt?.toFixed(2)} hint="Units per txn" testid="kpi-upt" />
-          <KPICard label="Discount" value={fmtINR(kpis.sales.discount)} testid="kpi-discount" />
+          <KPICard label="Net Sales" value={fmtINR(kpis.sales.net)} delta={kpis.sales.delta_pct} onClick={() => navigate("/admin/dashboards/sales")} testid="kpi-net-sales" />
+          <KPICard label="Gross Sales" value={fmtINR(kpis.sales.gross)} onClick={() => navigate("/admin/dashboards/sales")} testid="kpi-gross-sales" />
+          <KPICard label="Transactions" value={fmtNum(kpis.sales.txn_count)} delta={kpis.sales.txn_delta_pct} onClick={() => navigate("/admin/reports")} testid="kpi-txns" />
+          <KPICard label="AOV" value={fmtINR(kpis.sales.aov)} hint="₹/transaction" onClick={() => navigate("/admin/dashboards/sales")} testid="kpi-aov" />
+          <KPICard label="UPT" value={kpis.sales.upt?.toFixed(2)} hint="Units per txn" onClick={() => navigate("/admin/dashboards/sales")} testid="kpi-upt" />
+          <KPICard label="Discount" value={fmtINR(kpis.sales.discount)} onClick={() => navigate("/admin/dashboards/sales")} testid="kpi-discount" />
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <KPICard label="Points Issued" value={fmtNum(kpis.loyalty.points_issued)} testid="kpi-points-issued" />
-          <KPICard label="Points Redeemed" value={fmtNum(kpis.loyalty.points_redeemed)} testid="kpi-points-redeemed" />
-          <KPICard label="Outstanding Liability" value={fmtINR(kpis.loyalty.outstanding_liability_inr)} hint="Points × ₹0.25" testid="kpi-liability" />
-          <KPICard label="Repeat Rate" value={fmtPct(kpis.loyalty.repeat_rate_pct)} testid="kpi-repeat-rate" />
-          <KPICard label="Churn %" value={fmtPct(kpis.loyalty.churn_pct)} testid="kpi-churn-pct" />
-          <KPICard label="Coupons Used" value={fmtNum(kpis.campaigns.coupon_usage)} testid="kpi-coupons" />
+          <KPICard label="Points Issued" value={fmtNum(kpis.loyalty.points_issued)} onClick={() => navigate("/admin/dashboards/loyalty")} testid="kpi-points-issued" />
+          <KPICard label="Points Redeemed" value={fmtNum(kpis.loyalty.points_redeemed)} onClick={() => navigate("/admin/dashboards/loyalty")} testid="kpi-points-redeemed" />
+          <KPICard label="Outstanding Liability" value={fmtINR(kpis.loyalty.outstanding_liability_inr)} hint="Points × ₹0.25" onClick={() => navigate("/admin/dashboards/loyalty")} testid="kpi-liability" />
+          <KPICard label="Repeat Rate" value={fmtPct(kpis.loyalty.repeat_rate_pct)} onClick={() => navigate("/admin/dashboards/customers")} testid="kpi-repeat-rate" />
+          <KPICard label="Churn %" value={fmtPct(kpis.loyalty.churn_pct)} onClick={() => navigate("/admin/dashboards/customers")} testid="kpi-churn-pct" />
+          <KPICard label="Coupons Used" value={fmtNum(kpis.campaigns.coupon_usage)} onClick={() => navigate("/admin/coupons")} testid="kpi-coupons" />
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard label="Campaign Revenue" value={fmtINR(kpis.campaigns.revenue_generated)} testid="kpi-camp-revenue" />
-          <KPICard label="NPS Score" value={kpis.nps.score == null ? "N/A" : kpis.nps.score} testid="kpi-nps" />
-          <KPICard label="Open Complaints" value={fmtNum(kpis.nps.complaints_open)} testid="kpi-complaints" />
-          <KPICard label="API Health" value={fmtPct(kpis.api.health_pct, 2)} hint={`${kpis.api.failed} failed / ${kpis.api.total}`} testid="kpi-api-health" />
+          <KPICard label="Campaign Revenue" value={fmtINR(kpis.campaigns.revenue_generated)} onClick={() => navigate("/admin/dashboards/campaigns")} testid="kpi-camp-revenue" />
+          <KPICard label="NPS Score" value={kpis.nps.score == null ? "N/A" : kpis.nps.score} onClick={() => navigate("/admin/dashboards/nps")} testid="kpi-nps" />
+          <KPICard label="Open Complaints" value={fmtNum(kpis.nps.complaints_open)} onClick={() => navigate("/admin/tickets?status=open")} testid="kpi-complaints" />
+          <KPICard label="API Health" value={fmtPct(kpis.api.health_pct, 2)} hint={`${kpis.api.failed} failed / ${kpis.api.total}`} onClick={() => navigate("/admin/api-monitor")} testid="kpi-api-health" />
         </div>
 
         {/* Charts */}

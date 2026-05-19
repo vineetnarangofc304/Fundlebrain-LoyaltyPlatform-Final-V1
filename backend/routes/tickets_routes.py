@@ -18,6 +18,14 @@ async def list_tickets(status: Optional[str] = None, user: dict = Depends(get_cu
     return await tickets_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
 
 
+@router.get("/{ticket_id}")
+async def get_ticket(ticket_id: str, user: dict = Depends(get_current_user)):
+    t = await tickets_col.find_one({"id": ticket_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Not found")
+    return t
+
+
 @router.post("")
 async def create_ticket(payload: TicketCreate, user: dict = Depends(get_current_user)):
     doc = payload.model_dump()

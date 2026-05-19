@@ -32,7 +32,7 @@ export default function LoginShell({ title, subtitle, portal, allowedRoles, redi
   return (
     <div className="min-h-screen grid lg:grid-cols-2">
       <div className="kazo-bg-black text-white relative overflow-hidden hidden lg:block">
-        <img src="https://static.prod-images.emergentagent.com/jobs/e79d70f1-3e69-4d31-89bd-3394bf0b0e8f/images/78c63bea378c62b7998687065d6e72a793a918832cab75549bf67f8c89f11216.png" alt="KAZO" className="absolute inset-0 w-full h-full object-cover opacity-60" />
+        <img src="https://images.unsplash.com/photo-1617551307578-7f5160d6615e?auto=format&fit=crop&w=1400&q=80" alt="KAZO" className="absolute inset-0 w-full h-full object-cover opacity-60" />
         <div className="absolute inset-0 bg-gradient-to-br from-black via-black/70 to-transparent" />
         <div className="relative h-full flex flex-col p-12">
           <Link to="/" className="font-display text-3xl tracking-tight" style={{ fontWeight: 600 }}>KAZO</Link>

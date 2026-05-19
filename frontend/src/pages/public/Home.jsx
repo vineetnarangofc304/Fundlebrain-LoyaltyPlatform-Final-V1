@@ -4,8 +4,8 @@ import { ArrowUpRight, Sparkles, Crown, Gift, Star, ChevronDown } from "lucide-r
 import api from "@/lib/api";
 import { toast } from "sonner";
 
-const heroImg = "https://static.prod-images.emergentagent.com/jobs/e79d70f1-3e69-4d31-89bd-3394bf0b0e8f/images/78c63bea378c62b7998687065d6e72a793a918832cab75549bf67f8c89f11216.png";
-const fabric = "https://static.prod-images.emergentagent.com/jobs/e79d70f1-3e69-4d31-89bd-3394bf0b0e8f/images/a4dd983df23375d64a8141f5a63c1af5c10acb725b7ce0279647c84ec4772a05.png";
+const heroImg = "https://images.unsplash.com/photo-1617551307578-7f5160d6615e?auto=format&fit=crop&w=1400&q=80";
+const fabric = "https://images.unsplash.com/photo-1583744946564-b52ac1c389c8?auto=format&fit=crop&w=1400&q=80";
 const editorial = "https://images.pexels.com/photos/7778893/pexels-photo-7778893.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=900&w=1200";
 const boutique = "https://images.pexels.com/photos/33327425/pexels-photo-33327425.png?auto=compress&cs=tinysrgb&dpr=2&h=900&w=1200";
 
@@ -62,14 +62,14 @@ export default function Home() {
       <section className="relative kazo-bg-black text-white overflow-hidden">
         <div className="grid lg:grid-cols-2 min-h-[80vh]">
           <div className="relative order-2 lg:order-1 px-6 lg:px-16 py-16 lg:py-24 flex flex-col justify-center">
-            <div className="text-[11px] uppercase tracking-[0.3em] text-white/50 mb-6 fade-up">An Exclusive Programme · Powered by Fundle</div>
+            <div className="text-[11px] uppercase tracking-[0.3em] text-white/50 mb-6 fade-up">{c.hero_eyebrow || "An Exclusive Programme · Powered by Fundle"}</div>
             <h1 className="editorial-headline text-5xl md:text-6xl lg:text-7xl xl:text-8xl mb-6 fade-up" style={{ animationDelay: "0.1s" }}>
-              Where style<br />
-              <em className="kazo-text-champagne font-light">earns</em> you<br />
-              more.
+              {c.hero_headline_1 || "Where style"}<br />
+              <em className="kazo-text-champagne font-light">{c.hero_headline_em || "earns"}</em> {c.hero_headline_2?.split(" ")[0] || "you"}<br />
+              {c.hero_headline_2?.split(" ").slice(1).join(" ") || "more."}
             </h1>
             <p className="text-white/70 text-lg max-w-md mb-10 leading-relaxed fade-up" style={{ animationDelay: "0.2s" }}>
-              The official KAZO loyalty programme. Every purchase reveals new privileges — from welcome bonuses and birthday gifts to private VIP previews.
+              {c.hero_subtext || "The official KAZO loyalty programme. Every purchase reveals new privileges — from welcome bonuses and birthday gifts to private VIP previews."}
             </p>
 
             <form onSubmit={submit} className="space-y-3 max-w-md fade-up" style={{ animationDelay: "0.3s" }}>
@@ -90,16 +90,16 @@ export default function Home() {
             )}
 
             <div className="mt-10 flex items-center gap-8 text-xs text-white/40 fade-up" style={{ animationDelay: "0.4s" }}>
-              <div><span className="text-2xl font-display text-white">1.5L+</span><div className="uppercase tracking-widest mt-1">Members</div></div>
+              <div><span className="text-2xl font-display text-white">{c.stats_members || "1.5L+"}</span><div className="uppercase tracking-widest mt-1">Members</div></div>
               <div className="h-8 w-px bg-white/20" />
-              <div><span className="text-2xl font-display text-white">15+</span><div className="uppercase tracking-widest mt-1">Cities</div></div>
+              <div><span className="text-2xl font-display text-white">{c.stats_cities || "15+"}</span><div className="uppercase tracking-widest mt-1">Cities</div></div>
               <div className="h-8 w-px bg-white/20" />
-              <div><span className="text-2xl font-display text-white">25+</span><div className="uppercase tracking-widest mt-1">Stores</div></div>
+              <div><span className="text-2xl font-display text-white">{c.stats_stores || "25+"}</span><div className="uppercase tracking-widest mt-1">Stores</div></div>
             </div>
           </div>
 
           <div className="relative order-1 lg:order-2 min-h-[50vh] lg:min-h-0 overflow-hidden">
-            <img src={heroImg} alt="KAZO premium women's western fashion editorial" className="w-full h-full object-cover" />
+            <img src={c.hero_image_url || heroImg} alt="KAZO premium women's western fashion editorial" className="w-full h-full object-cover" />
             <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
             <div className="absolute bottom-8 left-8 right-8 lg:hidden text-white">
               <div className="text-[11px] uppercase tracking-[0.3em] opacity-60">Spring · Summer 2026</div>

@@ -1,5 +1,7 @@
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { Instagram, Facebook, Youtube } from "lucide-react";
+import { useEffect, useState } from "react";
+import api from "@/lib/api";
 
 const navItems = [
   { to: "/about-program", label: "About Program" },
@@ -12,11 +14,17 @@ const navItems = [
 ];
 
 export default function PublicLayout() {
+  const [cms, setCms] = useState(null);
+  useEffect(() => { api.get("/cms/content").then((r) => setCms(r.data)).catch(() => {}); }, []);
+  const topbar = cms?.home?.topbar_text || "EXCLUSIVE LOYALTY PROGRAM · EARN ON EVERY PURCHASE · BIRTHDAY PRIVILEGES INSIDE";
+  const tagline = cms?.footer?.tagline || "The official loyalty programme for KAZO — where every purchase becomes a privilege. Designed for the modern Indian woman.";
+  const poweredBy = cms?.footer?.powered_by || "Powered by Fundle";
+
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "var(--kazo-cream)" }}>
       {/* Top utility bar */}
       <div className="kazo-bg-black text-xs tracking-widest text-white py-2 text-center font-medium" style={{ letterSpacing: "0.15em" }}>
-        EXCLUSIVE LOYALTY PROGRAM · EARN ON EVERY PURCHASE · BIRTHDAY PRIVILEGES INSIDE
+        {topbar}
       </div>
 
       {/* Main header */}
@@ -52,7 +60,7 @@ export default function PublicLayout() {
           <div className="col-span-2">
             <div className="font-display text-3xl tracking-tight" style={{ fontWeight: 500 }}>KAZO</div>
             <p className="mt-3 text-sm text-white/60 max-w-xs leading-relaxed">
-              The official loyalty programme for KAZO — where every purchase becomes a privilege. Designed for the modern Indian woman.
+              {tagline}
             </p>
             <div className="mt-6 flex gap-4">
               <a href="https://instagram.com/kazo_brand" className="text-white/70 hover:text-white"><Instagram className="w-5 h-5" /></a>
@@ -92,7 +100,7 @@ export default function PublicLayout() {
         </div>
         <div className="border-t border-white/10 py-5 px-6 lg:px-12 max-w-[1400px] mx-auto flex flex-col md:flex-row items-center justify-between text-xs text-white/40 gap-2">
           <div>© {new Date().getFullYear()} KAZO. All rights reserved.</div>
-          <div className="tracking-[0.15em] uppercase">Powered by Fundle</div>
+          <div className="tracking-[0.15em] uppercase">{poweredBy}</div>
         </div>
       </footer>
     </div>

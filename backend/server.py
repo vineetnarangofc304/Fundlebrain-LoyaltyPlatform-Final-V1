@@ -25,6 +25,9 @@ from routes.nps_routes import router as nps_router
 from routes.tickets_routes import router as tickets_router
 from routes.reports_routes import router as reports_router
 from routes.public_routes import router as public_router
+from routes.items_routes import router as items_router
+from routes.cms_routes import router as cms_router
+from routes.analytics_routes import router as analytics_router
 
 app = FastAPI(title="KAZO Fundle Platform", version="1.0.0")
 api_router = APIRouter(prefix="/api")
@@ -61,6 +64,9 @@ api_router.include_router(nps_router)
 api_router.include_router(tickets_router)
 api_router.include_router(reports_router)
 api_router.include_router(public_router)
+api_router.include_router(items_router)
+api_router.include_router(cms_router)
+api_router.include_router(analytics_router)
 
 app.include_router(api_router)
 

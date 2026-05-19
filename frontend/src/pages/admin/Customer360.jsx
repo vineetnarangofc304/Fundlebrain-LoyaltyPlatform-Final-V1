@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader } from "./_shared";
 import { fmtINR, fmtNum, fmtDate, tierClass } from "@/lib/format";
 import { Search } from "lucide-react";
 
 export default function Customer360() {
+  const [searchParams] = useSearchParams();
   const [q, setQ] = useState("");
-  const [filter, setFilter] = useState({ tier: "", churn_risk: "" });
+  const [filter, setFilter] = useState({ tier: searchParams.get("tier") || "", churn_risk: searchParams.get("churn_risk") || "" });
   const [data, setData] = useState({ total: 0, items: [] });
   const [loading, setLoading] = useState(false);
 

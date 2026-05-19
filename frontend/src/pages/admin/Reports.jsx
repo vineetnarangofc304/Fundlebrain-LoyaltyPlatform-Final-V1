@@ -3,11 +3,13 @@ import api, { API_URL } from "@/lib/api";
 import { PageHeader } from "./_shared";
 import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
 import { Download } from "lucide-react";
+import TransactionDrillModal from "./_TransactionDrill";
 
 export default function ReportsPage() {
   const [period, setPeriod] = useState(30);
   const [data, setData] = useState({ total: 0, items: [] });
   const [audit, setAudit] = useState([]);
+  const [drillTxn, setDrillTxn] = useState(null);
 
   const load = async () => {
     const [t, a] = await Promise.all([api.get("/reports/transactions", { params: { period_days: period, limit: 100 } }), api.get("/reports/audit-logs", { params: { limit: 50 } })]);
@@ -47,8 +49,8 @@ export default function ReportsPage() {
               <thead><tr><th>Bill #</th><th>Date</th><th>Mobile</th><th>Store</th><th className="text-right">Gross</th><th className="text-right">Discount</th><th className="text-right">Net</th><th className="text-right">Points</th><th>Coupon</th></tr></thead>
               <tbody>
                 {data.items.slice(0, 50).map((t) => (
-                  <tr key={t.id}>
-                    <td className="font-mono text-xs">{t.bill_number}</td>
+                  <tr key={t.id} className="cursor-pointer hover:bg-neutral-50" onClick={() => setDrillTxn(t.id)} data-testid={`txn-row-${t.id}`}>
+                    <td className="font-mono text-xs kazo-text-burgundy">{t.bill_number}</td>
                     <td className="text-xs">{fmtDate(t.bill_date)}</td>
                     <td className="font-mono text-xs">{t.customer_mobile}</td>
                     <td className="text-xs">{t.store_id?.slice(0, 8)}</td>
@@ -84,6 +86,7 @@ export default function ReportsPage() {
           </div>
         </div>
       </div>
+      <TransactionDrillModal txnId={drillTxn} onClose={() => setDrillTxn(null)} />
     </div>
   );
 }

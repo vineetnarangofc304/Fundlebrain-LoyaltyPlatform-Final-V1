@@ -1,7 +1,7 @@
 """Store management + POS integration endpoints."""
 from datetime import datetime, timezone
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, File
 from database import stores_col, customers_col, transactions_col, points_ledger_col, otp_col, coupons_col, api_logs_col, loyalty_config_col
 from auth import get_current_user, require_roles, log_audit, ADMIN_ROLES
 from models import StoreCreate, Store
@@ -40,6 +40,70 @@ async def get_store(store_id: str, user: dict = Depends(get_current_user)):
     if not s:
         raise HTTPException(404, "Store not found")
     return s
+
+
+@router.patch("/{store_id}")
+async def update_store(store_id: str, updates: dict, user: dict = Depends(require_roles(*ADMIN_ROLES))):
+    if "_id" in updates:
+        del updates["_id"]
+    if "id" in updates:
+        del updates["id"]
+    await stores_col.update_one({"id": store_id}, {"$set": updates})
+    await log_audit(user, "update_store", "store", store_id, updates)
+    return await stores_col.find_one({"id": store_id}, {"_id": 0})
+
+
+@router.delete("/{store_id}")
+async def delete_store(store_id: str, user: dict = Depends(require_roles(*ADMIN_ROLES))):
+    await stores_col.update_one({"id": store_id}, {"$set": {"is_active": False}})
+    await log_audit(user, "deactivate_store", "store", store_id)
+    return {"success": True}
+
+
+@router.post("/bulk-upload")
+async def bulk_upload_stores(file: UploadFile = File(...), user: dict = Depends(require_roles(*ADMIN_ROLES))):
+    import csv as _csv
+    import io as _io
+    content = await file.read()
+    reader = _csv.DictReader(_io.StringIO(content.decode("utf-8")))
+    inserted, skipped, errors = 0, 0, []
+    for i, row in enumerate(reader, start=2):
+        code = (row.get("code") or "").strip().upper()
+        if not code:
+            errors.append(f"Row {i}: missing code")
+            continue
+        if await stores_col.find_one({"code": code}):
+            skipped += 1
+            continue
+        try:
+            doc = {
+                "id": uuid.uuid4().hex,
+                "code": code,
+                "name": row.get("name", "").strip(),
+                "city": row.get("city", "").strip(),
+                "state": row.get("state", "").strip(),
+                "region": row.get("region", "").strip(),
+                "address": row.get("address", "").strip(),
+                "phone": row.get("phone"),
+                "manager_name": row.get("manager_name"),
+                "latitude": float(row.get("latitude") or 0) or None,
+                "longitude": float(row.get("longitude") or 0) or None,
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await stores_col.insert_one(doc)
+            inserted += 1
+        except Exception as e:
+            errors.append(f"Row {i}: {str(e)}")
+    await log_audit(user, "bulk_upload_stores", "store", None, {"inserted": inserted, "skipped": skipped})
+    return {"inserted": inserted, "skipped": skipped, "errors": errors[:20]}
+
+
+@router.get("/sample-csv/download")
+async def stores_sample_csv(user: dict = Depends(get_current_user)):
+    from fastapi.responses import Response as FastAPIResponse
+    csv_text = "code,name,city,state,region,address,phone,manager_name,latitude,longitude\nKZO-PUN-03,Kazo Pune - Phoenix,Pune,Maharashtra,West,Phoenix Marketcity Pune,9876543210,Sneha Kulkarni,18.5614,73.9151\n"
+    return FastAPIResponse(content=csv_text, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=stores_sample.csv"})
 
 
 # ============================================

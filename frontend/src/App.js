@@ -38,7 +38,16 @@ import UserManagement from "@/pages/admin/UserManagement";
 import StoresPage from "@/pages/admin/Stores";
 import NPSPage from "@/pages/admin/NPS";
 import TicketsPage from "@/pages/admin/Tickets";
+import TicketDetail from "@/pages/admin/TicketDetail";
 import ReportsPage from "@/pages/admin/Reports";
+import ItemMaster from "@/pages/admin/ItemMaster";
+import CMSPage from "@/pages/admin/CMS";
+import SalesDashboard from "@/pages/admin/dashboards/SalesDashboard";
+import CustomerDashboard from "@/pages/admin/dashboards/CustomerDashboard";
+import LoyaltyDashboard from "@/pages/admin/dashboards/LoyaltyDashboard";
+import CampaignDashboard from "@/pages/admin/dashboards/CampaignDashboard";
+import StoreDashboard from "@/pages/admin/dashboards/StoreDashboard";
+import NPSDashboard from "@/pages/admin/dashboards/NPSDashboard";
 import StoreOps from "@/pages/store/StoreOps";
 
 function ProtectedRoute({ children, roles }) {
@@ -80,6 +89,12 @@ function App() {
           {/* Admin */}
           <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
             <Route index element={<ExecutiveCockpit />} />
+            <Route path="dashboards/sales" element={<SalesDashboard />} />
+            <Route path="dashboards/customers" element={<CustomerDashboard />} />
+            <Route path="dashboards/loyalty" element={<LoyaltyDashboard />} />
+            <Route path="dashboards/campaigns" element={<CampaignDashboard />} />
+            <Route path="dashboards/stores" element={<StoreDashboard />} />
+            <Route path="dashboards/nps" element={<NPSDashboard />} />
             <Route path="customers" element={<Customer360 />} />
             <Route path="customers/:id" element={<CustomerDetail />} />
             <Route path="loyalty" element={<LoyaltyConfigurator />} />
@@ -89,8 +104,11 @@ function App() {
             <Route path="api-monitor" element={<APIMonitor />} />
             <Route path="users" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><UserManagement /></ProtectedRoute>} />
             <Route path="stores" element={<StoresPage />} />
+            <Route path="items" element={<ItemMaster />} />
+            <Route path="cms" element={<CMSPage />} />
             <Route path="nps" element={<NPSPage />} />
             <Route path="tickets" element={<TicketsPage />} />
+            <Route path="tickets/:id" element={<TicketDetail />} />
             <Route path="reports" element={<ReportsPage />} />
           </Route>
 

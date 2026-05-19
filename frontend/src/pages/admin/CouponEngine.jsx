@@ -10,6 +10,7 @@ const COUPON_TYPES = ["flat", "percentage", "sku", "category", "store", "city", 
 export default function CouponEngine() {
   const [coupons, setCoupons] = useState([]);
   const [show, setShow] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm());
 
   function emptyForm() {
@@ -41,12 +42,27 @@ export default function CouponEngine() {
         valid_from: new Date(form.valid_from).toISOString(),
         valid_to: new Date(form.valid_to).toISOString(),
       };
-      await api.post("/coupons", payload);
-      toast.success("Coupon created");
-      setShow(false); setForm(emptyForm()); load();
+      if (editingId) {
+        await api.patch(`/coupons/${editingId}`, payload);
+        toast.success("Coupon updated");
+      } else {
+        await api.post("/coupons", payload);
+        toast.success("Coupon created");
+      }
+      setShow(false); setEditingId(null); setForm(emptyForm()); load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Create failed");
+      toast.error(e?.response?.data?.detail || "Save failed");
     }
+  };
+
+  const openEdit = (c) => {
+    setEditingId(c.id);
+    setForm({
+      ...c,
+      valid_from: new Date(c.valid_from).toISOString().slice(0, 16),
+      valid_to: new Date(c.valid_to).toISOString().slice(0, 16),
+    });
+    setShow(true);
   };
 
   return (
@@ -54,14 +70,14 @@ export default function CouponEngine() {
       <PageHeader
         title="Coupon Engine"
         subtitle="DYNAMIC COUPON BUILDER"
-        actions={<button className="k-btn kazo-bg-burgundy" onClick={() => setShow(true)} data-testid="new-coupon-btn"><Plus className="w-4 h-4" /> New coupon</button>}
+        actions={<button className="k-btn kazo-bg-burgundy" onClick={() => { setEditingId(null); setForm(emptyForm()); setShow(true); }} data-testid="new-coupon-btn"><Plus className="w-4 h-4" /> New coupon</button>}
       />
 
       <div className="p-8">
         <div className="bg-white border border-black/10 overflow-x-auto">
           <table className="data-table">
             <thead>
-              <tr><th>Code</th><th>Name</th><th>Type</th><th>Value</th><th>Min Bill</th><th>Valid To</th><th className="text-right">Used / Issued</th><th>Status</th></tr>
+              <tr><th>Code</th><th>Name</th><th>Type</th><th>Value</th><th>Min Bill</th><th>Valid To</th><th className="text-right">Used / Issued</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
               {coupons.map((c) => (
@@ -74,9 +90,10 @@ export default function CouponEngine() {
                   <td className="text-xs">{fmtDate(c.valid_to)}</td>
                   <td className="text-right font-mono">{fmtNum(c.times_used)} / {fmtNum(c.times_issued)}</td>
                   <td><StatusPill status={c.is_active ? "active" : "inactive"} /></td>
+                  <td><button className="k-btn k-btn-ghost k-btn-sm" onClick={() => openEdit(c)} data-testid={`edit-coupon-${c.code}`}>Edit</button></td>
                 </tr>
               ))}
-              {coupons.length === 0 && <tr><td colSpan={8} className="text-center py-10 text-neutral-500">No coupons yet</td></tr>}
+              {coupons.length === 0 && <tr><td colSpan={9} className="text-center py-10 text-neutral-500">No coupons yet</td></tr>}
             </tbody>
           </table>
         </div>
@@ -85,7 +102,7 @@ export default function CouponEngine() {
       {show && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShow(false)}>
           <div className="bg-white p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()} data-testid="new-coupon-modal">
-            <h3 className="font-display text-2xl mb-4">New Coupon</h3>
+            <h3 className="font-display text-2xl mb-4">{editingId ? "Edit Coupon" : "New Coupon"}</h3>
             <div className="grid grid-cols-2 gap-3">
               <div className="flex gap-2 col-span-2">
                 <input className="k-input" placeholder="Code (e.g., KAZOWELCOME20)" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} data-testid="coupon-code-input" />
@@ -105,8 +122,8 @@ export default function CouponEngine() {
               <textarea className="k-input col-span-2" placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} data-testid="coupon-desc-input" />
             </div>
             <div className="flex justify-end gap-2 mt-4">
-              <button className="k-btn k-btn-ghost" onClick={() => setShow(false)}>Cancel</button>
-              <button className="k-btn kazo-bg-burgundy" onClick={submit} data-testid="coupon-create-btn">Create</button>
+              <button className="k-btn k-btn-ghost" onClick={() => { setShow(false); setEditingId(null); }}>Cancel</button>
+              <button className="k-btn kazo-bg-burgundy" onClick={submit} data-testid="coupon-create-btn">{editingId ? "Update" : "Create"}</button>
             </div>
           </div>
         </div>
