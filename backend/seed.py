@@ -69,6 +69,11 @@ async def clear_all():
 
 async def seed_users():
     # We keep superadmin and brand admin (created at startup). Add demo users.
+    # store_user_map maps email -> city of the store they manage
+    store_user_map = {
+        "store.mumbai@kazo.com": "Mumbai",
+        "staff.delhi@kazo.com": "Delhi",
+    }
     demo_users = [
         ("crm@kazo.com", "Priya Sharma", "crm_manager"),
         ("marketing@kazo.com", "Rohan Kapoor", "marketing_manager"),
@@ -83,7 +88,7 @@ async def seed_users():
     for email, name, role in demo_users:
         if await users_col.find_one({"email": email}):
             continue
-        await users_col.insert_one({
+        doc = {
             "id": uuid.uuid4().hex,
             "email": email,
             "name": name,
@@ -91,7 +96,12 @@ async def seed_users():
             "password_hash": hash_password("Kazo@2026"),
             "is_active": True,
             "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if email in store_user_map:
+            s = await stores_col.find_one({"city": store_user_map[email], "is_active": True})
+            if s:
+                doc["store_id"] = s["id"]
+        await users_col.insert_one(doc)
     print(f"Seeded {len(demo_users)} demo users")
 
 

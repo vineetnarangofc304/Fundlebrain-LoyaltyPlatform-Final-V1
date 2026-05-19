@@ -3,8 +3,15 @@
 ## Original problem statement
 Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign automation, customer intelligence, support, reporting and API-monitoring platform for KAZO (kazo.com — premium Indian women's fashion brand), powered by Fundle. Dedicated single-tenant deployment.
 
+## User-locked design constraints
+- ✅ LIGHT editorial theme only (NO dark themes)
+- ✅ REAL-TIME live MongoDB aggregations (NO stored snapshots, NO cron precompute)
+- ✅ Emergent LLM Key (GPT-5.2 / Claude Sonnet 4.5) for AI narratives
+- ✅ ZERO dummies / hardcode / fallbacks — real data or N/A
+- ✅ Build dashboards one-by-one, full drilldown, test after each before moving on
+
 ## Architecture
-- Backend: FastAPI + Motor MongoDB + JWT/cookie auth + Emergent LLM (GPT-5.2 / Claude / Gemini)
+- Backend: FastAPI + Motor MongoDB + JWT/cookie auth + Emergent LLM
 - Frontend: React + Tailwind + shadcn primitives + Recharts + Cormorant Garamond + Manrope
 - MongoDB DB: `kazo_fundle_db` (single tenant)
 - All routes prefixed `/api`
@@ -12,8 +19,8 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## Roles (10)
 Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manager · Store Manager · Store Staff · Support Agent · Analytics Viewer · Read-only Executive
 
-## Sidebar sections (Iteration 2)
-- **DASHBOARDS** — Executive Cockpit, Sales, Customer Analytics, Loyalty, Campaign Performance, Store Performance, NPS & Feedback
+## Sidebar sections
+- **DASHBOARDS** — Command Center *(new)*, Sales, Customer Analytics, Loyalty, Campaign Performance, Store Performance, NPS & Feedback
 - **CUSTOMERS** — Customer 360
 - **MARKETING** — Campaigns, Coupons
 - **AI TOOLS** — Fundle Brain
@@ -32,46 +39,47 @@ Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manag
 - Live API Monitor (5s refresh), POS endpoints, NPS, Tickets, Reports (CSV exports)
 - 3 login portals (Enterprise / Store / CRM), Store Ops portal
 - Public website (13 SEO pages)
-- Seeded: 1500 customers, 8000 transactions, 25 stores, 8 coupons, 9 campaigns, 400 API logs, 300 NPS, 30 tickets
+- Seeded: 1504 customers, 8003 transactions, 26 stores, 8 coupons, 9 campaigns, 400 API logs, 300 NPS, 30 tickets
 
 ### Iteration 2 (Jan 2026) — ✅ 83/83 backend tests passing
-- ✅ **Removed all "Emergent" mentions** from page titles, meta, HTML, and replaced editorial imagery
-- ✅ **Restructured sidebar** into 9 logical sections with collapsible groups
-- ✅ **6 new dashboards** with full data: Sales / Customer Analytics / Loyalty / Campaign Performance / Store Performance / NPS Dashboard
-- ✅ **Executive Cockpit KPIs are now clickable** and route to the appropriate drill-down dashboard
-- ✅ **Item Master** (categories + SKUs with bulk CSV upload, sample download, edit, delete)
-- ✅ **Store Master** with bulk CSV upload, sample download, edit, soft-delete
-- ✅ **CMS for public site** — admin can edit hero text, headline, subtext, stats, images, footer tagline, support info; public Home + PublicLayout consume CMS content
-- ✅ **Coupon edit modal** — full edit capability on existing coupons
-- ✅ **Support Ticket detail page** with conversation/notes thread, status & priority quick-actions, customer link
-- ✅ **Transaction drill-down modal** — clicking a transaction row in Reports opens a full detail modal with line items + linked customer/store
-- ✅ All bulk APIs return `{inserted, skipped, errors}` with sample CSV downloads
+- 9-section sidebar, 6 dashboards (Sales/Customer/Loyalty/Campaign/Store/NPS), Item & Store Master, CMS, Coupon edit, Ticket detail, Transaction drilldown
+
+### Iteration 3 (May 2026) — ✅ Foundation for FundleBrain Dashboards
+- ✅ **Universal Drilldown** — `POST /api/dashboard/drilldown` + `/csv` with collection whitelist, role-aware store scoping (security-hardened), `_id` & `password_hash` scrubbed, 200-row paginated, 10k CSV cap
+- ✅ **AI Insight Strip** — `POST /api/dashboard/insight`, 1-hour in-memory cache, regenerate-on-force; uses Emergent LLM (GPT-5.2)
+- ✅ **Command Center Dashboard** — Replaces Executive Cockpit as `/admin` index. 12 live KPIs, sparkline area chart, cohort distribution bar chart (Today / 1–7d / 8–30d / 31–90d / 90d+), live alerts (sales drop, API health, NPS, open tickets), 30s auto-refresh
+- ✅ **Reusable `DrillDownModal.jsx` + `AIInsightStrip.jsx`** components for every upcoming dashboard
+- ✅ **Security fix** — `_store_scope` now denies (403) when store-bound role has no `store_id`; startup migration backfills `store_id` for `store.mumbai@kazo.com` and `staff.delhi@kazo.com`
+- ⏳ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)
 
 ## Prioritized backlog
 
-### P0
-- [ ] Live POS API integration (when client shares ERP docs: Logic ERP / BOSS / XML / JSON)
-- [ ] Live messaging gateways (WhatsApp Business Cloud API, MSG91/Gupshup SMS, SendGrid/Resend)
-- [ ] Historic Sync UI with year/month/store progress bars
-- [ ] Daily Scheduler UI (cron toggle, success/failure history)
+### P0 — FundleBrain Phase 3A (next up)
+- [ ] **Customer 360 v2** — RFM segment badge, lifetime stats, monthly spend chart
+- [ ] **Store Performance v2** — Leaderboard / By City / Day Analysis tabs
+- [ ] **RFM & Churn Dashboard** — live RFM quintile bucketing, 5×5 heatmap, 11 segments
 
-### P1
-- [ ] Digital Invoice Engine (PDF templates with KAZO branding)
-- [ ] OTP login / Password reset email
-- [ ] Real-time WebSocket dashboards (currently polled 30s)
-- [ ] sitemap.xml / robots.txt generation
-- [ ] Birthday/Anniversary auto-trigger campaigns
-- [ ] Image upload (currently CMS uses URLs — could add to cloud storage)
-- [ ] More public website CMS controls (FAQs, About text, Privacy/Terms editing)
+### P1 — FundleBrain Phase 3B
+- [ ] Points Economics v2 — earn-burn gauge, liability value, monthly flow, top redeemers
+- [ ] Cohort Migration — triangular retention heatmap by signup month
+- [ ] Campaign ROI v2 — Sent→Delivered→Clicked→Converted funnel + retention heatmap
+- [ ] Executive Summary v2 — AI narrative + PDF download (ReportLab)
+- [ ] Formula Catalog — auto-generated audit page
+
+### P1 — AI Engine Upgrade
+- [ ] True function-calling against MongoDB, streaming, CSV narration upload
+
+### P1 — Pre-existing
+- [ ] Live POS API integration, messaging gateways, Historic Sync UI, Daily Scheduler UI
 
 ### P2
-- [ ] Drag-and-drop visual report builder
-- [ ] Support Bot chat for staff
-- [ ] Mobile app
-- [ ] Storefront on POS terminal
-- [ ] RFM matrix heatmap, advanced cohort analytics
-- [ ] A/B test framework for campaigns
-- [ ] Customer-facing self-serve portal at /me
+- [ ] Digital Invoice Engine, OTP login / password reset, WebSocket dashboards, sitemap.xml, birthday auto-campaigns, image upload, more CMS controls
+- [ ] Move AI insight cache to Redis (for multi-worker deploy)
+- [ ] Drag-and-drop report builder, support bot, mobile app
 
 ## Test credentials
 See `/app/memory/test_credentials.md` — Brand Admin: `admin@kazo.com / Kazo@2026`
+
+## Known production hardening pending
+- AI insight cache is in-memory (single worker only) — fine for preview, move to Redis for prod
+- Drilldown CSV uses single-chunk StreamingResponse — fine at 10k cap, chunk for true streaming later

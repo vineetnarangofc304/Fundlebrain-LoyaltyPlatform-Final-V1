@@ -66,12 +66,20 @@ def _can_access(user: dict, collection: str) -> bool:
 
 
 def _store_scope(user: dict, query: dict, collection: str) -> dict:
-    """Restrict store-bound roles to their store only."""
-    if user["role"] in {"store_manager", "store_staff"} and user.get("store_id"):
-        if collection == "transactions":
-            query.setdefault("store_id", user["store_id"])
-        if collection == "support_tickets":
-            query.setdefault("store_id", user["store_id"])
+    """Restrict store-bound roles to their store only.
+
+    Hardening: if the user holds a store-scoped role but has no store_id on
+    their profile, deny the request rather than leaking cross-store data.
+    """
+    if user["role"] in {"store_manager", "store_staff"}:
+        sid = user.get("store_id")
+        if not sid:
+            raise HTTPException(403, "Store-scoped role requires store_id on user profile")
+        if collection in {"transactions", "support_tickets", "api_logs", "nps_responses"}:
+            query.setdefault("store_id", sid)
+        if collection == "customers":
+            # Limit to customers who shop primarily at this store
+            query.setdefault("preferred_store_id", sid)
     return query
 
 
@@ -119,7 +127,11 @@ async def drilldown(req: DrillRequest, user: dict = Depends(get_current_user)):
     }
 
 
-class CSVDrillRequest(DrillRequest):
+class CSVDrillRequest(BaseModel):
+    collection: str
+    filter: Dict[str, Any] = {}
+    sort: Optional[List[List[Any]]] = None
+    project: Optional[Dict[str, int]] = None
     columns: List[str] = []  # ordered column keys; empty = use first row keys
 
 

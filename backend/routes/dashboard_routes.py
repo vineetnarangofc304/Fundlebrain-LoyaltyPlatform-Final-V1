@@ -359,10 +359,7 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
     api_health = round(((api_total - api_failed) / api_total) * 100, 2) if api_total else 100.0
 
     # --- Outstanding loyalty liability ---
-    liab_pipe = [{"$group": {"_id": None,
-                              "points": {"$sum": "$points_balance"},
-                              "issued": {"$sum": "$lifetime_points_earned"},
-                              "redeemed": {"$sum": "$lifetime_points_redeemed"}}}]
+    liab_pipe = [{"$group": {"_id": None, "points": {"$sum": "$points_balance"}}}]
     liab = (await customers_col.aggregate(liab_pipe).to_list(1)) or [{}]
     liab = liab[0] if liab else {}
     burn_ratio = 0.25

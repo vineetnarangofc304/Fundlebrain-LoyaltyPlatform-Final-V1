@@ -66,10 +66,10 @@ export default function CommandCenter() {
   const k = data.kpis;
   const cohortBars = [
     { label: "Today", value: data.cohort_distribution.today, key: "today" },
-    { label: "Last 7d", value: data.cohort_distribution.last_7d, key: "last_7d" },
-    { label: "Last 30d", value: data.cohort_distribution.last_30d, key: "last_30d" },
-    { label: "Last 90d", value: data.cohort_distribution.last_90d, key: "last_90d" },
-    { label: "Older", value: data.cohort_distribution.older, key: "older" },
+    { label: "1–7d", value: data.cohort_distribution.last_7d, key: "last_7d" },
+    { label: "8–30d", value: data.cohort_distribution.last_30d, key: "last_30d" },
+    { label: "31–90d", value: data.cohort_distribution.last_90d, key: "last_90d" },
+    { label: "90d+", value: data.cohort_distribution.older, key: "older" },
   ];
 
   // Drilldown configs

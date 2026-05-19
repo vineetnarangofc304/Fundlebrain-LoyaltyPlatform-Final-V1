@@ -123,6 +123,22 @@ async def startup():
         })
         logger.info("Seeded brand admin")
 
+    # Backfill store_id on store-scoped users (security hardening for drilldown scope)
+    store_user_map = {
+        "store.mumbai@kazo.com": "Mumbai",
+        "staff.delhi@kazo.com": "Delhi",
+    }
+    for email, city in store_user_map.items():
+        u = await users_col.find_one({"email": email})
+        if u and not u.get("store_id"):
+            s = await stores_col.find_one({"city": city, "is_active": True})
+            if s:
+                await users_col.update_one(
+                    {"email": email},
+                    {"$set": {"store_id": s["id"]}},
+                )
+                logger.info(f"Backfilled store_id for {email} -> {s['code']}")
+
     # Seed loyalty config
     cfg = await loyalty_config_col.find_one({"id": "default"})
     if not cfg:
