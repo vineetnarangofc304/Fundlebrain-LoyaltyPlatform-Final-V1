@@ -233,6 +233,23 @@ async def issue_points(body: dict):
     )
     ms = int((time.time() - t0) * 1000)
     await _log_api("/api/pos/issue-points", "POST", 200, ms, customer_mobile=mobile, bill_number=bill_number, store_id=store_id, payload=body)
+
+    # Fire transactional SMS / WhatsApp templates registered for "purchase"
+    try:
+        from routes.communications_routes import fire_event
+        store = await stores_col.find_one({"id": store_id}, {"_id": 0, "name": 1})
+        await fire_event("purchase", mobile, {
+            "name": (cust.get("name") or "").split(" ")[0] or "there",
+            "amount": f"{net_amount:,.0f}",
+            "bill_no": bill_number,
+            "store_name": (store or {}).get("name", ""),
+            "points_earned": points,
+            "points_balance": (cust.get("points_balance", 0) or 0) + points,
+            "tier": cust.get("tier", "silver"),
+        })
+    except Exception:
+        pass
+
     return {"success": True, "points_earned": points, "new_balance": cust["points_balance"] + points, "transaction_id": txn_id}
 
 

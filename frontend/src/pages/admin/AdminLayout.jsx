@@ -39,6 +39,13 @@ const SECTIONS = [
     ],
   },
   {
+    label: "COMMUNICATIONS",
+    items: [
+      { to: "/admin/communications/templates", icon: MessageSquare, label: "Templates", testid: "nav-comm-templates" },
+      { to: "/admin/communications/settings", icon: Settings, label: "Provider Settings", testid: "nav-comm-settings" },
+    ],
+  },
+  {
     label: "AI TOOLS",
     items: [
       { to: "/admin/ai", icon: Brain, label: "Fundle Brain", testid: "nav-ai" },

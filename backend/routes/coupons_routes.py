@@ -60,6 +60,35 @@ async def generate_code(prefix: str = "KAZO", user: dict = Depends(get_current_u
     return {"code": _gen_code(prefix)}
 
 
+@router.post("/{coupon_id}/issue-to-customer")
+async def issue_coupon_to_customer(coupon_id: str, customer_mobile: str,
+                                     user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    """Issue an existing coupon to a specific customer (fires coupon_issued SMS/WhatsApp template)."""
+    c = await coupons_col.find_one({"id": coupon_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Coupon not found")
+    cust = await customers_col.find_one({"mobile": customer_mobile}, {"_id": 0})
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    await coupons_col.update_one({"id": coupon_id}, {"$inc": {"times_issued": 1}})
+    await log_audit(user, "issue_coupon", "coupon", coupon_id,
+                     {"code": c["code"], "to": customer_mobile})
+
+    # Fire coupon_issued templates
+    try:
+        from routes.communications_routes import fire_event
+        await fire_event("coupon_issued", customer_mobile, {
+            "name": (cust.get("name") or "").split(" ")[0] or "there",
+            "coupon_code": c["code"],
+            "discount_value": c.get("discount_value"),
+            "valid_to": c.get("valid_to", ""),
+            "tier": cust.get("tier", "silver"),
+        })
+    except Exception:
+        pass
+    return {"issued": True, "coupon_code": c["code"], "customer_mobile": customer_mobile}
+
+
 @router.get("/{coupon_id}")
 async def get_coupon(coupon_id: str, user: dict = Depends(get_current_user)):
     c = await coupons_col.find_one({"id": coupon_id}, {"_id": 0})

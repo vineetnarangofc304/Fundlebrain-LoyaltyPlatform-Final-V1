@@ -55,6 +55,8 @@ import PointsDashboard from "@/pages/admin/dashboards/PointsDashboard";
 import CampaignROIDashboard from "@/pages/admin/dashboards/CampaignROIDashboard";
 import ExecutiveSummary from "@/pages/admin/dashboards/ExecutiveSummary";
 import FormulaCatalog from "@/pages/admin/FormulaCatalog";
+import TemplatesPage from "@/pages/admin/communications/TemplatesPage";
+import ProviderSettingsPage from "@/pages/admin/communications/ProviderSettingsPage";
 import StoreOps from "@/pages/store/StoreOps";
 
 function ProtectedRoute({ children, roles }) {
@@ -109,6 +111,8 @@ function App() {
             <Route path="dashboards/campaign-roi" element={<CampaignROIDashboard />} />
             <Route path="dashboards/executive-summary" element={<ExecutiveSummary />} />
             <Route path="formula-catalog" element={<FormulaCatalog />} />
+            <Route path="communications/templates" element={<TemplatesPage />} />
+            <Route path="communications/settings" element={<ProviderSettingsPage />} />
             <Route path="customers" element={<Customer360 />} />
             <Route path="customers/:id" element={<CustomerDetail />} />
             <Route path="loyalty" element={<LoyaltyConfigurator />} />

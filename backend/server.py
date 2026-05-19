@@ -30,6 +30,7 @@ from routes.cms_routes import router as cms_router
 from routes.analytics_routes import router as analytics_router
 from routes.drilldown_routes import router as drilldown_router
 from routes.fundlebrain_routes import router as fundlebrain_router
+from routes.communications_routes import router as communications_router
 
 app = FastAPI(title="KAZO Fundle Platform", version="1.0.0")
 api_router = APIRouter(prefix="/api")
@@ -71,6 +72,7 @@ api_router.include_router(cms_router)
 api_router.include_router(analytics_router)
 api_router.include_router(drilldown_router)
 api_router.include_router(fundlebrain_router)
+api_router.include_router(communications_router)
 
 app.include_router(api_router)
 
