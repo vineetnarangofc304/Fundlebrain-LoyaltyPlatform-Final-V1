@@ -46,8 +46,10 @@ Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manag
 
 ### Iteration 3 (May 2026) — ✅ Foundation for FundleBrain Dashboards
 - ✅ **Universal Drilldown** — `POST /api/dashboard/drilldown` + `/csv` with collection whitelist, role-aware store scoping (security-hardened), `_id` & `password_hash` scrubbed, 200-row paginated, 10k CSV cap
-- ✅ **AI Insight Strip** — `POST /api/dashboard/insight`, 1-hour in-memory cache, regenerate-on-force; uses Emergent LLM (GPT-5.2)
-- ✅ **Command Center Dashboard** — Replaces Executive Cockpit as `/admin` index. 12 live KPIs, sparkline area chart, cohort distribution bar chart (Today / 1–7d / 8–30d / 31–90d / 90d+), live alerts (sales drop, API health, NPS, open tickets), 30s auto-refresh
+- ✅ **AI Intelligence Report** — `POST /api/dashboard/insight` returns structured `{headline, summary, drivers[], recommendations[]}`. 1-hour in-memory cache, regenerate-on-force; uses Emergent LLM (GPT-5.2). Frontend renders a full multi-section editorial report panel.
+- ✅ **Command Center Dashboard** — Replaces Executive Cockpit as `/admin` index. 12 live KPIs, sparkline area chart, cohort distribution bar chart (Today / 1–7d / 8–30d / 31–90d / 90d+), live alerts, 30s auto-refresh
+- ✅ **City + Store global filters** on Command Center — every KPI, sparkline, cohort, alert, drilldown, and AI report re-computes live for the chosen scope
+- ✅ **Active customers** now computed from ground-truth transactions (`distinct customer_id` in window) instead of stale `last_visit_at`
 - ✅ **Reusable `DrillDownModal.jsx` + `AIInsightStrip.jsx`** components for every upcoming dashboard
 - ✅ **Security fix** — `_store_scope` now denies (403) when store-bound role has no `store_id`; startup migration backfills `store_id` for `store.mumbai@kazo.com` and `staff.delhi@kazo.com`
 - ⏳ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)

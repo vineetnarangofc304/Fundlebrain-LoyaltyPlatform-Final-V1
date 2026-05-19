@@ -1,6 +1,6 @@
 """Executive cockpit dashboard - real KPIs from MongoDB."""
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Depends, Query
 from database import (
     customers_col, transactions_col, stores_col, campaigns_col, coupons_col,
@@ -282,18 +282,69 @@ async def top_skus(period: str = "30d", limit: int = 10, user: dict = Depends(ge
     ]
 
 
+@router.get("/filter-options")
+async def filter_options(user: dict = Depends(get_current_user)):
+    """Return distinct cities and active stores for the global filters."""
+    cities = await stores_col.distinct("city", {"is_active": True})
+    stores = await stores_col.find(
+        {"is_active": True},
+        {"_id": 0, "id": 1, "code": 1, "name": 1, "city": 1}
+    ).sort("name", 1).to_list(500)
+    return {"cities": sorted([c for c in cities if c]), "stores": stores}
+
+
 @router.get("/command-center")
-async def command_center(period: str = "30d", user: dict = Depends(get_current_user)):
+async def command_center(
+    period: str = "30d",
+    store_id: Optional[str] = None,
+    city: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
     """Live Command Center KPIs + sparkline + cohort distribution + alerts.
 
-    Pure real-time MongoDB aggregations. No snapshots."""
+    Filters (all real-time, no snapshots):
+      - period: today | 7d | 30d | 90d | mtd | ytd
+      - store_id: limit to a single store
+      - city: limit to stores in this city (resolves to a store_id list)
+    """
     start, end = _date_range(period)
     prev_start = start - (end - start)
     now = datetime.now(timezone.utc)
 
+    # Resolve city -> store_ids
+    scoped_store_ids: Optional[List[str]] = None
+    if store_id:
+        scoped_store_ids = [store_id]
+    elif city:
+        rows = await stores_col.find({"city": city, "is_active": True}, {"_id": 0, "id": 1}).to_list(500)
+        scoped_store_ids = [r["id"] for r in rows] or ["__none__"]  # ensure no-match yields no rows
+
+    # Customer cohort filter — for store/city scope, restrict to customers whose
+    # transactions hit at least one of those stores. We compute this once.
+    scoped_customer_ids: Optional[List[str]] = None
+    if scoped_store_ids:
+        cids = await transactions_col.distinct("customer_id", {"store_id": {"$in": scoped_store_ids}})
+        scoped_customer_ids = [c for c in cids if c]
+
+    def _txn_match(time_field: str, gte, lt=None) -> dict:
+        m: Dict[str, Any] = {time_field: {"$gte": gte}}
+        if lt is not None:
+            m[time_field]["$lt"] = lt
+        else:
+            m[time_field]["$lte"] = end.isoformat()
+        if scoped_store_ids:
+            m["store_id"] = {"$in": scoped_store_ids}
+        return m
+
+    def _cust_match(extra: Optional[dict] = None) -> dict:
+        m: Dict[str, Any] = dict(extra or {})
+        if scoped_customer_ids is not None:
+            m["id"] = {"$in": scoped_customer_ids}
+        return m
+
     # --- Sales aggregate (current vs previous window) ---
     cur_sales_pipe = [
-        {"$match": {"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}}},
+        {"$match": _txn_match("bill_date", start.isoformat())},
         {"$group": {
             "_id": None,
             "net": {"$sum": "$net_amount"},
@@ -305,7 +356,7 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
         }},
     ]
     prev_sales_pipe = [
-        {"$match": {"bill_date": {"$gte": prev_start.isoformat(), "$lt": start.isoformat()}}},
+        {"$match": _txn_match("bill_date", prev_start.isoformat(), lt=start.isoformat())},
         {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
     cur = (await transactions_col.aggregate(cur_sales_pipe).to_list(1)) or [{}]
@@ -321,13 +372,16 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
     sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
     txn_delta = round(((txns - prev_txns) / prev_txns) * 100, 1) if prev_txns else None
 
-    # --- Active customers in window ---
-    active = await customers_col.count_documents({"last_visit_at": {"$gte": start.isoformat()}})
-    total_customers = await customers_col.count_documents({})
+    # --- Active customers in window (transacted in the window AND in scope) ---
+    active_match = _txn_match("bill_date", start.isoformat())
+    active_match["customer_id"] = {"$ne": None}
+    active_ids = await transactions_col.distinct("customer_id", active_match)
+    active = len([c for c in active_ids if c])
+    total_customers = await customers_col.count_documents(_cust_match())
 
     # --- Repeat rate window (customers with >=2 txns in window) ---
     repeat_pipe = [
-        {"$match": {"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()},
+        {"$match": {**_txn_match("bill_date", start.isoformat()),
                     "customer_id": {"$ne": None}}},
         {"$group": {"_id": "$customer_id", "n": {"$sum": 1}}},
         {"$group": {"_id": None,
@@ -338,9 +392,12 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
     rr = rr[0] if rr else {}
     repeat_rate = round((rr.get("repeat", 0) / rr["unique"]) * 100, 1) if rr.get("unique") else 0
 
-    # --- NPS in window ---
+    # --- NPS in window (filter by scoped store_ids if present) ---
+    nps_match: Dict[str, Any] = {"created_at": {"$gte": start.isoformat()}}
+    if scoped_store_ids:
+        nps_match["store_id"] = {"$in": scoped_store_ids}
     nps_pipe = [
-        {"$match": {"created_at": {"$gte": start.isoformat()}}},
+        {"$match": nps_match},
         {"$group": {"_id": None,
                     "promoters": {"$sum": {"$cond": [{"$gte": ["$score", 9]}, 1, 0]}},
                     "detractors": {"$sum": {"$cond": [{"$lte": ["$score", 6]}, 1, 0]}},
@@ -352,14 +409,19 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
     else:
         nps_score = None
 
-    # --- API health in window ---
-    api_total = await api_logs_col.count_documents({"timestamp": {"$gte": start.isoformat()}})
-    api_failed = await api_logs_col.count_documents({"status_code": {"$gte": 400},
-                                                     "timestamp": {"$gte": start.isoformat()}})
+    # --- API health in window (scoped by store_id when filter active) ---
+    api_match: Dict[str, Any] = {"timestamp": {"$gte": start.isoformat()}}
+    if scoped_store_ids:
+        api_match["store_id"] = {"$in": scoped_store_ids}
+    api_total = await api_logs_col.count_documents(api_match)
+    api_failed = await api_logs_col.count_documents({**api_match, "status_code": {"$gte": 400}})
     api_health = round(((api_total - api_failed) / api_total) * 100, 2) if api_total else 100.0
 
-    # --- Outstanding loyalty liability ---
-    liab_pipe = [{"$group": {"_id": None, "points": {"$sum": "$points_balance"}}}]
+    # --- Outstanding loyalty liability (scoped customers when filter active) ---
+    liab_pipe = [
+        {"$match": _cust_match()},
+        {"$group": {"_id": None, "points": {"$sum": "$points_balance"}}},
+    ]
     liab = (await customers_col.aggregate(liab_pipe).to_list(1)) or [{}]
     liab = liab[0] if liab else {}
     burn_ratio = 0.25
@@ -372,16 +434,16 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
     d30 = now - timedelta(days=30)
     d90 = now - timedelta(days=90)
     cohort = {
-        "today": await customers_col.count_documents({"created_at": {"$gte": today_start.isoformat()}}),
-        "last_7d": await customers_col.count_documents({"created_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}}),
-        "last_30d": await customers_col.count_documents({"created_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}}),
-        "last_90d": await customers_col.count_documents({"created_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}}),
-        "older": await customers_col.count_documents({"created_at": {"$lt": d90.isoformat()}}),
+        "today": await customers_col.count_documents(_cust_match({"created_at": {"$gte": today_start.isoformat()}})),
+        "last_7d": await customers_col.count_documents(_cust_match({"created_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}})),
+        "last_30d": await customers_col.count_documents(_cust_match({"created_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}})),
+        "last_90d": await customers_col.count_documents(_cust_match({"created_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}})),
+        "older": await customers_col.count_documents(_cust_match({"created_at": {"$lt": d90.isoformat()}})),
     }
 
     # --- Sparkline: daily net sales for the window ---
     spark_pipe = [
-        {"$match": {"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}}},
+        {"$match": _txn_match("bill_date", start.isoformat())},
         {"$group": {"_id": {"$substr": ["$bill_date", 0, 10]},
                     "net": {"$sum": "$net_amount"},
                     "txns": {"$sum": 1}}},
@@ -400,7 +462,10 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
         alerts.append({"severity": "medium", "title": "API health degraded",
                        "detail": f"{api_failed} of {api_total} requests failed ({api_health}% healthy).",
                        "link": "/admin/api-monitor"})
-    open_tickets = await tickets_col.count_documents({"status": {"$in": ["open", "in_progress", "escalated"]}})
+    tickets_match: Dict[str, Any] = {"status": {"$in": ["open", "in_progress", "escalated"]}}
+    if scoped_store_ids:
+        tickets_match["store_id"] = {"$in": scoped_store_ids}
+    open_tickets = await tickets_col.count_documents(tickets_match)
     if open_tickets > 10:
         alerts.append({"severity": "medium", "title": "Open complaints",
                        "detail": f"{open_tickets} support tickets need attention.",
@@ -410,8 +475,17 @@ async def command_center(period: str = "30d", user: dict = Depends(get_current_u
                        "detail": f"NPS score is {nps_score} ({period}).",
                        "link": "/admin/dashboards/nps"})
 
+    # Resolve filter labels for echo
+    filter_meta: Dict[str, Any] = {"period": period}
+    if store_id:
+        s = await stores_col.find_one({"id": store_id}, {"_id": 0, "name": 1, "code": 1, "city": 1})
+        filter_meta["store"] = s
+    if city:
+        filter_meta["city"] = city
+
     return {
         "period": period,
+        "filters": filter_meta,
         "generated_at": now.isoformat(),
         "kpis": {
             "net_sales": round(net, 2),

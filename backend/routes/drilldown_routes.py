@@ -188,8 +188,16 @@ def _cache_key(dashboard_key: str, payload_hash: str) -> str:
     return f"{dashboard_key}::{payload_hash}"
 
 
-async def _generate_insight(dashboard_key: str, kpis_payload: Dict[str, Any]) -> str:
-    """Generate a 2-3 sentence AI insight based on the dashboard payload."""
+async def _generate_insight(dashboard_key: str, kpis_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate a structured AI Intelligence Report based on the dashboard payload.
+
+    Returns: {
+        "headline": str,            # one-line punchline
+        "summary": str,             # 2-3 sentence executive summary
+        "drivers": [str, …],        # 3 key drivers (positive or negative)
+        "recommendations": [str, …] # 2-3 concrete next actions
+    }
+    """
     if not EMERGENT_LLM_KEY:
         raise HTTPException(500, "AI key not configured")
 
@@ -199,9 +207,12 @@ async def _generate_insight(dashboard_key: str, kpis_payload: Dict[str, Any]) ->
         f"Dashboard: {dashboard_key}\n\n"
         f"Real-time KPIs from KAZO MongoDB:\n"
         f"{json.dumps(kpis_payload, indent=2, default=str)}\n\n"
-        f"Write ONE crisp executive insight (max 2 sentences, ~40 words) using ONLY the numbers above. "
-        f"Highlight the most material trend or concern, and suggest ONE clear next action. "
-        f"Do NOT use bullet points, headings, or markdown. Plain prose only. Use ₹ for currency."
+        "Produce a CONCISE executive Intelligence Report as a strict JSON object with these keys:\n"
+        '  "headline": one punchy sentence (max 14 words)\n'
+        '  "summary": 2-3 sentences of executive context using ONLY the numbers above\n'
+        '  "drivers": array of exactly 3 short strings describing what is driving the numbers (mix of positive + negative)\n'
+        '  "recommendations": array of 2-3 concrete next actions for a KAZO retail leader\n\n'
+        "Use ₹ for currency. NO markdown, NO code fences. Output JSON object ONLY."
     )
     llm = LlmChat(
         api_key=EMERGENT_LLM_KEY,
@@ -209,7 +220,29 @@ async def _generate_insight(dashboard_key: str, kpis_payload: Dict[str, Any]) ->
         system_message=SYSTEM_PROMPT,
     ).with_model("openai", "gpt-5.2")
     reply = await llm.send_message(UserMessage(text=prompt))
-    return reply.strip()
+    raw = (reply or "").strip()
+    # Strip ```json fences if model adds them
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        # Fallback: wrap text into summary
+        parsed = {
+            "headline": raw[:120],
+            "summary": raw,
+            "drivers": [],
+            "recommendations": [],
+        }
+    # Coerce shape
+    return {
+        "headline": str(parsed.get("headline", "")).strip(),
+        "summary": str(parsed.get("summary", "")).strip(),
+        "drivers": [str(x).strip() for x in (parsed.get("drivers") or [])][:5],
+        "recommendations": [str(x).strip() for x in (parsed.get("recommendations") or [])][:5],
+    }
 
 
 class InsightRequest(BaseModel):
@@ -228,23 +261,23 @@ async def ai_insight(req: InsightRequest, user: dict = Depends(get_current_user)
     cached = _INSIGHT_CACHE.get(key)
     if cached and not req.force and (now - cached["ts"]) < _INSIGHT_TTL_SECONDS:
         return {
-            "insight": cached["text"],
+            "report": cached["report"],
             "cached": True,
             "generated_at": cached["generated_at"],
             "expires_in_seconds": int(_INSIGHT_TTL_SECONDS - (now - cached["ts"])),
         }
     try:
-        text = await _generate_insight(req.dashboard_key, req.payload)
+        report = await _generate_insight(req.dashboard_key, req.payload)
     except Exception as e:
         raise HTTPException(500, f"Insight generation failed: {str(e)}")
 
     _INSIGHT_CACHE[key] = {
-        "text": text,
+        "report": report,
         "ts": now,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     return {
-        "insight": text,
+        "report": report,
         "cached": False,
         "generated_at": _INSIGHT_CACHE[key]["generated_at"],
         "expires_in_seconds": _INSIGHT_TTL_SECONDS,

@@ -24,26 +24,43 @@ const COHORT_COLORS = { today: "#0F172A", last_7d: "#571326", last_30d: "#94A3B8
 export default function CommandCenter() {
   const navigate = useNavigate();
   const [period, setPeriod] = useState("30d");
+  const [storeId, setStoreId] = useState("");
+  const [city, setCity] = useState("");
+  const [filterOpts, setFilterOpts] = useState({ cities: [], stores: [] });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drill, setDrill] = useState(null);
 
+  // Load filter options once
+  useEffect(() => {
+    api.get("/dashboard/filter-options").then((r) => setFilterOpts(r.data)).catch(() => {});
+  }, []);
+
+  // Stores filtered by selected city (UX: narrow the store list)
+  const visibleStores = useMemo(() => {
+    if (!city) return filterOpts.stores;
+    return filterOpts.stores.filter((s) => s.city === city);
+  }, [filterOpts.stores, city]);
+
   const load = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/dashboard/command-center", { params: { period } });
+      const params = { period };
+      if (storeId) params.store_id = storeId;
+      if (city && !storeId) params.city = city;
+      const res = await api.get("/dashboard/command-center", { params });
       setData(res.data);
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period, storeId, city]);
   useEffect(() => {
-    const id = setInterval(load, 30000); // 30s live refresh
+    const id = setInterval(load, 30000);
     return () => clearInterval(id);
     // eslint-disable-next-line
-  }, [period]);
+  }, [period, storeId, city]);
 
   const windowStartISO = useMemo(() => {
     if (!data) return null;
@@ -60,6 +77,16 @@ export default function CommandCenter() {
     return d.toISOString();
   }, [period, data]);
 
+  // Mongo filter fragments to layer store/city scope into drilldowns
+  const scopedStoreIds = useMemo(() => {
+    if (storeId) return [storeId];
+    if (city) {
+      const ids = visibleStores.map((s) => s.id);
+      return ids.length ? ids : ["__none__"];
+    }
+    return null;
+  }, [storeId, city, visibleStores]);
+
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading Command Center…</div>;
   if (!data) return null;
 
@@ -72,12 +99,15 @@ export default function CommandCenter() {
     { label: "90d+", value: data.cohort_distribution.older, key: "older" },
   ];
 
+  const txnScope = scopedStoreIds ? { store_id: { $in: scopedStoreIds } } : {};
+  const custScope = scopedStoreIds ? { preferred_store_id: { $in: scopedStoreIds } } : {};
+
   // Drilldown configs
   const openSalesDrill = () => setDrill({
-    title: `Transactions · ${period}`,
+    title: `Transactions · ${period}${city ? " · " + city : ""}${storeId ? " · 1 store" : ""}`,
     subtitle: "DRILLDOWN",
     collection: "transactions",
-    filter: { bill_date: { $gte: windowStartISO } },
+    filter: { bill_date: { $gte: windowStartISO }, ...txnScope },
     sort: [["bill_date", -1]],
     columns: [
       { key: "bill_number", label: "Bill #", mono: true },
@@ -92,10 +122,10 @@ export default function CommandCenter() {
   });
 
   const openActiveCustomers = () => setDrill({
-    title: `Active customers · ${period}`,
+    title: `Active customers · ${period}${city ? " · " + city : ""}`,
     subtitle: "DRILLDOWN",
     collection: "customers",
-    filter: { last_visit_at: { $gte: windowStartISO } },
+    filter: { last_visit_at: { $gte: windowStartISO }, ...custScope },
     sort: [["lifetime_spend", -1]],
     columns: [
       { key: "name", label: "Name" },
@@ -110,10 +140,10 @@ export default function CommandCenter() {
   });
 
   const openOpenComplaints = () => setDrill({
-    title: "Open complaints",
+    title: "Open complaints" + (city ? " · " + city : "") + (storeId ? " · 1 store" : ""),
     subtitle: "DRILLDOWN",
     collection: "support_tickets",
-    filter: { status: { $in: ["open", "in_progress", "escalated"] } },
+    filter: { status: { $in: ["open", "in_progress", "escalated"] }, ...txnScope },
     sort: [["created_at", -1]],
     columns: [
       { key: "subject", label: "Subject" },
@@ -130,7 +160,7 @@ export default function CommandCenter() {
     title: `API failures · ${period}`,
     subtitle: "DRILLDOWN",
     collection: "api_logs",
-    filter: { status_code: { $gte: 400 }, timestamp: { $gte: windowStartISO } },
+    filter: { status_code: { $gte: 400 }, timestamp: { $gte: windowStartISO }, ...txnScope },
     sort: [["timestamp", -1]],
     columns: [
       { key: "timestamp", label: "When" },
@@ -142,9 +172,13 @@ export default function CommandCenter() {
     ],
   });
 
-  // Payload for AI insight — only the numbers, no PII
+  // Payload for AI insight — only the numbers + selected scope
   const aiPayload = {
     period,
+    scope: {
+      city: city || "ALL",
+      store: storeId ? (visibleStores.find((s) => s.id === storeId)?.name || storeId) : "ALL",
+    },
     net_sales: k.net_sales,
     net_sales_delta_pct: k.net_sales_delta_pct,
     transactions: k.transactions,
@@ -169,6 +203,31 @@ export default function CommandCenter() {
         subtitle="LIVE · REAL-TIME COMPUTED"
         actions={
           <>
+            <select
+              className="k-input !w-auto !py-1.5"
+              value={city}
+              onChange={(e) => {
+                setCity(e.target.value);
+                setStoreId(""); // reset store when city changes
+              }}
+              data-testid="cc-city"
+            >
+              <option value="">All cities</option>
+              {filterOpts.cities.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+            <select
+              className="k-input !w-auto !py-1.5"
+              value={storeId}
+              onChange={(e) => setStoreId(e.target.value)}
+              data-testid="cc-store"
+            >
+              <option value="">All stores{city ? ` in ${city}` : ""}</option>
+              {visibleStores.map((s) => (
+                <option key={s.id} value={s.id}>{s.code} · {s.name}</option>
+              ))}
+            </select>
             <select
               className="k-input !w-auto !py-1.5"
               value={period}
@@ -363,7 +422,7 @@ export default function CommandCenter() {
                       older: { lt: new Date(Date.now() - 90*86400000).toISOString() },
                     };
                     const r = ranges[d.key];
-                    const filt = { created_at: {} };
+                    const filt = { created_at: {}, ...custScope };
                     if (r.gte) filt.created_at.$gte = r.gte;
                     if (r.lt) filt.created_at.$lt = r.lt;
                     setDrill({
