@@ -145,6 +145,38 @@ async def startup():
                 )
                 logger.info(f"Backfilled store_id for {email} -> {s['code']}")
 
+    # Seed all demo / operational users (idempotent — runs on every boot so
+    # production deployments with a fresh DB always have working logins).
+    demo_users = [
+        ("crm@kazo.com", "Priya Sharma", "crm_manager", None),
+        ("marketing@kazo.com", "Rohan Kapoor", "marketing_manager", None),
+        ("regional.north@kazo.com", "Anjali Verma", "regional_manager", None),
+        ("store.mumbai@kazo.com", "Neha Patel", "store_manager", "Mumbai"),
+        ("staff.delhi@kazo.com", "Karan Singh", "store_staff", "Delhi"),
+        ("support@kazo.com", "Riya Mehra", "support_agent", None),
+        ("analytics@kazo.com", "Aditya Rao", "analytics_viewer", None),
+        ("executive@kazo.com", "Kavita Iyer", "readonly_executive", None),
+        ("it@kazo.com", "Vikram Joshi", "brand_admin", None),
+    ]
+    for email, name, role, city in demo_users:
+        if await users_col.find_one({"email": email}):
+            continue
+        doc = {
+            "id": uuid.uuid4().hex,
+            "email": email,
+            "name": name,
+            "role": role,
+            "password_hash": hash_password("Kazo@2026"),
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if city:
+            s = await stores_col.find_one({"city": city, "is_active": True})
+            if s:
+                doc["store_id"] = s["id"]
+        await users_col.insert_one(doc)
+        logger.info(f"Seeded demo user {email}")
+
     # Seed loyalty config
     cfg = await loyalty_config_col.find_one({"id": "default"})
     if not cfg:
