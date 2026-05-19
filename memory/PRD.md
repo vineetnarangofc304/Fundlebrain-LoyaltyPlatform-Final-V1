@@ -54,6 +54,16 @@ Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manag
 - ✅ **Security fix** — `_store_scope` now denies (403) when store-bound role has no `store_id`; startup migration backfills `store_id` for `store.mumbai@kazo.com` and `staff.delhi@kazo.com`
 - ✅ Iteration 3 testing: 30/31 pytest pass, 1 P0 fixed (store-scope bypass)
 
+### Iteration 5 (May 2026) — ✅ FundleBrain Phase 3B + colour upgrade (5 dashboards)
+- ✅ **Cohorts & Segmentation** — `GET /api/dashboard/cohorts-segmentation`: one-timer revenue-at-risk panel with 15%-recovery estimate + recency buckets, frequency bands (One-timer/Light/Regular/Loyal/VIP) with ATV, spend bands, tier donut, retention triangle (12×12 cohort heatmap, signup-month × month-offset), acquisition trend. Verified: bands mutually exclusive (sum = transacted), offset-0 = 100%.
+- ✅ **Points Economics v2** — `GET /api/dashboard/points-economics`: earn-vs-burn gauge with gradient bar, outstanding liability, 12-month earn/burn stacked flow, breakage risk (180d stale), top redeemers leaderboard.
+- ✅ **Campaign ROI v2** — `GET /api/dashboard/campaign-roi`: Sent→Delivered→Opened→Clicked→Converted funnel, channel pie + table, campaign leaderboard sorted by ROI with red/green colour coding.
+- ✅ **Executive Summary v2** — `GET /api/dashboard/executive-summary` + `/pdf`: composite snapshot + ReportLab branded PDF download (KAZO burgundy header, light cream cards, indigo/teal section bars). Valid `%PDF` payload.
+- ✅ **Formula Catalog** — `GET /api/dashboard/formula-catalog`: 23 KPI formulas across 8 categories (Revenue/Customer/RFM/Cohort/Loyalty/Campaign/Experience/Operations) auto-rendered with search + category pills. Single source of truth.
+- ✅ **Command Center colour upgrade** — alerts now coloured (rose=CRITICAL with gradient, amber=WARNING with gradient + left accent strip), sparkline shows Net ₹ (burgundy) + Txns (indigo) as overlapping area charts with custom gradients.
+- ✅ **Cohorts dashboard** AI Cohort & Segment Intelligence Report on top.
+- ✅ Iteration 5 testing: 11/11 backend pytest + 5/5 frontend Playwright (`/app/test_reports/iteration_5.json`). No P0/P1 issues.
+
 ### Iteration 4 (May 2026) — ✅ FundleBrain Phase 3A complete (3 new dashboards + colour system)
 - ✅ **Customer 360 v2** — `GET /api/dashboard/customer-360/{id}`: live RFM score + 11-segment label, lifetime aggregates from raw transactions, monthly spend chart (area + bar overlay), store affinity, category affinity, recent transactions, points ledger, NPS history, AI Customer Intelligence Report
 - ✅ **Store Performance v2** — `GET /api/dashboard/store-performance-v2`: Leaderboard (ranked, vs-prev delta with NEW fallback), By City (multi-coloured bars + scorecard), Day Analysis (weekday bar + 7×24 heatmap). store_manager/store_staff scoped to own store.
@@ -69,10 +79,17 @@ Super Admin · Brand Admin · CRM Manager · Marketing Manager · Regional Manag
 - [x] Store Performance v2
 - [x] RFM & Churn Dashboard
 
-### P0 — Next up (Phase 3B)
-- [ ] Points Economics v2 — earn-burn gauge, liability value, monthly flow, top redeemers
-- [ ] Cohort Migration — triangular retention heatmap by signup month
-- [ ] Campaign ROI v2 — Sent→Delivered→Clicked→Converted funnel + retention heatmap
+### P0 — FundleBrain Phase 3B — ✅ DONE
+- [x] Cohorts & Segmentation (one-timers + retention triangle)
+- [x] Points Economics v2
+- [x] Campaign ROI v2
+- [x] Executive Summary v2 + PDF
+- [x] Formula Catalog
+
+### P1 — Remaining
+- [ ] AI Engine upgrade — true function-calling against MongoDB, streaming, CSV upload for narration
+- [ ] Refresh colour system across older dashboards (Sales, Customer Analytics, Loyalty, Campaign Performance, NPS)
+- [ ] Seed `campaign_metrics` collection so Campaign ROI funnel populates with real engagement data
 
 ### P1 — FundleBrain Phase 3B (remaining)
 - [ ] Points Economics v2 — earn-burn gauge, liability value, monthly flow, top redeemers
