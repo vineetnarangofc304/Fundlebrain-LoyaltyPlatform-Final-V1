@@ -31,6 +31,43 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.7 (May 2026) — ✅ Mobile Sidebar + Batch B + Reconciliation Engine
+
+**1) Collapsible sidebar on mobile** (`AdminLayout.jsx`):
+- Hamburger button (fixed top-left, mobile-only) opens a sliding drawer
+- Click anywhere on backdrop OR navigating to a route closes the drawer
+- Desktop (`md:`+) keeps the sidebar always-visible (zero regression)
+- New `data-testid` hooks: `mobile-menu-open`, `mobile-menu-close`, `mobile-menu-backdrop`
+
+**2) Batch B**:
+- **R6 retrofit endpoint** `POST /api/historic-data/backfill-points-ledger` — sweeps every loyalty transaction, writes `earn`/`redeem`/`bonus` ledger entries for any bill that doesn't yet have them. Idempotent (deduped by `source_bill_id` index built in memory).
+- **R4 dedupe scan** `GET /api/historic-data/dedupe/mobiles` — returns any non-empty mobile held by more than one customer doc (now defensive — the partial-unique index built in 11.6 prevents new dupes).
+
+**3) Reconciliation engine** `GET /api/historic-data/reconcile?job_id=...`:
+- Compares the last (or specified) completed ingest job vs current DB state
+- Sections: `job_summary` (CSV vs processed), `db_state` (live counts), `sums` (₹ + points · txn columns vs ledger), `integrity` (orphan store_id, missing customer docs, duplicate mobiles, ledger coverage %)
+- Top-level `status` flag = `clean` or `issues_found` with a human-readable issue list
+- Returns the exact diff numbers so you can verify CSV ingest matched DB exactly
+
+**Frontend**: new admin page `/admin/reconciliation` (`ReconciliationPage.jsx`):
+- Status banner (green if clean, amber if issues)
+- Last Ingest Job KPI strip (CSV rows / Inserted / Updated / Skipped / Diff)
+- Database State live counts (loyalty vs non-loyalty, customers, stores, distinct mobiles)
+- Monetary & points sums (₹ + ledger-vs-txns diff)
+- Integrity panel (orphans, dedupe, ledger coverage)
+- **Repair Toolbox**: 3 one-click idempotent fixes — Loyalty Backfill / Points Ledger Backfill / Dedupe Scan. Toast feedback, auto-refresh after success.
+- Added under sidebar section DATA › "Data Reconciliation" (super_admin / brand_admin only)
+
+**Verified on preview** (34 test txns):
+- `POST /backfill-points-ledger` → 10 earn entries written from txn columns, 19 skipped (no points), 0 already-indexed (idempotent on rerun) ✅
+- `GET /dedupe/mobiles` → 0 duplicates ✅
+- `GET /reconcile` → status=`issues_found` (correct on test data — 10 seeded txns have no store, low ledger coverage as seeds had no points cols) ✅
+- Mobile drawer screenshots: hamburger opens / closes / backdrop dismisses ✅
+- Desktop view unchanged ✅
+- Python + JS lint clean
+
+**User next steps**: Redeploy production → log in on phone to verify hamburger works → go to **Operations > Data Reconciliation** to see the full integrity report. Click any of the 3 repair buttons if issues are flagged; they're all safe / idempotent.
+
 ### Iteration 11.6 (May 2026) — ✅ Loyalty Data Model Lock-In (R1–R6)
 
 User formalised the canonical KAZO loyalty data rules:

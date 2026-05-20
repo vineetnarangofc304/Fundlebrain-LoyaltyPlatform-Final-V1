@@ -1314,3 +1314,280 @@ async def backfill_loyalty_model(
     report["completed_at"] = datetime.now(timezone.utc).isoformat()
     logger.info(f"Loyalty backfill complete: {report}")
     return report
+
+
+# ============================================================
+# R6 retrofit — write missing points-ledger entries for ALL existing
+# loyalty transactions (not just new ingest jobs). Idempotent.
+# ============================================================
+@router.post("/backfill-points-ledger")
+async def backfill_points_ledger(
+    user: dict = Depends(require_roles("super_admin", "brand_admin")),
+):
+    """Sweep every loyalty transaction and ensure its earn / redeem / bonus
+    ledger entries exist (R6). Skips transactions that already have entries."""
+    from pymongo import InsertOne
+
+    report: Dict[str, Any] = {"started_at": datetime.now(timezone.utc).isoformat()}
+    counts = {"earn": 0, "redeem": 0, "bonus": 0, "scanned": 0, "skipped_no_points": 0,
+              "skipped_already_indexed": 0}
+
+    # Pre-fetch all bill_ids that already have ledger entries (set membership for O(1) lookup)
+    indexed: set = set()
+    async for d in points_ledger_col.find(
+        {"source_bill_id": {"$exists": True, "$ne": None}}, {"_id": 0, "source_bill_id": 1}
+    ):
+        sid = d.get("source_bill_id")
+        if sid:
+            indexed.add(sid)
+    report["existing_ledger_index_size"] = len(indexed)
+
+    ops: List[Any] = []
+    BATCH = 1000
+    cursor = transactions_col.find(
+        {"customer_mobile": {"$nin": [None, ""]}},
+        {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1, "customer_mobile": 1,
+         "store_id": 1, "points_earned": 1, "points_redeemed": 1, "bonus_points": 1},
+    )
+    async for tx in cursor:
+        counts["scanned"] += 1
+        bill_id = tx.get("id")
+        if not bill_id:
+            continue
+        if bill_id in indexed:
+            counts["skipped_already_indexed"] += 1
+            continue
+        earn = int(tx.get("points_earned") or 0)
+        redeem = int(tx.get("points_redeemed") or 0)
+        bonus = int(tx.get("bonus_points") or 0)
+        if not (earn or redeem or bonus):
+            counts["skipped_no_points"] += 1
+            continue
+        base = {
+            "customer_mobile": tx["customer_mobile"],
+            "bill_number": tx.get("bill_number"),
+            "bill_date": tx.get("bill_date"),
+            "store_id": tx.get("store_id"),
+            "source_bill_id": bill_id,
+            "source": "historic_upload_backfill",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if earn > 0:
+            ops.append(InsertOne({**base, "id": uuid.uuid4().hex, "type": "earn",
+                                  "points": earn, "reason": "Backfill earn"}))
+            counts["earn"] += 1
+        if redeem > 0:
+            ops.append(InsertOne({**base, "id": uuid.uuid4().hex, "type": "redeem",
+                                  "points": -abs(redeem), "reason": "Backfill redemption"}))
+            counts["redeem"] += 1
+        if bonus > 0:
+            ops.append(InsertOne({**base, "id": uuid.uuid4().hex, "type": "bonus",
+                                  "points": bonus, "reason": "Backfill bonus"}))
+            counts["bonus"] += 1
+        if len(ops) >= BATCH:
+            try:
+                await points_ledger_col.bulk_write(ops, ordered=False)
+            except Exception as e:
+                logger.warning(f"Ledger backfill bulk partial: {e}")
+            ops.clear()
+    if ops:
+        try:
+            await points_ledger_col.bulk_write(ops, ordered=False)
+        except Exception as e:
+            logger.warning(f"Ledger backfill bulk final partial: {e}")
+    report["counts"] = counts
+    report["completed_at"] = datetime.now(timezone.utc).isoformat()
+    logger.info(f"Points-ledger backfill complete: {report}")
+    return report
+
+
+# ============================================================
+# R4 dedupe report — surface any customers sharing a mobile.
+# (The new partial-unique index prevents new dupes; this scans the existing DB.)
+# ============================================================
+@router.get("/dedupe/mobiles")
+async def dedupe_mobiles(user: dict = Depends(require_roles("super_admin", "brand_admin"))):
+    """Return any non-empty mobile numbers held by more than one customer doc.
+    Empty/null mobiles are ignored (those are anonymous walk-ins by design)."""
+    pipe = [
+        {"$match": {"mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$mobile", "count": {"$sum": 1},
+                    "ids": {"$push": {"id": "$id", "name": "$name",
+                                       "lifetime_spend": "$lifetime_spend",
+                                       "created_at": "$created_at"}}}},
+        {"$match": {"count": {"$gt": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 500},
+    ]
+    rows = await customers_col.aggregate(pipe).to_list(500)
+    return {"duplicate_mobiles": len(rows),
+             "rows": [{"mobile": r["_id"], "count": r["count"], "docs": r["ids"]}
+                       for r in rows]}
+
+
+# ============================================================
+# Reconciliation engine — single-shot, comprehensive integrity check
+# comparing the LAST completed CSV ingest job vs current DB state.
+# ============================================================
+@router.get("/reconcile")
+async def reconcile(
+    job_id: Optional[str] = None,
+    user: dict = Depends(require_roles("super_admin", "brand_admin")),
+):
+    """Reconciliation report — compares the last completed CSV ingest job
+    (or the one provided via ?job_id=) against the current DB state.
+
+    Returns:
+      - job_summary: original CSV counts vs ingest result counts
+      - db_state: live aggregate counts in MongoDB
+      - sums: CSV-declared sums (per job) vs DB sums
+      - integrity_checks: orphaned-store txns, missing customer mobiles,
+                          duplicate mobiles, ledger coverage gaps
+    """
+    # 1. Pick the job to reconcile against
+    if job_id:
+        job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    else:
+        job = await historic_jobs_col.find_one(
+            {"status": "completed", "dataset": "transactions"},
+            {"_id": 0},
+            sort=[("completed_at", -1)],
+        )
+    if not job:
+        raise HTTPException(404, "No completed transactions ingest job found")
+
+    # 2. Per-job ingest reconciliation (already maintained, but re-stated)
+    total = int(job.get("total_rows") or 0)
+    inserted = int(job.get("inserted") or 0)
+    updated = int(job.get("updated") or 0)
+    skipped = int(job.get("skipped") or 0)
+    processed = inserted + updated + skipped
+    job_summary = {
+        "job_id": job["id"],
+        "dataset": job.get("dataset"),
+        "completed_at": job.get("completed_at"),
+        "csv_total_rows": total,
+        "inserted": inserted,
+        "updated": updated,
+        "skipped": skipped,
+        "processed_total": processed,
+        "diff": total - processed,
+        "match": (total - processed) == 0,
+        "errors_sample": (job.get("errors_sample") or [])[:5],
+    }
+
+    # 3. DB state — totals + loyalty/non-loyalty split + ledger
+    db_state = {
+        "transactions_total": await transactions_col.count_documents({}),
+        "transactions_loyalty": await transactions_col.count_documents(
+            {"customer_mobile": {"$nin": [None, ""]}}),
+        "transactions_non_loyalty": await transactions_col.count_documents(
+            {"customer_mobile": {"$in": [None, ""]}}),
+        "customers_total": await customers_col.count_documents({}),
+        "customers_with_home_store": await customers_col.count_documents(
+            {"home_store_id": {"$ne": None}}),
+        "customers_with_first_purchase": await customers_col.count_documents(
+            {"first_purchase_at": {"$ne": None}}),
+        "distinct_mobiles_in_txns": len(await transactions_col.distinct(
+            "customer_mobile", {"customer_mobile": {"$nin": [None, ""]}})),
+        "stores_total": await stores_col.count_documents({}),
+        "points_ledger_total": await points_ledger_col.count_documents({}),
+    }
+
+    # 4. Money + points sums (loyalty only)
+    sums_pipe = [
+        {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": None,
+                    "net_sum": {"$sum": "$net_amount"},
+                    "tax_sum": {"$sum": "$tax_amount"},
+                    "discount_sum": {"$sum": "$discount_amount"},
+                    "earned_sum": {"$sum": "$points_earned"},
+                    "redeemed_sum": {"$sum": "$points_redeemed"},
+                    "bonus_sum": {"$sum": "$bonus_points"}}},
+    ]
+    sums_row = (await transactions_col.aggregate(sums_pipe).to_list(1)) or [{}]
+    sums_row = sums_row[0] if sums_row else {}
+    ledger_pipe = [
+        {"$group": {"_id": "$type", "total": {"$sum": "$points"}}}
+    ]
+    led_rows = await points_ledger_col.aggregate(ledger_pipe).to_list(10)
+    ledger_totals = {r["_id"]: int(r["total"]) for r in led_rows}
+
+    sums = {
+        "net_amount_loyalty": round(sums_row.get("net_sum", 0) or 0, 2),
+        "tax_loyalty": round(sums_row.get("tax_sum", 0) or 0, 2),
+        "discount_loyalty": round(sums_row.get("discount_sum", 0) or 0, 2),
+        "points_earned_from_txns": int(sums_row.get("earned_sum", 0) or 0),
+        "points_redeemed_from_txns": int(sums_row.get("redeemed_sum", 0) or 0),
+        "points_bonus_from_txns": int(sums_row.get("bonus_sum", 0) or 0),
+        "ledger_earn_total": ledger_totals.get("earn", 0),
+        "ledger_redeem_total": abs(ledger_totals.get("redeem", 0)),
+        "ledger_bonus_total": ledger_totals.get("bonus", 0),
+        "ledger_vs_txns_earn_diff":
+            ledger_totals.get("earn", 0) - int(sums_row.get("earned_sum", 0) or 0),
+        "ledger_vs_txns_redeem_diff":
+            abs(ledger_totals.get("redeem", 0)) - int(sums_row.get("redeemed_sum", 0) or 0),
+    }
+
+    # 5. Integrity checks
+    # 5a. Orphan transactions (store_id null after store auto-create)
+    orphan_store_txns = await transactions_col.count_documents({"store_id": None})
+    # 5b. Loyalty customers in txns but missing customer doc
+    txn_mobiles = await transactions_col.distinct(
+        "customer_mobile", {"customer_mobile": {"$nin": [None, ""]}}
+    )
+    cust_mobiles_set = set(await customers_col.distinct(
+        "mobile", {"mobile": {"$in": txn_mobiles}}
+    ))
+    missing_customer_for_mobile = [m for m in txn_mobiles if m not in cust_mobiles_set]
+    # 5c. Duplicate mobiles
+    dup_pipe = [
+        {"$match": {"mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$mobile", "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}},
+        {"$count": "duplicates"},
+    ]
+    dup_result = await customers_col.aggregate(dup_pipe).to_list(1)
+    dup_count = dup_result[0]["duplicates"] if dup_result else 0
+    # 5d. Ledger coverage = % of loyalty bills that have at least 1 ledger entry
+    loyalty_txn_count = db_state["transactions_loyalty"]
+    bills_in_ledger = len(await points_ledger_col.distinct(
+        "source_bill_id", {"source_bill_id": {"$exists": True, "$ne": None}}
+    ))
+    ledger_coverage_pct = round((bills_in_ledger / loyalty_txn_count * 100), 2) \
+        if loyalty_txn_count else 0
+
+    integrity = {
+        "orphan_store_txns": orphan_store_txns,
+        "loyalty_mobiles_missing_customer_doc": len(missing_customer_for_mobile),
+        "missing_customer_sample": missing_customer_for_mobile[:5],
+        "duplicate_mobile_customers": dup_count,
+        "ledger_coverage_loyalty_bills_pct": ledger_coverage_pct,
+        "ledger_coverage_bills_seen": bills_in_ledger,
+    }
+
+    # 6. Overall pass/fail flag
+    issues: List[str] = []
+    if not job_summary["match"]:
+        issues.append(f"CSV vs processed diff = {job_summary['diff']}")
+    if integrity["orphan_store_txns"]:
+        issues.append(f"{integrity['orphan_store_txns']} txns missing store_id")
+    if integrity["loyalty_mobiles_missing_customer_doc"]:
+        issues.append(f"{integrity['loyalty_mobiles_missing_customer_doc']} loyalty mobiles missing customer doc")
+    if integrity["duplicate_mobile_customers"]:
+        issues.append(f"{integrity['duplicate_mobile_customers']} duplicate mobile-customer docs")
+    if loyalty_txn_count and integrity["ledger_coverage_loyalty_bills_pct"] < 95 and (
+        sums["points_earned_from_txns"] or sums["points_redeemed_from_txns"]):
+        issues.append(f"Ledger coverage only {integrity['ledger_coverage_loyalty_bills_pct']}% — run /backfill-points-ledger")
+    if sums["ledger_vs_txns_earn_diff"]:
+        issues.append(f"Ledger earn total off by {sums['ledger_vs_txns_earn_diff']} vs txns")
+
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "status": "clean" if not issues else "issues_found",
+        "issues": issues,
+        "job_summary": job_summary,
+        "db_state": db_state,
+        "sums": sums,
+        "integrity": integrity,
+    }

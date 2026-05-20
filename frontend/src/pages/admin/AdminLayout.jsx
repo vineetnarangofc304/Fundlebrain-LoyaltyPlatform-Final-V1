@@ -1,11 +1,12 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuth, hasRole } from "@/lib/auth";
 import {
   LayoutDashboard, TrendingUp, UserRound, Award, BarChart3, Store as StoreIcon, MessageCircle,
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
-  Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound
+  Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound,
+  Menu as MenuIcon, X as CloseIcon, ShieldCheck
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const SECTIONS = [
   {
@@ -57,6 +58,7 @@ const SECTIONS = [
     label: "DATA",
     items: [
       { to: "/admin/historic-data", icon: Database, label: "Historical Upload", testid: "nav-historic-data" },
+      { to: "/admin/reconciliation", icon: ShieldCheck, label: "Data Reconciliation", testid: "nav-reconciliation" },
     ],
   },
   {
@@ -102,18 +104,64 @@ const SECTIONS = [
 export default function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [collapsed, setCollapsed] = useState({});
+  // Mobile sidebar drawer state — closed by default on small screens
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Close drawer whenever route changes (so a nav-click on mobile dismisses it)
+  useEffect(() => { setDrawerOpen(false); }, [location.pathname]);
 
   const toggleSection = (label) => setCollapsed((c) => ({ ...c, [label]: !c[label] }));
 
   return (
-    <div className="min-h-screen flex" style={{ background: "var(--workspace-bg)" }}>
-      <aside className="admin-sidebar w-64 m-3 flex flex-col" data-testid="admin-sidebar">
-        <div className="p-5 border-b border-white/10">
-          <div className="font-display text-2xl tracking-tight text-white">KAZO</div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-white/40 mt-1 flex items-center gap-1">
-            <Sparkles className="w-3 h-3" /> Powered by Fundle
+    <div className="min-h-screen flex relative" style={{ background: "var(--workspace-bg)" }}>
+      {/* Mobile hamburger — fixed top-left, only on small screens */}
+      <button
+        type="button"
+        onClick={() => setDrawerOpen(true)}
+        className="md:hidden fixed top-3 left-3 z-40 w-10 h-10 rounded-full flex items-center justify-center bg-black/85 text-white shadow-lg backdrop-blur"
+        aria-label="Open menu"
+        data-testid="mobile-menu-open"
+      >
+        <MenuIcon className="w-5 h-5" />
+      </button>
+
+      {/* Backdrop — only when drawer is open on mobile */}
+      {drawerOpen && (
+        <button
+          type="button"
+          onClick={() => setDrawerOpen(false)}
+          className="md:hidden fixed inset-0 z-40 bg-black/50 backdrop-blur-sm"
+          aria-label="Close menu"
+          data-testid="mobile-menu-backdrop"
+        />
+      )}
+
+      <aside
+        className={`admin-sidebar w-64 m-3 flex flex-col z-50 transition-transform duration-300
+          md:relative md:translate-x-0
+          fixed top-0 left-0 bottom-0 max-h-screen
+          ${drawerOpen ? "translate-x-0" : "-translate-x-[110%] md:translate-x-0"}`}
+        data-testid="admin-sidebar"
+      >
+        <div className="p-5 border-b border-white/10 flex items-start justify-between">
+          <div>
+            <div className="font-display text-2xl tracking-tight text-white">KAZO</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-white/40 mt-1 flex items-center gap-1">
+              <Sparkles className="w-3 h-3" /> Powered by Fundle
+            </div>
           </div>
+          {/* Close button — mobile only */}
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(false)}
+            className="md:hidden text-white/70 hover:text-white"
+            aria-label="Close menu"
+            data-testid="mobile-menu-close"
+          >
+            <CloseIcon className="w-5 h-5" />
+          </button>
         </div>
         <nav className="flex-1 py-3 overflow-y-auto">
           {SECTIONS.map((section) => {
@@ -160,7 +208,7 @@ export default function AdminLayout() {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-x-hidden">
+      <main className="flex-1 overflow-x-hidden min-w-0">
         <Outlet />
       </main>
     </div>
