@@ -9,6 +9,14 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
 def _start(period_days: int):
+    """Return ISO timestamp of the lookback window start.
+
+    `period_days <= 0` is a sentinel meaning **all time** — used by the
+    frontend's "All time" filter so historical CSV uploads (whose bill dates
+    can be years old) are included.
+    """
+    if period_days is None or period_days <= 0:
+        period_days = 365 * 20
     return (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
 
 

@@ -31,6 +31,39 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.5 (May 2026) — ✅ All-Time Default + AI Chat Historical Awareness
+
+**Issue from production**: User uploaded a 200,000-row historical billing CSV (`Billing_Report_New_1776672163581.csv`) that ingested cleanly (199,915 inserted + 84 updated = 100% reconciliation), but **all dashboards showed empty / no records** and Fundle Brain AI chat refused to answer ("Data not available"). Root cause: every dashboard defaulted to a 30-day window while the CSV billing dates were years old, so every aggregation filter excluded the data. AI tools also defaulted to `days=30` so they returned zero and the model honestly reported no data.
+
+**Backend fix** — universal "All-time" sentinel where `period_days <= 0` (and `period in {"all","0","0d"}`) means a 20-year (7,300-day) lookback:
+- `routes/analytics_routes.py::_start` — new normalize helper
+- `routes/dashboard_routes.py::_date_range` — accepts `"all"`, `"0"`, `"0d"`, empty
+- `routes/fundlebrain_routes.py::_norm_period_days` — applied to `store-performance-v2`, `points-economics`, `executive-summary`
+- `routes/reports_routes.py::_norm_days` — applied to `/reports/transactions`, `/reports/transactions/export`, `/reports/custom`
+- `routes/nps_routes.py::_norm_days` — applied to `/nps/summary`, `/nps/by-store`
+- `routes/ai_tools.py::_norm_days` — applied to ALL 7 time-windowed tools (`get_overall_kpis`, `top_churning_customers`, `store_performance`, `city_performance`, `top_skus`, `nps_summary`, `communication_log_summary`)
+
+**AI-tool schema** updates so GPT-5.2 *knows* to use `days=0` for historical questions:
+- Updated `get_overall_kpis`, `store_performance`, `city_performance`, `top_skus` schema descriptions to mention "Pass days=0 for ALL-TIME"
+- Rewrote `SYSTEM_PROMPT` in `ai_routes.py`: explicitly instructs Brain to use `days=0` when user asks about "all data / lifetime / historical / since launch", and to retry once with `days=0` if a windowed call returns zero before saying "Data not available"
+
+**Frontend fix** — every period selector now offers "All time" and **defaults to it**:
+- `pages/admin/ExecutiveCockpit.jsx` — default `"all"`, added "All time / 1 year" options
+- `pages/admin/dashboards/CommandCenter.jsx` — default `"all"`
+- `pages/admin/dashboards/SalesDashboard.jsx` — default `0`, added "All time" option
+- `pages/admin/dashboards/StoreDashboard.jsx` — default `0`, added "All time" option
+- `pages/admin/dashboards/PointsDashboard.jsx` — default `0`, added "All time" option
+- `pages/admin/dashboards/ExecutiveSummary.jsx` — default `0`, added "All time" option
+
+**Verification** (preview, with 5 seed transactions from 2024-05-20 + existing historical sample):
+- `GET /api/dashboard/kpis?period=30d` → net 0, txns 8 (correct: 30-day window)
+- `GET /api/dashboard/kpis?period=all` → net ₹43,979, txns 31 (correct: all-time)
+- `GET /api/analytics/sales-dashboard?period_days=0` → hourly buckets populated with ₹36k+ from years-old data
+- AI chat "What is our total all-time net sales?" → correctly calls `get_overall_kpis(days=0)`, returns *"Net Sales ₹39,229 · Transactions 26"* with executive recommendations
+- 30/30 POS pytest still pass; lint clean
+
+**User next steps**: Redeploy production. After redeploy, every dashboard will land on "All time" by default and immediately show the 200k uploaded transactions. AI chat will also answer historical questions correctly.
+
 ### Iteration 11.4 (May 2026) — ✅ POS API Self-Diagnosing 403 Errors
 
 **Issue from production**: KAZO POS team reported "all POS APIs return 403 Forbidden" on https://kazoloyalty.fundlebrain.ai. Confirmed via curl — production correctly returned the FastAPI `_validate_creds` 403 with the opaque body `{"detail":"Forbidden"}`, giving the integrator no clue *which* check failed.

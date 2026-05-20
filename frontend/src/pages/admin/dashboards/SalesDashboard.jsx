@@ -5,14 +5,14 @@ import { fmtINR, fmtNum } from "@/lib/format";
 import { LineChart, Line, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
 
 export default function SalesDashboard() {
-  const [period, setPeriod] = useState(30);
+  const [period, setPeriod] = useState(0);   // 0 = All time (default, includes historical CSV uploads)
   const [data, setData] = useState(null);
   const [trend, setTrend] = useState([]);
 
   useEffect(() => {
     Promise.all([
       api.get("/analytics/sales-dashboard", { params: { period_days: period } }),
-      api.get("/dashboard/sales-trend", { params: { period: `${period}d` } }),
+      api.get("/dashboard/sales-trend", { params: { period: period === 0 ? "all" : `${period}d` } }),
     ]).then(([d, t]) => { setData(d.data); setTrend(t.data); });
   }, [period]);
 
@@ -27,7 +27,7 @@ export default function SalesDashboard() {
       <PageHeader title="Sales Dashboard" subtitle="REVENUE INTELLIGENCE · LIVE"
         actions={
           <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="sales-period">
-            <option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>365 days</option>
+            <option value={0}>All time</option><option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>365 days</option>
           </select>
         } />
       <div className="p-8 space-y-6">
@@ -39,7 +39,7 @@ export default function SalesDashboard() {
         </div>
 
         <div className="chart-card p-5" data-accent="burgundy">
-          <SectionHeading eyebrow="REVENUE TREND" title={`Daily net revenue · last ${period} days`} accent="burgundy" />
+          <SectionHeading eyebrow="REVENUE TREND" title={`Daily net revenue · ${period === 0 ? "all time" : `last ${period} days`}`} accent="burgundy" />
           <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={trend}>
               <defs>

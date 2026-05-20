@@ -17,6 +17,13 @@ def _sentiment(score: int) -> str:
     return "detractor"
 
 
+def _norm_days(period_days: Optional[int]) -> int:
+    """`period_days <= 0` => 'all time' (20-year window)."""
+    if period_days is None or period_days <= 0:
+        return 365 * 20
+    return period_days
+
+
 @router.post("")
 async def submit_nps(body: dict, user: dict = Depends(get_current_user)):
     score = int(body.get("score", -1))
@@ -40,6 +47,7 @@ async def submit_nps(body: dict, user: dict = Depends(get_current_user)):
 
 @router.get("/summary")
 async def nps_summary(period_days: int = 60, user: dict = Depends(get_current_user)):
+    period_days = _norm_days(period_days)
     start = (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
     pipe = [
         {"$match": {"created_at": {"$gte": start}}},
@@ -69,6 +77,7 @@ async def nps_summary(period_days: int = 60, user: dict = Depends(get_current_us
 
 @router.get("/by-store")
 async def nps_by_store(period_days: int = 60, user: dict = Depends(get_current_user)):
+    period_days = _norm_days(period_days)
     start = (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
     pipe = [
         {"$match": {"created_at": {"$gte": start}, "store_id": {"$ne": None}}},

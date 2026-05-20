@@ -13,6 +13,13 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 digest_reports_col = db["digest_reports"]
 
 
+def _norm_days(period_days: Optional[int]) -> int:
+    """`period_days <= 0` => 'all time' (20-year window) — used by 'All time' filter."""
+    if period_days is None or period_days <= 0:
+        return 365 * 20
+    return period_days
+
+
 # ---------------- Scheduled executive digest ----------------
 @router.get("/digests")
 async def list_digests(limit: int = 30, user: dict = Depends(get_current_user)):
@@ -59,6 +66,7 @@ async def transactions_report(
     customer_id: Optional[str] = None, limit: int = 500, skip: int = 0,
     user: dict = Depends(get_current_user)
 ):
+    period_days = _norm_days(period_days)
     start = (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
     fil = {"bill_date": {"$gte": start}}
     if store_id:
@@ -72,6 +80,7 @@ async def transactions_report(
 
 @router.get("/transactions/export")
 async def export_transactions(period_days: int = 30, store_id: Optional[str] = None, user: dict = Depends(get_current_user)):
+    period_days = _norm_days(period_days)
     start = (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
     fil = {"bill_date": {"$gte": start}}
     if store_id:
@@ -122,7 +131,7 @@ async def audit_logs(limit: int = 200, action: Optional[str] = None, user: dict 
 async def run_custom_report(body: dict, user: dict = Depends(get_current_user)):
     """body: {entity: 'transactions'|'customers', metrics: [...], dimensions: [...], filters: {...}, period_days: 30}"""
     entity = body.get("entity", "transactions")
-    period_days = int(body.get("period_days", 30))
+    period_days = _norm_days(int(body.get("period_days", 30)))
     dim = body.get("dimensions", [])  # e.g. ['store_id', 'category']
     metrics = body.get("metrics", ["count", "sum_net"])
     fil = body.get("filters", {}) or {}

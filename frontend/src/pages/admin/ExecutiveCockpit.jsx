@@ -10,7 +10,7 @@ const COLORS = ["#0F172A", "#571326", "#C7A76D", "#94A3B8", "#1f2937", "#7c2d4a"
 
 export default function ExecutiveCockpit() {
   const navigate = useNavigate();
-  const [period, setPeriod] = useState("30d");
+  const [period, setPeriod] = useState("all");   // Default to All time so historical CSV uploads are visible immediately
   const [kpis, setKpis] = useState(null);
   const [trend, setTrend] = useState([]);
   const [stores, setStores] = useState([]);
@@ -58,10 +58,12 @@ export default function ExecutiveCockpit() {
         actions={
           <>
             <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(e.target.value)} data-testid="period-selector">
+              <option value="all">All time</option>
               <option value="today">Today</option>
               <option value="7d">Last 7 days</option>
               <option value="30d">Last 30 days</option>
               <option value="90d">Last 90 days</option>
+              <option value="1y">Last 1 year</option>
               <option value="mtd">Month to date</option>
               <option value="ytd">Year to date</option>
             </select>

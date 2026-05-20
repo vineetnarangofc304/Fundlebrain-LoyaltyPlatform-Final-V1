@@ -18,11 +18,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_overall_kpis",
-            "description": "Return live business KPIs for the brand: total customers, net sales / txns over the last N days, average order value, points outstanding.",
+            "description": "Return live business KPIs for the brand: total customers, net sales / txns over the last N days, average order value, points outstanding. Pass days=0 for ALL-TIME (full historical scan).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "days": {"type": "integer", "description": "Window in days (default 30)", "default": 30}
+                    "days": {"type": "integer", "description": "Window in days. 0 = all time (full history). Default 30.", "default": 30}
                 },
             },
         },
@@ -46,11 +46,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "store_performance",
-            "description": "Sales aggregation by store for last N days. Returns net revenue, txns, AOV per store.",
+            "description": "Sales aggregation by store for last N days. Returns net revenue, txns, AOV per store. Pass days=0 for ALL-TIME.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "days": {"type": "integer", "default": 30},
+                    "days": {"type": "integer", "description": "0 = all time. Default 30.", "default": 30},
                     "limit": {"type": "integer", "default": 30},
                     "sort": {"type": "string", "enum": ["net_desc", "net_asc", "txns_desc"], "default": "net_desc"},
                 },
@@ -61,10 +61,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "city_performance",
-            "description": "Sales aggregation by city for last N days.",
+            "description": "Sales aggregation by city for last N days. Pass days=0 for ALL-TIME.",
             "parameters": {
                 "type": "object",
-                "properties": {"days": {"type": "integer", "default": 30}, "limit": {"type": "integer", "default": 25}},
+                "properties": {"days": {"type": "integer", "description": "0 = all time.", "default": 30}, "limit": {"type": "integer", "default": 25}},
             },
         },
     },
@@ -86,11 +86,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "top_skus",
-            "description": "Top-selling SKUs / products by revenue in last N days.",
+            "description": "Top-selling SKUs / products by revenue in last N days. Pass days=0 for ALL-TIME.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "days": {"type": "integer", "default": 30},
+                    "days": {"type": "integer", "description": "0 = all time.", "default": 30},
                     "limit": {"type": "integer", "default": 15},
                     "category": {"type": "string", "description": "Optional category filter"},
                 },
@@ -168,8 +168,17 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _norm_days(days: int) -> int:
+    """`days <= 0` => 'all time' (20-year window). Lets the LLM (and the UI)
+    request a full historical scan when the data lives years in the past."""
+    if days is None or days <= 0:
+        return 365 * 20
+    return days
+
+
 # ---------------- Tool implementations ----------------
 async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
+    days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     total_cust = await customers_col.count_documents({})
     sales = await transactions_col.aggregate([
@@ -196,6 +205,7 @@ async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
 
 async def _tool_top_churning_customers(inactive_days: int = 120, min_lifetime_spend: float = 5000,
                                        limit: int = 15) -> Dict[str, Any]:
+    inactive_days = _norm_days(inactive_days)
     cutoff = _iso(datetime.now(timezone.utc) - timedelta(days=inactive_days))
     rows = await customers_col.find(
         {"last_visit_at": {"$lt": cutoff}, "lifetime_spend": {"$gte": min_lifetime_spend}},
@@ -206,6 +216,7 @@ async def _tool_top_churning_customers(inactive_days: int = 120, min_lifetime_sp
 
 
 async def _tool_store_performance(days: int = 30, limit: int = 30, sort: str = "net_desc") -> Dict[str, Any]:
+    days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     sort_field = {"net_desc": ("net", -1), "net_asc": ("net", 1), "txns_desc": ("txns", -1)}[sort]
     pipe = [
@@ -231,6 +242,7 @@ async def _tool_store_performance(days: int = 30, limit: int = 30, sort: str = "
 
 
 async def _tool_city_performance(days: int = 30, limit: int = 25) -> Dict[str, Any]:
+    days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     pipe = [
         {"$match": {"bill_date": {"$gte": start}}},
@@ -283,6 +295,7 @@ async def _tool_campaign_leaderboard(sort: str = "revenue", limit: int = 15) -> 
 
 
 async def _tool_top_skus(days: int = 30, limit: int = 15, category: str | None = None) -> Dict[str, Any]:
+    days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     pipe: List[Dict[str, Any]] = [
         {"$match": {"bill_date": {"$gte": start}}},
@@ -318,6 +331,7 @@ async def _tool_tier_distribution() -> Dict[str, Any]:
 
 
 async def _tool_nps_summary(days: int = 60) -> Dict[str, Any]:
+    days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     rows = await nps_col.aggregate([
         {"$match": {"created_at": {"$gte": start}}},
@@ -363,6 +377,7 @@ async def _tool_coupon_performance(is_active: bool | None = None, limit: int = 2
 
 
 async def _tool_communication_log_summary(days: int = 7) -> Dict[str, Any]:
+    days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     rows = await message_log_col.aggregate([
         {"$match": {"timestamp": {"$gte": start}}},

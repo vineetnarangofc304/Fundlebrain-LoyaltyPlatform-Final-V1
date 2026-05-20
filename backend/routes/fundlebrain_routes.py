@@ -22,6 +22,14 @@ router = APIRouter(prefix="/dashboard", tags=["fundlebrain"])
 
 # -------------------- helpers --------------------
 
+def _norm_period_days(period_days: Optional[int]) -> int:
+    """`period_days <= 0` means 'All time' (20-year window). Used by frontend's
+    'All time' filter so historical CSV uploads (years-old bill_dates) are included."""
+    if period_days is None or period_days <= 0:
+        return 365 * 20
+    return period_days
+
+
 def _quintile(value: float, breakpoints: List[float]) -> int:
     """Return 1..5 based on which quintile `value` falls into.
     breakpoints must be sorted ascending and have 4 entries (cuts q1|q2|q3|q4|q5).
@@ -261,6 +269,7 @@ async def store_performance_v2(
     period_days: int = 30,
     user: dict = Depends(get_current_user),
 ):
+    period_days = _norm_period_days(period_days)
     start = (datetime.now(timezone.utc) - timedelta(days=period_days)).isoformat()
     prev_start = (datetime.now(timezone.utc) - timedelta(days=period_days * 2)).isoformat()
 
@@ -791,6 +800,7 @@ async def cohorts_segmentation(user: dict = Depends(get_current_user)):
 @router.get("/points-economics")
 async def points_economics(period_days: int = 90, user: dict = Depends(get_current_user)):
     """Live loyalty economics: earn/burn ratio, liability, monthly flow, top redeemers."""
+    period_days = _norm_period_days(period_days)
     now = datetime.now(timezone.utc)
     start = (now - timedelta(days=period_days)).isoformat()
 
@@ -1142,6 +1152,7 @@ async def formula_catalog(user: dict = Depends(get_current_user)):
 @router.get("/executive-summary")
 async def executive_summary(period_days: int = 30, user: dict = Depends(get_current_user)):
     """Composite executive snapshot: KPIs + segments + top stores + alerts in one payload."""
+    period_days = _norm_period_days(period_days)
     now = datetime.now(timezone.utc)
     start = (now - timedelta(days=period_days)).isoformat()
     prev_start = (now - timedelta(days=period_days * 2)).isoformat()

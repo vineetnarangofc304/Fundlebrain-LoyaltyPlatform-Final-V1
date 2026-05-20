@@ -23,7 +23,7 @@ const COHORT_COLORS = { today: "#0F172A", last_7d: "#571326", last_30d: "#94A3B8
 
 export default function CommandCenter() {
   const navigate = useNavigate();
-  const [period, setPeriod] = useState("30d");
+  const [period, setPeriod] = useState("all");   // Default to All time so historical CSV uploads are visible immediately
   const [storeId, setStoreId] = useState("");
   const [city, setCity] = useState("");
   const [filterOpts, setFilterOpts] = useState({ cities: [], stores: [] });

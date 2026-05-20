@@ -14,7 +14,7 @@ import {
 
 export default function PointsDashboard() {
   const navigate = useNavigate();
-  const [period, setPeriod] = useState(90);
+  const [period, setPeriod] = useState(0);   // 0 = All time (default)
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drill, setDrill] = useState(null);
@@ -53,6 +53,7 @@ export default function PointsDashboard() {
         actions={
           <>
             <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="pe-period">
+              <option value={0}>All time</option>
               <option value={30}>Last 30 days</option>
               <option value={90}>Last 90 days</option>
               <option value={180}>Last 180 days</option>

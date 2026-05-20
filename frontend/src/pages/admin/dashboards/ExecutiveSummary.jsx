@@ -7,7 +7,7 @@ import AIInsightStrip from "../AIInsightStrip";
 import { Download, RefreshCw } from "lucide-react";
 
 export default function ExecutiveSummary() {
-  const [period, setPeriod] = useState(30);
+  const [period, setPeriod] = useState(0);   // 0 = All time (default)
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
@@ -54,6 +54,7 @@ export default function ExecutiveSummary() {
         actions={
           <>
             <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="es-period">
+              <option value={0}>All time</option>
               <option value={7}>Last 7 days</option>
               <option value={30}>Last 30 days</option>
               <option value={90}>Last 90 days</option>

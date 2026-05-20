@@ -13,6 +13,11 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 def _date_range(period: str = "30d"):
     now = datetime.now(timezone.utc)
+    # Treat any "<=0d" / "0" / "all" as all-time so historical CSV uploads
+    # (whose bill_dates can be years old) are included.
+    if period in ("all", "0", "0d") or period is None or period == "":
+        start = now - timedelta(days=365 * 20)
+        return start, now
     if period == "today":
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "7d":
@@ -23,9 +28,6 @@ def _date_range(period: str = "30d"):
         start = now - timedelta(days=90)
     elif period == "1y":
         start = now - timedelta(days=365)
-    elif period == "all":
-        # Pull a 20-year window so genuinely all historic data is included
-        start = now - timedelta(days=365 * 20)
     elif period == "mtd":
         start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     elif period == "ytd":

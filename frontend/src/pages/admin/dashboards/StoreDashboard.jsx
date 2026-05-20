@@ -19,7 +19,7 @@ const TABS = [
 ];
 
 export default function StoreDashboard() {
-  const [period, setPeriod] = useState(30);
+  const [period, setPeriod] = useState(0);   // 0 = All time (default)
   const [tab, setTab] = useState("leaderboard");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -88,6 +88,7 @@ export default function StoreDashboard() {
         actions={
           <>
             <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="sp-period">
+              <option value={0}>All time</option>
               <option value={7}>Last 7 days</option>
               <option value={30}>Last 30 days</option>
               <option value={90}>Last 90 days</option>
