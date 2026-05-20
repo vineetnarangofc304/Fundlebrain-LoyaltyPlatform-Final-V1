@@ -31,6 +31,28 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.4 (May 2026) — ✅ POS API Self-Diagnosing 403 Errors
+
+**Issue from production**: KAZO POS team reported "all POS APIs return 403 Forbidden" on https://kazoloyalty.fundlebrain.ai. Confirmed via curl — production correctly returned the FastAPI `_validate_creds` 403 with the opaque body `{"detail":"Forbidden"}`, giving the integrator no clue *which* check failed.
+
+**Root cause**: `bootstrap_pos_defaults()` generates a fresh `secrets.token_urlsafe(32)` on each environment's first boot, so preview and production each have **different** api_keys. The KAZO POS team almost certainly had the wrong/stale key (likely the preview one).
+
+**Fix** in `routes/pos_ewards_routes.py::_validate_creds`:
+- Replaced single opaque `"Forbidden"` with 6 precise reasons (still 403):
+  - `Missing x-api-key header`
+  - `x-api-key contains leading/trailing whitespace — please trim`
+  - `x-api-key is inactive — contact KAZO admin to reactivate or rotate`
+  - `Invalid x-api-key — not recognised in this environment`
+  - `merchant_id mismatch — expected '...', received '...'`
+  - `customer_key mismatch — expected '...', received '...'`
+- Empty / non-matching credentials still get 403 (no security regression)
+- Detail strings are echoed only when the request actually supplies a mismatched value, so existing keys aren't exfiltrated to unauthenticated probes
+- Full request/response remains captured in `api_logs` for Live Monitor drill-down
+
+**Verification** (preview, all 6 scenarios via curl): every failure path returns its specific message; happy path still returns 200 with customer + rewards payload. 30/30 POS pytest pass.
+
+**User next steps**: Redeploy production; then log into `/admin/pos-credentials` on production to copy the live `api_key` + `merchant_id` + `customer_key` and share with KAZO POS team.
+
 ### Iteration 11.3 (May 2026) — 🔒 CRITICAL POS Redemption Security Fix
 
 **Vulnerability reported by KAZO POS team (Hardik)**: Two-stage tampering on `/api/pos/posRedeemPointOtpCheck`:

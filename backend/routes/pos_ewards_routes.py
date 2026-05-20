@@ -113,18 +113,35 @@ async def _log_api(*, endpoint: str, method: str, status: int, ms: int,
 
 async def _validate_creds(x_api_key: Optional[str], merchant_id: Optional[str],
                            customer_key: Optional[str]):
-    """Validate x-api-key + merchant_id + customer_key against pos_credentials."""
+    """Validate x-api-key + merchant_id + customer_key against pos_credentials.
+
+    Returns a precise 403 reason so the integrating POS team can self-diagnose
+    which check failed without exposing the real credential values.
+    """
     if not x_api_key:
-        raise HTTPException(403, "Forbidden")
+        raise HTTPException(403, "Missing x-api-key header")
+    # Reject keys with stray whitespace / tabs / newlines — common copy-paste hazard
+    if x_api_key != x_api_key.strip():
+        raise HTTPException(403, "x-api-key contains leading/trailing whitespace — please trim")
     cred = await pos_credentials_col.find_one(
         {"api_key": x_api_key, "is_active": True}, {"_id": 0}
     )
     if not cred:
-        raise HTTPException(403, "Forbidden")
+        # Distinguish "key not found" vs "key inactive" for clarity
+        inactive = await pos_credentials_col.find_one({"api_key": x_api_key}, {"_id": 0})
+        if inactive:
+            raise HTTPException(403, "x-api-key is inactive — contact KAZO admin to reactivate or rotate")
+        raise HTTPException(403, "Invalid x-api-key — not recognised in this environment")
     if merchant_id and cred.get("merchant_id") != merchant_id:
-        raise HTTPException(403, "Forbidden")
+        raise HTTPException(
+            403,
+            f"merchant_id mismatch — expected '{cred.get('merchant_id')}', received '{merchant_id}'",
+        )
     if customer_key and cred.get("customer_key") != customer_key:
-        raise HTTPException(403, "Forbidden")
+        raise HTTPException(
+            403,
+            f"customer_key mismatch — expected '{cred.get('customer_key')}', received '{customer_key}'",
+        )
     return cred
 
 
