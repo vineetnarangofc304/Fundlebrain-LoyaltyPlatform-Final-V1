@@ -84,7 +84,7 @@ _env_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',')
 _default_origins = [
     "https://kazoloyalty.fundlebrain.ai",
     "https://kazo-loyalty-hub.emergent.host",
-    "https://kazo-loyalty-hub.preview.emergentagent.com",
+    "https://kazo-loyalty-hub-1.preview.emergentagent.com",
     "http://localhost:3000",
 ]
 _allowed_origins = list({*_env_origins, *_default_origins})

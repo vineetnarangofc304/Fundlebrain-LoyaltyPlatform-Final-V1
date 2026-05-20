@@ -17,6 +17,7 @@ const DATASETS = [
 ];
 
 const STATUS_STYLES = {
+  uploading: { bg: "#E0E7FF", color: "#3730A3", border: "#C7D2FE", icon: Upload, label: "Uploading" },
   queued: { bg: "#FEF3C7", color: "#92400E", border: "#FDE68A", icon: Clock, label: "Queued" },
   running: { bg: "#DBEAFE", color: "#1E40AF", border: "#BFDBFE", icon: Loader2, label: "Running", spin: true },
   previewed: { bg: "#FAE8FF", color: "#86198F", border: "#F5D0FE", icon: FileText, label: "Previewed" },
@@ -32,6 +33,7 @@ export default function HistoricDataPage() {
   const [dryRun, setDryRun] = useState(true);
   const [duplicateMode, setDuplicateMode] = useState("upsert");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null); // {phase, percent, message}
   const [activeJobId, setActiveJobId] = useState(null);
   const [purgeOpen, setPurgeOpen] = useState(false);
   const fileRef = useRef(null);
@@ -79,23 +81,82 @@ export default function HistoricDataPage() {
   const upload = async () => {
     if (!file) { toast.error("Pick a CSV file first"); return; }
     setUploading(true);
+    setUploadProgress({ phase: "reading", percent: 0, message: "Reading file…" });
+    let jobId = null;
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("dataset", dataset);
-      fd.append("duplicate_mode", duplicateMode);
-      fd.append("dry_run", dryRun ? "true" : "false");
-      const r = await api.post("/historic-data/ingest", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
+      // Chunk by raw bytes (~1.5MB per chunk) so we stay well below ingress limits.
+      // Slicing a Blob is zero-copy, so 33MB is no issue.
+      const CHUNK_BYTES = 1_500_000; // 1.5 MB
+      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_BYTES));
+
+      // Step 1 — init job
+      setUploadProgress({ phase: "init", percent: 0, message: "Creating ingest job…" });
+      const initRes = await api.post("/historic-data/ingest/init", {
+        dataset,
+        duplicate_mode: duplicateMode,
+        dry_run: dryRun,
+        filename: file.name,
+        total_chunks: totalChunks,
+        total_bytes: file.size,
       });
-      setActiveJobId(r.data.id);
-      toast.success(dryRun ? `Previewing ${file.name}…` : `Ingesting ${file.name} in background`);
+      jobId = initRes.data.id;
+      setActiveJobId(jobId);
+
+      // Step 2 — upload chunks sequentially (retry up to 3x per chunk)
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_BYTES;
+        const end = Math.min(start + CHUNK_BYTES, file.size);
+        const blob = file.slice(start, end);
+
+        let attempt = 0;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          try {
+            const fd = new FormData();
+            fd.append("job_id", jobId);
+            fd.append("chunk_index", String(i));
+            fd.append("chunk", blob, `chunk-${i}.csv`);
+            await api.post("/historic-data/ingest/chunk", fd, {
+              headers: { "Content-Type": "multipart/form-data" },
+              timeout: 60_000,
+            });
+            break;
+          } catch (err) {
+            attempt += 1;
+            if (attempt >= 3) throw err;
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+          }
+        }
+        const pct = ((i + 1) / totalChunks) * 100;
+        setUploadProgress({
+          phase: "uploading",
+          percent: pct,
+          message: `Uploading chunk ${i + 1} of ${totalChunks} (${pct.toFixed(0)}%)`,
+        });
+      }
+
+      // Step 3 — finalize → triggers background ingest
+      setUploadProgress({ phase: "finalizing", percent: 100, message: "Stitching & queuing ingest…" });
+      const fin = await api.post("/historic-data/ingest/finalize", { job_id: jobId }, { timeout: 120_000 });
+      toast.success(
+        dryRun
+          ? `Previewing ${fin.data.row_count_estimated?.toLocaleString() || ""} rows from ${file.name}…`
+          : `Queued ${fin.data.row_count_estimated?.toLocaleString() || ""} rows for ingest`
+      );
       loadJobs();
       setFile(null);
       if (fileRef.current) fileRef.current.value = "";
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Upload failed");
-    } finally { setUploading(false); }
+      const detail = e?.response?.data?.detail || e?.message || "Upload failed";
+      toast.error(`Upload failed: ${detail}`);
+      if (jobId) {
+        // best-effort abort to clean up server-side temp chunks
+        api.post(`/historic-data/ingest/abort/${jobId}`).catch(() => {});
+      }
+    } finally {
+      setUploading(false);
+      setUploadProgress(null);
+    }
   };
 
   const activeDataset = DATASETS.find((d) => d.key === dataset);
@@ -151,15 +212,31 @@ export default function HistoricDataPage() {
               {file ? (
                 <div>
                   <div className="font-medium text-sm">{file.name}</div>
-                  <div className="text-[11px] text-neutral-500">{(file.size / 1024).toFixed(1)} KB · click to change</div>
+                  <div className="text-[11px] text-neutral-500">{(file.size / (1024 * 1024)).toFixed(2)} MB · click to change</div>
                 </div>
               ) : (
                 <>
                   <div className="text-sm font-medium">Drop your CSV here or click to browse</div>
-                  <div className="text-[11px] text-neutral-500 mt-1">Max 50 MB · UTF-8 encoded</div>
+                  <div className="text-[11px] text-neutral-500 mt-1">Max 250 MB · UTF-8 · uploaded in 1.5 MB chunks</div>
                 </>
               )}
             </div>
+
+            {uploadProgress && (
+              <div className="mt-4 p-3 border border-indigo-200 bg-indigo-50/40" data-testid="upload-progress">
+                <div className="flex items-center justify-between text-[11px] text-indigo-800 mb-1.5">
+                  <span className="uppercase tracking-widest font-medium">{uploadProgress.phase}</span>
+                  <span className="font-mono tabular-nums">{uploadProgress.percent.toFixed(0)}%</span>
+                </div>
+                <div className="h-1.5 bg-indigo-100 overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-600 transition-all duration-200"
+                    style={{ width: `${uploadProgress.percent}%` }}
+                  />
+                </div>
+                <div className="text-[11px] text-neutral-600 mt-1.5">{uploadProgress.message}</div>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3 mt-4 text-xs">
               <label className="block">
@@ -182,7 +259,7 @@ export default function HistoricDataPage() {
             <div className="mt-4 flex justify-end gap-2">
               <button onClick={() => { setFile(null); if (fileRef.current) fileRef.current.value = ""; }} disabled={!file || uploading} className="k-btn k-btn-ghost k-btn-sm">Clear</button>
               <button onClick={upload} disabled={!file || uploading} className="k-btn kazo-bg-burgundy" data-testid="hist-upload-btn">
-                <Upload className="w-4 h-4" /> {uploading ? "Queuing…" : dryRun ? "Preview" : "Ingest now"}
+                <Upload className="w-4 h-4" /> {uploading ? "Uploading…" : dryRun ? "Preview" : "Ingest now"}
               </button>
             </div>
           </div>

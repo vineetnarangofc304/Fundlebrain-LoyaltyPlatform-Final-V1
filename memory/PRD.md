@@ -31,6 +31,27 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 10 (May 2026) — ✅ Chunked Upload for Large CSVs (Production Fix)
+
+**Issue**: Production upload of 33MB / 1.9-lakh-row CSV was failing partway — root cause was Kubernetes ingress body-size limit on the single multipart POST.
+
+**Backend** — `routes/historic_routes.py`
+- New 3-step chunked upload protocol (raises `MAX_FILE_BYTES` cap to **250 MB**):
+  - `POST /api/historic-data/ingest/init` — `{dataset, duplicate_mode, dry_run, filename, total_chunks, total_bytes}` → creates job in `uploading` state, returns `job_id`
+  - `POST /api/historic-data/ingest/chunk` — multipart `{job_id, chunk_index, chunk}` → 10MB hard cap per chunk, persists to `/tmp/historic_uploads/{job_id}/chunk-{NNNNN}.bin`
+  - `POST /api/historic-data/ingest/finalize` — `{job_id}` → stitches chunks (sorted by index), validates count, decodes UTF-8 (BOM-safe), counts rows, queues existing `_run_ingest_job` background task, then deletes temp chunks
+  - `POST /api/historic-data/ingest/abort/{job_id}` — cancel + cleanup
+- Legacy `POST /api/historic-data/ingest` single-shot endpoint kept for files < ingress limit
+
+**Frontend** — `pages/admin/HistoricDataPage.jsx`
+- Replaced single `axios.post(formData)` with sequential chunked uploader: slices `File` into 1.5 MB blobs using `File.slice()`, uploads with up to 3 retries per chunk, exponential backoff
+- Live progress bar with phase + percent + chunk index ("Uploading chunk 12 of 22 (54%)")
+- Server-side abort triggered on client failure to free temp files
+- Updated copy: "Max 250 MB · UTF-8 · uploaded in 1.5 MB chunks"
+
+**Verification**
+- End-to-end curl test: 2,500-row preview ✅, 50,000-row live ingest ✅ (background task ran at ~700 rows/sec). No proxy/timeout errors. All chunks successfully stitched.
+
 ### Iteration 9 (May 2026) — ✅ Historical Data Upload + Demo-Data Purge + Period Extension
 
 **Backend** — `routes/historic_routes.py`
@@ -91,4 +112,4 @@ See `/app/memory/test_credentials.md` — Brand Admin: `admin@kazo.com / Kazo@20
 ## Known production hardening pending
 - AI insight cache is in-memory (single worker only)
 - Digest PDF stored as base64 in MongoDB (≤ 800 KB cap); move to GridFS or S3 for large reports
-- Historic CSV upload reads the entire file into memory then iterates — fine to ~50 MB; for true multi-million-row imports stream via aiofiles + chunked DictReader
+- Historic ingest stitches chunks in memory then runs `_run_ingest_job` with the full text; for true multi-million-row imports switch to streaming `csv.DictReader` over a temp file
