@@ -379,7 +379,8 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     {"$set": {"processed": processed, "inserted": inserted,
                                 "updated": updated, "skipped": skipped,
                                 "errors_count": skipped,
-                                "errors_sample": errors[:MAX_ERROR_SAMPLES]}})
+                                "errors_sample": errors[:MAX_ERROR_SAMPLES],
+                                "heartbeat": now()}})
 
         # Final flush
         await _flush()
@@ -701,10 +702,14 @@ async def ingest_chunk(
 @router.post("/ingest/finalize")
 async def ingest_finalize(
     body: IngestFinalizeIn,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
-    """Step 3 of chunked upload: stitch chunks from MongoDB, queue background ingest, cleanup."""
+    """Step 3 of chunked upload: validate chunks, count rows, queue for scheduler ingest.
+
+    The actual ingest is performed by an APScheduler tick (every 15s) so it is
+    fully resilient to pod restarts / worker recycles. Chunks stay in MongoDB
+    until the scheduler completes the ingest, then they are cleaned up.
+    """
     job = await historic_jobs_col.find_one({"id": body.job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
@@ -719,7 +724,7 @@ async def ingest_finalize(
             f"Chunk count mismatch — expected {expected}, found {found}. Please retry the upload.",
         )
 
-    # Stitch all chunks in order (streaming to avoid loading 250MB array at once)
+    # Quick stitch to count rows + detect header (kept ephemeral, NOT stored in memory beyond this call)
     try:
         cursor = historic_chunks_col.find(
             {"job_id": body.job_id},
@@ -736,6 +741,7 @@ async def ingest_finalize(
         raw = b"".join(parts)
         parts.clear()
         text = raw.decode("utf-8-sig", errors="replace")
+        del raw
     except HTTPException:
         raise
     except Exception as e:
@@ -745,32 +751,130 @@ async def ingest_finalize(
         )
         raise HTTPException(500, f"Failed to read uploaded chunks: {e}")
 
-    # Count rows + header
     reader = csv.DictReader(io.StringIO(text))
     header = reader.fieldnames or []
     row_count = sum(1 for _ in reader)
+    del text  # release memory immediately — scheduler will re-stitch when it picks up the job
 
     now = datetime.now(timezone.utc).isoformat()
     await historic_jobs_col.update_one(
         {"id": body.job_id},
         {"$set": {
-            "status": "queued",
+            "status": "pending_ingest",
             "row_count_estimated": row_count,
             "columns_detected": header,
             "queued_finalized_at": now,
+            "heartbeat": now,
         }},
     )
 
-    background_tasks.add_task(
-        _run_ingest_job, body.job_id, job["dataset"], text,
-        job["duplicate_mode"], job["dry_run"],
-    )
-
-    # Cleanup: remove chunk docs from MongoDB
-    await historic_chunks_col.delete_many({"job_id": body.job_id})
+    # Chunks remain in MongoDB until scheduler completes ingest. Scheduler tick
+    # (every 15s) will claim this job atomically, process it, and clean up.
 
     updated = await historic_jobs_col.find_one({"id": body.job_id}, {"_id": 0})
-    return updated or {"id": body.job_id, "status": "queued", "row_count_estimated": row_count}
+    return updated or {"id": body.job_id, "status": "pending_ingest", "row_count_estimated": row_count}
+
+
+# ---------------- Scheduler-driven ingest worker ----------------
+async def process_pending_ingests():
+    """Scheduler tick — runs every 15s.
+
+    1. Recovers stale jobs (status=running but heartbeat > 3 min old)
+    2. Atomically claims ONE pending job and runs the ingest
+    3. On completion, deletes the stored chunks
+    """
+    from pymongo import ReturnDocument
+
+    iso_now = datetime.now(timezone.utc).isoformat()
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+
+    # Step 1: recover stale "running" jobs
+    recovery = await historic_jobs_col.update_many(
+        {"status": "running", "heartbeat": {"$lt": stale_cutoff}},
+        {"$set": {"status": "pending_ingest",
+                   "stale_recovered_at": iso_now}},
+    )
+    if recovery.modified_count:
+        logger.warning(f"Recovered {recovery.modified_count} stale ingest job(s)")
+
+    # Step 2: claim one pending job atomically
+    job = await historic_jobs_col.find_one_and_update(
+        {"status": "pending_ingest"},
+        {"$set": {"status": "running",
+                   "claimed_at": iso_now,
+                   "heartbeat": iso_now,
+                   "started_at": iso_now}},
+        sort=[("queued_at", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
+    if not job:
+        return
+
+    job_id = job["id"]
+    logger.info(f"Claimed ingest job {job_id} (dataset={job['dataset']}, rows={job.get('row_count_estimated')})")
+
+    # Step 3: stitch chunks and run ingest
+    try:
+        cursor = historic_chunks_col.find(
+            {"job_id": job_id},
+            {"_id": 0, "chunk_index": 1, "data": 1},
+        ).sort("chunk_index", 1)
+        parts: List[bytes] = []
+        async for doc in cursor:
+            parts.append(doc["data"])
+        raw = b"".join(parts)
+        parts.clear()
+        text = raw.decode("utf-8-sig", errors="replace")
+        del raw
+    except Exception as e:
+        logger.exception(f"Failed to stitch chunks for job {job_id}")
+        await historic_jobs_col.update_one(
+            {"id": job_id},
+            {"$set": {"status": "failed",
+                       "error": f"Could not read uploaded chunks: {e}",
+                       "completed_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        return
+
+    # _run_ingest_job already writes heartbeat per flush + handles its own try/except
+    await _run_ingest_job(job_id, job["dataset"], text,
+                           job["duplicate_mode"], job.get("dry_run", False))
+    del text
+
+    # Step 4: cleanup chunks if ingest completed cleanly
+    refreshed = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0, "status": 1, "total_rows": 1, "inserted": 1, "updated": 1, "skipped": 1})
+    if refreshed and refreshed.get("status") in {"completed", "previewed"}:
+        deleted = await historic_chunks_col.delete_many({"job_id": job_id})
+        # Reconciliation: count rows in DB vs CSV total_rows
+        await _reconcile_job(job_id, job["dataset"])
+        logger.info(f"Ingest job {job_id} done — cleaned up {deleted.deleted_count} chunk docs")
+
+
+async def _reconcile_job(job_id: str, dataset: str):
+    """After ingest, count how many rows from this batch landed in the target collection.
+
+    Stores `reconciliation` block on the job doc.
+    """
+    job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        return
+    total = int(job.get("total_rows") or 0)
+    inserted = int(job.get("inserted") or 0)
+    updated = int(job.get("updated") or 0)
+    skipped = int(job.get("skipped") or 0)
+    processed = inserted + updated + skipped
+    diff = total - processed
+    recon = {
+        "total_rows_in_csv": total,
+        "processed_rows": processed,
+        "inserted": inserted,
+        "updated": updated,
+        "skipped_or_errored": skipped,
+        "diff": diff,
+        "match": diff == 0,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await historic_jobs_col.update_one({"id": job_id}, {"$set": {"reconciliation": recon}})
 
 
 @router.post("/ingest/abort/{job_id}")
@@ -779,7 +883,7 @@ async def ingest_abort(job_id: str, user: dict = Depends(get_current_user)):
     job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
-    if job.get("status") not in {"uploading", "queued"}:
+    if job.get("status") not in {"uploading", "queued", "pending_ingest"}:
         return {"ok": True, "noop": True}
     await historic_chunks_col.delete_many({"job_id": job_id})
     await historic_jobs_col.update_one(

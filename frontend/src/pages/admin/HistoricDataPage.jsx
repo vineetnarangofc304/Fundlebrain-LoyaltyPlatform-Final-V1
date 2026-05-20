@@ -18,6 +18,7 @@ const DATASETS = [
 
 const STATUS_STYLES = {
   uploading: { bg: "#E0E7FF", color: "#3730A3", border: "#C7D2FE", icon: Upload, label: "Uploading" },
+  pending_ingest: { bg: "#FEF3C7", color: "#92400E", border: "#FDE68A", icon: Clock, label: "Queued · waiting for scheduler" },
   queued: { bg: "#FEF3C7", color: "#92400E", border: "#FDE68A", icon: Clock, label: "Queued" },
   running: { bg: "#DBEAFE", color: "#1E40AF", border: "#BFDBFE", icon: Loader2, label: "Running", spin: true },
   previewed: { bg: "#FAE8FF", color: "#86198F", border: "#F5D0FE", icon: FileText, label: "Previewed" },
@@ -135,13 +136,13 @@ export default function HistoricDataPage() {
         });
       }
 
-      // Step 3 — finalize → triggers background ingest
-      setUploadProgress({ phase: "finalizing", percent: 100, message: "Stitching & queuing ingest…" });
+      // Step 3 — finalize → marks pending_ingest; scheduler picks it up within 15s
+      setUploadProgress({ phase: "finalizing", percent: 100, message: "Saving file to server & queuing background ingest…" });
       const fin = await api.post("/historic-data/ingest/finalize", { job_id: jobId }, { timeout: 120_000 });
       toast.success(
         dryRun
-          ? `Previewing ${fin.data.row_count_estimated?.toLocaleString() || ""} rows from ${file.name}…`
-          : `Queued ${fin.data.row_count_estimated?.toLocaleString() || ""} rows for ingest`
+          ? `Previewing ${fin.data.row_count_estimated?.toLocaleString() || ""} rows from ${file.name} (scheduler will start within 15s)`
+          : `${fin.data.row_count_estimated?.toLocaleString() || ""} rows queued · scheduler ingests in background (resilient to restarts)`
       );
       loadJobs();
       setFile(null);

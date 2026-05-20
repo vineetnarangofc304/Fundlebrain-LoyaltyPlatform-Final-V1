@@ -31,6 +31,27 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.1 (May 2026) — ✅ Scheduler-Driven Resilient Ingest (Production Reliability)
+
+**Issue**: Even after multi-pod chunked upload fix, the 33MB / 190K-row ingest was failing at ~2000 rows on production. Root cause: FastAPI `BackgroundTasks` runs in the same worker process as web requests. When that worker recycles (hot-reload, gunicorn timeout, pod restart, OOM), the in-process task dies silently — taking ~188K unprocessed rows with it.
+
+**Fix** — implemented user-requested architecture:
+- `routes/historic_routes.py::ingest_finalize` now returns IMMEDIATELY with `status="pending_ingest"`. Chunks stay in MongoDB (no in-process task held).
+- New `process_pending_ingests()` worker registered in `scheduler.py` runs every **15 seconds** via APScheduler `IntervalTrigger` with `max_instances=1` + `coalesce=True`:
+  1. Recovers stale `running` jobs whose heartbeat is older than 3 minutes (auto-resume on pod restart)
+  2. Atomically claims ONE pending job via `find_one_and_update` (multi-pod safe)
+  3. Stitches chunks from MongoDB → CSV text → runs `_run_ingest_job`
+  4. Cleans up chunk docs from MongoDB after success
+- `_run_ingest_job` now writes `heartbeat` timestamp on every 500-row flush — visible progress in `/historic-data/jobs/{id}`
+- New `_reconcile_job()` writes a `reconciliation` block on the job doc: `total_rows_in_csv` vs `inserted+updated+skipped`, with `match: true/false` boolean
+
+**Verification**: End-to-end with 33MB / **190,000-row** transactions CSV:
+- Upload phase: 18 chunks × 1.5MB in <5s
+- Finalize returned in **1 second** with `status=pending_ingest`
+- Scheduler picked up + ingested all 190K rows in 30 seconds
+- Reconciliation: **190,000 / 190,000 match**, 50 stores auto-created, 0 errors
+- Chunks cleaned up from MongoDB post-completion
+
 ### Iteration 11 (May 2026) — ✅ eWards-Compatible POS Integration APIs + Live Bill Monitor Cockpit
 
 **Goal**: KAZO must NOT change anything on their POS — they swap base URL + x-api-key + merchant_id + customer_key and Fundle absorbs all the traffic that was previously going to eWards. Mirror the exact 14-endpoint contract from the supplied `eWards POS Integration x FBTS (kazo).pdf` spec.

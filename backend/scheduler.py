@@ -16,6 +16,7 @@ from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from database import db, users_col
 
@@ -73,9 +74,21 @@ def start_scheduler():
                    replace_existing=True,
                    misfire_grace_time=3600,
                    kwargs={"period_days": 7, "triggered_by": "weekly_cron"})
+
+    # Historic-data ingest worker — picks up pending CSV ingest jobs every 15s.
+    # Resilient to pod restarts: jobs stay in MongoDB until completed.
+    from routes.historic_routes import process_pending_ingests
+    sched.add_job(process_pending_ingests,
+                   IntervalTrigger(seconds=15),
+                   id="historic_ingest_worker",
+                   replace_existing=True,
+                   max_instances=1,
+                   coalesce=True,
+                   misfire_grace_time=30)
+
     sched.start()
     _scheduler = sched
-    logger.info("Started exec digest scheduler — next Mon 09:00 IST")
+    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s")
     return sched
 
 
