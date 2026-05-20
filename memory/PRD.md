@@ -31,6 +31,39 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11 (May 2026) — ✅ eWards-Compatible POS Integration APIs + Live Bill Monitor Cockpit
+
+**Goal**: KAZO must NOT change anything on their POS — they swap base URL + x-api-key + merchant_id + customer_key and Fundle absorbs all the traffic that was previously going to eWards. Mirror the exact 14-endpoint contract from the supplied `eWards POS Integration x FBTS (kazo).pdf` spec.
+
+**Backend** — `routes/pos_ewards_routes.py` (new, ~1100 lines)
+- All 14 endpoints under `/api/pos/*` with eWards-exact JSON contract:
+  - `posCustomerCheck`, `posCustomerCheckRequest`, `resendOtPcustomercheck`, `posCustomerOTPCheck`
+  - `posAddCustomer`, `posRedeemPointRequest`, `resendOtPosRedeemPointRequest`, `posRedeemPointOtpCheck`
+  - `posAddPoint` (bill settlement w/ items, taxes, charges, payment_mode, auto-create store from outlet, points engine, customer aggregate update, ledger writes, coupon-redemption capture, transactional comms fire)
+  - `posCouponDetails`, `posRedeemCoupon`
+  - `returnOrder` (reverses points + spend, creates RET-* transaction)
+  - `requestWalletRedemptionURL`, `getWalletRedemptionStatus`
+- Auth: 3-factor — `x-api-key` (header) + `merchant_id` + `customer_key` (body) must all match `pos_credentials` collection
+- Bootstrap on startup: auto-creates default credential `kazo_default` with random api_key, test customer **966681235** (5000 pts, gold tier), 3 active coupons (POSTEST10, POSTEST20PCT, POSTESTVIP)
+- Every request + response captured into `api_logs` with `source='pos_ewards'` for Live Monitor
+
+**Backend** — `routes/live_monitor_routes.py` (new)
+- `GET /api/live-monitor/transactions` — paginated bill stream with filters: `store_id`, `region`, `has_mobile` (yes/no), `payment_mode`, `source`, `min_amount`, `max_amount`. Enriches with `customer_name`, `tier`, `current_points`. Computes `has_mobile` + `lost_opportunity` flags
+- `GET /api/live-monitor/stats?minutes=N` — KPI strip data: `bills_total`, `bills_with_mobile`, `bills_without_mobile`, `mobile_attach_rate_pct`, `revenue_total`, `revenue_lost`, `points_earned`, `returns`, `by_store_top10`
+- `GET /api/admin/pos-credentials` + POST/rotate/deactivate — super_admin/brand_admin only
+- `GET /api/api-monitor/logs` + `/log/{id}` — full request+response payload for the API Monitor drill
+
+**Frontend** — 3 new admin pages
+- `pages/admin/LiveMonitorPage.jsx` — cockpit with 7-card KPI strip (Bills/With Mobile/Lost Opp/Attach %/Revenue/Pts Earned/Returns), filter bar (Mobile / Store / Source / Payment / Min ₹ / Max ₹ / Stats window), top-stores panel, bills table with green/red left-border (mobile attached vs LOST OPP), 3-second auto-refresh with Pause/Resume + click-to-drill modal
+- `pages/admin/POSCredentialsPage.jsx` — view/create/rotate/deactivate POS API keys with hide/show + copy-to-clipboard + quick-reference code block for KAZO POS team
+- `pages/admin/APIMonitor.jsx` (overwritten) — every row clickable → drill modal showing request_payload + response_payload as syntax-highlighted JSON with copy-JSON buttons; source + endpoint filters
+- Sidebar additions: `DASHBOARDS > Live Bill Monitor` and `OPERATIONS > POS Credentials`
+
+**Postman**
+- `/app/KAZO_POS_API.postman_collection.json` — all 14 endpoints pre-built with variables for base_url/api_key/merchant_id/customer_key/test_mobile
+
+**Tests**: 25/25 backend pytest pass; all 3 frontend pages verified by testing agent. POS test customer (966681235) seeded with 5000 points + 3 active coupons. Live cockpit and credentials page render and integrate end-to-end.
+
 ### Iteration 10.1 (May 2026) — ✅ Chunked Upload Multi-Pod Fix
 
 **Issue**: First chunked-upload deploy failed in production with `Chunk count mismatch — expected 24, found 13`. Root cause: production runs multiple backend pods; chunks were persisted to each pod's local `/tmp/historic_uploads`, so finalize only saw the chunks on its own pod.

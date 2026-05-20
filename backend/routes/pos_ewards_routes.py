@@ -39,7 +39,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel
 
 from database import (
     db, customers_col, transactions_col, stores_col, points_ledger_col,
@@ -1364,27 +1363,8 @@ async def get_wallet_redemption_status(payload: Dict[str, Any], request: Request
     return body
 
 
-# ---------------- Credentials management (for admin UI / Postman) ----------------
-class POSCredOut(BaseModel):
-    label: str
-    merchant_id: str
-    customer_key: str
-    api_key: str
-    is_active: bool
-    created_at: str
-
-
-@router.get("/credentials/active")
-async def list_active_credentials():
-    """Public-ish read endpoint for the LOGGED-IN admin UI to fetch creds (no x-api-key needed).
-
-    Returns active credentials so admin can copy the api_key for Postman.
-    """
-    from auth import get_current_user  # local import to avoid circular
-    # Manual auth handled by sister endpoint? Keep this minimal — we mount a guarded variant
-    # in admin_routes_pos below.
-    rows = await pos_credentials_col.find({"is_active": True}, {"_id": 0}).to_list(20)
-    return {"credentials": rows}
+# ---------------- Credentials management (admin-only via live_monitor_routes::admin_router) ----------------
+# (The full CRUD endpoints live under /api/admin/pos-credentials with super_admin+brand_admin RBAC.)
 
 
 # ---------------- Bootstrap default creds + test customer ----------------
