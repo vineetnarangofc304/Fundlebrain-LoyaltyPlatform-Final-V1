@@ -31,6 +31,24 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.2 (May 2026) — ✅ Anonymous Walk-In Bills + Bulletproof Ingest
+
+**Issue from production**: 33MB billing CSV was being marked "Failed" at 199,897 / 199,999 rows. Two root causes:
+
+1. **Logic bug**: My mapper was treating "no Customer Mobile" as a fatal skip. But KAZO's actual data has thousands of **anonymous walk-in bills** (the entire point of the Live Monitor's "Lost Opportunity" feature!). These should be ingested as valid transactions with `customer_mobile=null`, not skipped.
+2. **Resilience bug**: Any unhandled exception in the final flush or store-auto-create post-pass aborted the entire job, losing the trailing rows and showing "Failed" even when 99.95% had succeeded.
+
+**Fixes in `routes/historic_routes.py`**:
+- `_map_transaction_row`: mobile is now **OPTIONAL**. Anonymous bills become valid transactions stored with `customer_mobile=None` → automatically flagged as Lost Opportunities by Live Monitor's `has_mobile` filter.
+- Loop hardened: **3 layers of try/except** — per-row, per-flush, per-post-pass. One bad row, one failed bulk_write, one store-create failure never aborts the whole job.
+- Outer except clause now writes **partial counts + full Python traceback** to the job doc (`error` + `error_trace` fields) so failures are debuggable without backend log access.
+- Final flush, store auto-creation, and bulk store backfill each wrapped in their own try/except — partial completions get marked `completed` (with counts) instead of `failed`.
+
+**Verification**: 33MB / **200,000-row** CSV with 500 anonymous walk-in tail rows (mirroring user's actual data):
+- Upload + finalize: <5s · scheduler picked up + processed in 30s · **0 errors, 100% reconciliation match**
+- 199,500 customer bills ingested with mobile + 500 Lost Opportunities ingested with `customer_mobile=null`
+- Live Monitor cockpit will correctly mark the 500 as red "LOST OPP."
+
 ### Iteration 11.1 (May 2026) — ✅ Scheduler-Driven Resilient Ingest (Production Reliability)
 
 **Issue**: Even after multi-pod chunked upload fix, the 33MB / 190K-row ingest was failing at ~2000 rows on production. Root cause: FastAPI `BackgroundTasks` runs in the same worker process as web requests. When that worker recycles (hot-reload, gunicorn timeout, pod restart, OOM), the in-process task dies silently — taking ~188K unprocessed rows with it.

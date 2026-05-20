@@ -152,9 +152,10 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
     bill = (r.get("Bill Number") or r.get("Transaction Id") or "").strip()
     if not bill:
         return None, "Missing Bill Number / Transaction Id"
+    # Mobile is OPTIONAL — anonymous walk-ins are valid bills (tracked as
+    # "Lost Opportunities" in the Live Monitor cockpit). Store as None when absent.
     mobile = _norm_mobile(r.get("Customer Mobile Number") or r.get("Customer Mobile") or r.get("Mobile"))
-    if not mobile:
-        return None, "Missing Customer Mobile"
+    mobile = mobile or None
     bill_date = parse_date(r.get("Date"))
     if not bill_date:
         return None, f"Invalid Date '{r.get('Date')}'"
@@ -342,83 +343,117 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     updated += res.modified_count
                     buffer_insert.clear()
 
+        # Loop with PER-ROW try/except wrapper so one bad row never aborts the entire job
         for raw_row in reader:
             total_rows += 1
             try:
-                if dataset == "transactions":
-                    doc, err = _map_transaction_row(raw_row, store_cache)
-                else:
-                    doc, err = MAPPERS[dataset](raw_row)
-            except Exception as e:
-                doc, err = None, f"Mapper error: {e}"
+                try:
+                    if dataset == "transactions":
+                        doc, err = _map_transaction_row(raw_row, store_cache)
+                    else:
+                        doc, err = MAPPERS[dataset](raw_row)
+                except Exception as e:
+                    doc, err = None, f"Mapper error: {e}"
 
-            if err:
-                if len(errors) < MAX_ERROR_SAMPLES:
-                    errors.append({"row": total_rows, "reason": err,
-                                   "data_sample": {k: raw_row.get(k) for k in list(raw_row.keys())[:6]}})
-                skipped += 1
+                if err:
+                    if len(errors) < MAX_ERROR_SAMPLES:
+                        errors.append({"row": total_rows, "reason": err,
+                                       "data_sample": {k: raw_row.get(k) for k in list(raw_row.keys())[:6]}})
+                    skipped += 1
+                    processed += 1
+                    continue
+
+                # Duplicate-mode handling
+                if duplicate_mode == "skip":
+                    key_field, key_val = _get_pk(dataset, doc)
+                    if key_field:
+                        exists = await _exists_col(dataset).find_one({key_field: key_val}, {"_id": 1})
+                        if exists:
+                            skipped += 1
+                            processed += 1
+                            continue
+
+                buffer_insert.append(doc)
                 processed += 1
-                continue
 
-            # Duplicate-mode handling
-            if duplicate_mode == "skip":
-                key_field, key_val = _get_pk(dataset, doc)
-                if key_field:
-                    exists = await _exists_col(dataset).find_one({key_field: key_val}, {"_id": 1})
-                    if exists:
-                        skipped += 1
-                        processed += 1
-                        continue
+                if len(buffer_insert) >= CHUNK_SIZE:
+                    try:
+                        await _flush()
+                    except Exception as fe:
+                        # Flush failed — log error sample but DON'T abort the job
+                        logger.exception(f"Flush failed at row {total_rows}")
+                        if len(errors) < MAX_ERROR_SAMPLES:
+                            errors.append({"row": total_rows, "reason": f"Bulk flush error: {fe}",
+                                            "data_sample": {}})
+                        skipped += len(buffer_insert)
+                        buffer_insert.clear()
+                    await historic_jobs_col.update_one({"id": job_id},
+                        {"$set": {"processed": processed, "inserted": inserted,
+                                    "updated": updated, "skipped": skipped,
+                                    "errors_count": skipped,
+                                    "errors_sample": errors[:MAX_ERROR_SAMPLES],
+                                    "heartbeat": now()}})
+            except Exception as row_exc:
+                # Last-resort safety net — never let a single row break the whole job
+                logger.exception(f"Unhandled row {total_rows} exception")
+                if len(errors) < MAX_ERROR_SAMPLES:
+                    errors.append({"row": total_rows, "reason": f"Row exception: {row_exc}",
+                                   "data_sample": {}})
+                skipped += 1
 
-            buffer_insert.append(doc)
-            processed += 1
+        # Final flush — protected; if it fails we still mark completed-with-errors
+        try:
+            await _flush()
+        except Exception as fe:
+            logger.exception("Final flush failed")
+            if len(errors) < MAX_ERROR_SAMPLES:
+                errors.append({"row": total_rows, "reason": f"Final flush error: {fe}", "data_sample": {}})
+            skipped += len(buffer_insert)
+            buffer_insert.clear()
 
-            if len(buffer_insert) >= CHUNK_SIZE:
-                await _flush()
-                await historic_jobs_col.update_one({"id": job_id},
-                    {"$set": {"processed": processed, "inserted": inserted,
-                                "updated": updated, "skipped": skipped,
-                                "errors_count": skipped,
-                                "errors_sample": errors[:MAX_ERROR_SAMPLES],
-                                "heartbeat": now()}})
-
-        # Final flush
-        await _flush()
-
-        # For transactions: auto-create stores from cache
+        # For transactions: auto-create stores from cache — wrapped so a bad store row never fails the job
         store_links: Dict[str, str] = {}
         if dataset == "transactions" and store_cache and not dry_run:
-            for key, meta in store_cache.items():
-                if not meta["name"]:
-                    continue
-                existing = await stores_col.find_one({"name": meta["name"]}, {"_id": 0, "id": 1})
-                if existing:
-                    meta["id"] = existing["id"]
-                else:
-                    sid = uuid.uuid4().hex
-                    await stores_col.insert_one({
-                        "id": sid,
-                        "code": _make_store_code(meta["name"]),
-                        "name": meta["name"],
-                        "city": meta.get("city") or "",
-                        "state": "",
-                        "region": meta.get("zone") or "",
-                        "store_class": meta.get("class"),
-                        "address": meta.get("name"),
-                        "is_active": True,
-                        "source": "historic_upload",
-                        "created_at": now(),
-                    })
-                    meta["id"] = sid
-                store_links[meta["name"]] = meta["id"]
-            # Backfill store_id on the just-inserted transactions
-            if store_links:
-                from pymongo import UpdateMany
-                ops = [UpdateMany({"store_name": name, "store_id": None},
-                                    {"$set": {"store_id": sid}})
-                       for name, sid in store_links.items()]
-                if ops:
-                    await transactions_col.bulk_write(ops, ordered=False)
+            try:
+                for key, meta in store_cache.items():
+                    if not meta.get("name"):
+                        continue
+                    try:
+                        existing = await stores_col.find_one({"name": meta["name"]}, {"_id": 0, "id": 1})
+                        if existing:
+                            meta["id"] = existing["id"]
+                        else:
+                            sid = uuid.uuid4().hex
+                            await stores_col.insert_one({
+                                "id": sid,
+                                "code": _make_store_code(meta["name"]),
+                                "name": meta["name"],
+                                "city": meta.get("city") or "",
+                                "state": "",
+                                "region": meta.get("zone") or "",
+                                "store_class": meta.get("class"),
+                                "address": meta.get("name"),
+                                "is_active": True,
+                                "source": "historic_upload",
+                                "created_at": now(),
+                            })
+                            meta["id"] = sid
+                        store_links[meta["name"]] = meta["id"]
+                    except Exception as se:
+                        logger.warning(f"Could not create/find store '{meta.get('name')}': {se}")
+                # Backfill store_id on the just-inserted transactions
+                if store_links:
+                    from pymongo import UpdateMany
+                    ops = [UpdateMany({"store_name": name, "store_id": None},
+                                        {"$set": {"store_id": sid}})
+                           for name, sid in store_links.items()]
+                    if ops:
+                        try:
+                            await transactions_col.bulk_write(ops, ordered=False)
+                        except Exception as be:
+                            logger.exception(f"Store backfill bulk_write failed: {be}")
+            except Exception as spe:
+                logger.exception(f"Store auto-create post-pass failed: {spe}")
 
         final = {
             "status": "completed" if not dry_run else "previewed",
@@ -436,8 +471,16 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         logger.info(f"Historic ingest job {job_id} done: {final}")
     except Exception as e:
         logger.exception(f"Historic ingest job {job_id} crashed")
+        # ALWAYS persist the partial counts so the UI shows what was achieved
+        import traceback
         await historic_jobs_col.update_one({"id": job_id},
             {"$set": {"status": "failed", "error": str(e),
+                       "error_trace": traceback.format_exc()[:4000],
+                       "processed": processed, "inserted": inserted,
+                       "updated": updated, "skipped": skipped,
+                       "errors_count": skipped,
+                       "errors_sample": errors[:MAX_ERROR_SAMPLES],
+                       "total_rows": total_rows,
                        "completed_at": now()}})
 
 
