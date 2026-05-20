@@ -31,6 +31,55 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.6 (May 2026) — ✅ Loyalty Data Model Lock-In (R1–R6)
+
+User formalised the canonical KAZO loyalty data rules:
+- **R1** `bill_date` is the chronological source of truth (not ingest `created_at`)
+- **R2** customer's `home_store_id` = store of their EARLIEST bill
+- **R3** one-timer = 1 unique bill; repeat = 2+ unique bills (unique = store+bill_no+date)
+- **R4** `customer_mobile` is the unique customer identity — no duplicates
+- **R5** bills WITH mobile = loyalty data (default for all dashboards). Bills WITHOUT mobile = non-loyalty / lost-opportunity (separate views, future)
+- **R6** points tracked as earn / redeem / bonus ledger entries (no expiry yet — load as-is)
+
+**Backend** — new shared filter module `routes/_loyalty.py`:
+- `LOYALTY_TX_MATCH` = `{"customer_mobile": {"$nin": [None, ""]}}`
+- `loyalty_match(extra)` helper composes the filter with date / store clauses
+- Applied to **every** transaction `$match` stage across `dashboard_routes`, `analytics_routes`, `fundlebrain_routes`, `ai_tools`
+
+**Customer-time filters switched** from `created_at` → `first_purchase_at`:
+- `/dashboard/kpis` new customers · cohort buckets (today/7d/30d/90d/older)
+- `/dashboard/command-center` acquisition cohort
+- `/analytics/customer-dashboard` new customer trend
+- `/fundle-brain/rfm` acquisition trend (now grouped by first-bill month)
+- `/fundle-brain/points-economics` monthly flow (now bill_date-driven)
+- `/dashboard/loyalty-dashboard` points trend (bill_date-driven)
+
+**Customer unique identity = mobile (R4)** — every `unique_customers` set/$addToSet now uses `customer_mobile` instead of internal `customer_id`. Pipelines lookup customer master by mobile.
+
+**Home store (R2)** — new `home_store_id` field on customer:
+- Populated by post-ingest job + backfill endpoint (= store_id of customer's earliest bill)
+- Store dashboards now report `home_customers` per store (customers anchored to that store) AND `visitors` (anyone who shopped there) — exposed in `/dashboard/store-performance`, `/dashboard/store-dashboard`, `/fundle-brain/store-performance-v2`
+
+**Unique bill key (hard, R3)** — transactions ingest upsert key changed from `bill_number` alone to `(bill_number, bill_date)`. Unique compound index `(store_id, bill_number, bill_date)` enforced. `customers.mobile` partial unique index built.
+
+**Points ledger (R6)** — `_map_transaction_row` now captures `points_earned`, `points_redeemed`, `bonus_points` from CSV (column auto-detection). Post-ingest job `_write_ledger_for_job` writes `earn`/`redeem`/`bonus` ledger entries timestamped with the bill_date for every loyalty bill. Idempotent on re-run (deduped by `source_bill_id`). No expiry logic — points loaded as-is per user direction.
+
+**Backfill endpoint** — new `POST /api/historic-data/backfill-loyalty-model` (super_admin/brand_admin) — one-shot, idempotent retrofit of EXISTING 200k transactions and their customers per all rules above. Returns counts of indices built, mobiles aggregated, customers upserted/updated.
+
+**Verification on preview**:
+- Backfill: 16 loyalty mobiles → aggregates set, indices built ✅
+- Sample customer `9266681235`: `first_purchase_at=2026-01-15`, `last_visit_at=2026-05-20`, `home_store_id` set, `visit_count=11`, `lifetime_spend=53000` ✅
+- `GET /dashboard/kpis?period=all` returns 38 loyalty customers, 26 bills, ₹39,229 net, 6.2% repeat rate ✅
+- `GET /dashboard/store-performance?period=all` returns 5 stores each with `home_customers` field populated ✅
+- AI chat "lifetime loyalty sales?" → uses `get_overall_kpis(days=0)`, returns ₹39,229 / 26 txns / AOV ₹1,508.81 with strategic recommendations ✅
+- Command Center screenshot: AI Intelligence Report correctly summarises "₹39.2K net sales from 26 bills, 16 active of 38 total, 6.2% repeat rate" ✅
+- 30/30 POS pytest still pass; 203/211 backend tests pass (8 pre-existing failures dependent on purged demo data, none related to this change)
+
+**User next steps**:
+1. Redeploy production
+2. Call `POST /api/historic-data/backfill-loyalty-model` ONCE to retrofit the 200k existing bills (returns counts; idempotent — safe to re-run)
+3. Dashboards on production will now reflect loyalty-data-only views with proper home-store attribution and bill-date chronology
+
 ### Iteration 11.5 (May 2026) — ✅ All-Time Default + AI Chat Historical Awareness
 
 **Issue from production**: User uploaded a 200,000-row historical billing CSV (`Billing_Report_New_1776672163581.csv`) that ingested cleanly (199,915 inserted + 84 updated = 100% reconciliation), but **all dashboards showed empty / no records** and Fundle Brain AI chat refused to answer ("Data not available"). Root cause: every dashboard defaulted to a 30-day window while the CSV billing dates were years old, so every aggregation filter excluded the data. AI tools also defaulted to `days=30` so they returned zero and the model honestly reported no data.

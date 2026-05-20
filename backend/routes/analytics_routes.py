@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from database import transactions_col, customers_col, stores_col, campaigns_col, points_ledger_col, nps_col, coupons_col, coupon_redemptions_col
 from auth import get_current_user
+from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -40,7 +41,7 @@ async def sales_dashboard(period_days: int = 30, user: dict = Depends(get_curren
 
     # Hourly distribution
     hourly_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$project": {"hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}}, "net_amount": 1}},
         {"$group": {"_id": "$hour", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
@@ -49,7 +50,7 @@ async def sales_dashboard(period_days: int = 30, user: dict = Depends(get_curren
 
     # Weekday
     weekday_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$project": {"dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$bill_date"}}}, "net_amount": 1}},
         {"$group": {"_id": "$dow", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
@@ -59,14 +60,14 @@ async def sales_dashboard(period_days: int = 30, user: dict = Depends(get_curren
 
     # Payment mode mix
     pay_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$group": {"_id": "$payment_mode", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
     ]
     pay = await transactions_col.aggregate(pay_pipe).to_list(10)
 
     # Discount distribution
     disc_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$project": {
             "bucket": {
                 "$switch": {
@@ -97,21 +98,25 @@ async def sales_dashboard(period_days: int = 30, user: dict = Depends(get_curren
 async def customer_dashboard(user: dict = Depends(get_current_user)):
     now = datetime.now(timezone.utc)
 
-    # New customer registration trend (last 90 days)
+    # R1: New customer trend uses first_purchase_at (actual first bill date), not created_at.
+    # R5: loyalty members only (must have mobile)
+    loyalty_q = {"mobile": {"$nin": [None, ""]}}
     start = (now - timedelta(days=90)).isoformat()
     new_pipe = [
-        {"$match": {"created_at": {"$gte": start}}},
-        {"$group": {"_id": {"$substr": ["$created_at", 0, 10]}, "count": {"$sum": 1}}},
+        {"$match": {**loyalty_q, "first_purchase_at": {"$gte": start}}},
+        {"$group": {"_id": {"$substr": ["$first_purchase_at", 0, 10]}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
     new_cust = await customers_col.aggregate(new_pipe).to_list(120)
 
-    # Churn risk distribution
-    churn_pipe = [{"$group": {"_id": "$churn_risk", "count": {"$sum": 1}}}]
+    # Churn risk distribution (loyalty members only)
+    churn_pipe = [{"$match": {"mobile": {"$nin": [None, ""]}}},
+                   {"$group": {"_id": "$churn_risk", "count": {"$sum": 1}}}]
     churn = await customers_col.aggregate(churn_pipe).to_list(10)
 
-    # Visit frequency buckets
+    # Visit frequency buckets (loyalty members only — R3: by actual bill count)
     freq_pipe = [
+        {"$match": {"mobile": {"$nin": [None, ""]}}},
         {"$project": {
             "bucket": {
                 "$switch": {
@@ -129,12 +134,20 @@ async def customer_dashboard(user: dict = Depends(get_current_user)):
     ]
     freq = await customers_col.aggregate(freq_pipe).to_list(10)
 
-    # Top spending customers
-    top_pipe = [{"$sort": {"lifetime_spend": -1}}, {"$limit": 10}, {"$project": {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1, "lifetime_spend": 1, "visit_count": 1}}]
+    # Top spending customers (loyalty members only)
+    top_pipe = [
+        {"$match": {"mobile": {"$nin": [None, ""]}}},
+        {"$sort": {"lifetime_spend": -1}}, {"$limit": 10},
+        {"$project": {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1, "lifetime_spend": 1, "visit_count": 1}},
+    ]
     top = await customers_col.aggregate(top_pipe).to_list(10)
 
-    # City distribution
-    city_pipe = [{"$group": {"_id": "$city", "count": {"$sum": 1}, "spend": {"$sum": "$lifetime_spend"}}}, {"$sort": {"spend": -1}}, {"$limit": 15}]
+    # City distribution (loyalty members only)
+    city_pipe = [
+        {"$match": {"mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$city", "count": {"$sum": 1}, "spend": {"$sum": "$lifetime_spend"}}},
+        {"$sort": {"spend": -1}}, {"$limit": 15},
+    ]
     city = await customers_col.aggregate(city_pipe).to_list(20)
 
     return {
@@ -169,21 +182,29 @@ async def campaign_dashboard(user: dict = Depends(get_current_user)):
 # Loyalty dashboard
 @router.get("/loyalty-dashboard")
 async def loyalty_dashboard(user: dict = Depends(get_current_user)):
-    # Tier migration trend (simplified: current tier vs first purchase year)
+    # R5: loyalty members only (have mobile)
+    loyalty_q = {"mobile": {"$nin": [None, ""]}}
     tier_pipe = [
+        {"$match": loyalty_q},
         {"$group": {"_id": "$tier", "count": {"$sum": 1}, "avg_spend": {"$avg": "$lifetime_spend"}, "total_points": {"$sum": "$points_balance"}}},
         {"$sort": {"avg_spend": -1}},
     ]
     tiers = await customers_col.aggregate(tier_pipe).to_list(10)
 
-    # Points issued vs redeemed trend (last 30 days)
-    start = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    # Points issued vs redeemed trend — by BILL DATE (R1) — last 90 days
+    start = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    # ledger entries written by ingest carry bill_date; older ones may only have created_at
     issued_pipe = [
-        {"$match": {"created_at": {"$gte": start}}},
-        {"$group": {"_id": {"date": {"$substr": ["$created_at", 0, 10]}, "type": "$type"}, "points": {"$sum": "$points"}}},
+        {"$match": {"$or": [{"bill_date": {"$gte": start}},
+                              {"bill_date": {"$exists": False}, "created_at": {"$gte": start}}]}},
+        {"$project": {
+            "date": {"$substr": [{"$ifNull": ["$bill_date", "$created_at"]}, 0, 10]},
+            "type": 1, "points": 1,
+        }},
+        {"$group": {"_id": {"date": "$date", "type": "$type"}, "points": {"$sum": "$points"}}},
         {"$sort": {"_id.date": 1}},
     ]
-    rows = await points_ledger_col.aggregate(issued_pipe).to_list(500)
+    rows = await points_ledger_col.aggregate(issued_pipe).to_list(2000)
     by_date = {}
     for r in rows:
         d = r["_id"]["date"]
@@ -206,12 +227,12 @@ async def loyalty_dashboard(user: dict = Depends(get_current_user)):
 async def store_dashboard(period_days: int = 30, user: dict = Depends(get_current_user)):
     start = _start(period_days)
     pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$group": {
             "_id": "$store_id",
             "net": {"$sum": "$net_amount"},
             "txns": {"$sum": 1},
-            "customers": {"$addToSet": "$customer_id"},
+            "visitors": {"$addToSet": "$customer_mobile"},
             "discount": {"$sum": "$discount_amount"},
         }},
         {"$sort": {"net": -1}},
@@ -219,6 +240,14 @@ async def store_dashboard(period_days: int = 30, user: dict = Depends(get_curren
     rows = await transactions_col.aggregate(pipe).to_list(100)
     store_ids = [r["_id"] for r in rows]
     stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}}, {"_id": 0})}
+
+    # R2: home customers per store (customers whose first bill was at this store)
+    home_pipe = [
+        {"$match": {"home_store_id": {"$in": store_ids}, "mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$home_store_id", "count": {"$sum": 1}}},
+    ]
+    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe)}
+
     out = []
     for r in rows:
         s = stores.get(r["_id"], {})
@@ -226,13 +255,15 @@ async def store_dashboard(period_days: int = 30, user: dict = Depends(get_curren
             "store_id": r["_id"], "store_name": s.get("name", "Unknown"), "code": s.get("code"),
             "city": s.get("city"), "region": s.get("region"),
             "net": round(r["net"], 2), "txns": r["txns"],
-            "unique_customers": len(r["customers"]),
+            "visitors": len([v for v in r["visitors"] if v]),
+            "home_customers": home_counts.get(r["_id"], 0),
+            "unique_customers": home_counts.get(r["_id"], 0),  # alias for back-compat
             "aov": round(r["net"] / r["txns"], 2) if r["txns"] else 0,
             "discount": round(r["discount"], 2),
         })
     # Region rollup
     region_pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "store"}},
         {"$unwind": "$store"},
         {"$group": {"_id": "$store.region", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},

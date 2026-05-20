@@ -173,6 +173,15 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
     if total == 0 and net:
         total = net + tax - discount
 
+    # R6: per-bill points columns — load AS-IS from CSV (no expiry yet).
+    points_earned = parse_int(
+        r.get("Points Earned") or r.get("Point Earned") or r.get("Earn Points") or r.get("Earned Points")
+    )
+    points_redeemed = parse_int(
+        r.get("Points Redeemed") or r.get("Redeem Points") or r.get("Burn Points") or r.get("Redeemed Points")
+    )
+    bonus_points = parse_int(r.get("Bonus Points") or r.get("Bonus"))
+
     outlet = (r.get("Outlet(Only For Shopify Marker)") or r.get("Outlet") or "").strip()
     city = (r.get("City") or "").strip() or None
     zone = (r.get("Zone New") or r.get("Zone") or "").strip() or None
@@ -210,6 +219,9 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
         "recency": recency or None,
         "items": [],  # KAZO export has no line-item breakdown
         "payment_mode": "unknown",
+        "points_earned": points_earned,
+        "points_redeemed": points_redeemed,
+        "bonus_points": bonus_points,
         "source": "historic_upload",
     }, None)
 
@@ -307,10 +319,15 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     from pymongo import UpdateOne
                     ops = []
                     for d in buffer_insert:
-                        ops.append(UpdateOne({"bill_number": d["bill_number"]},
-                            {"$set": d, "$setOnInsert": {
-                                "id": uuid.uuid4().hex, "created_at": now(),
-                            }}, upsert=True))
+                        # Hard bill uniqueness key per KAZO rule: (store_id, bill_number, bill_date).
+                        # During the initial insert store_id may be null; we use bill_number alone
+                        # because the post-pass backfills store_id and the unique compound index
+                        # ensures any future duplicate (same store+bill+date) is rejected.
+                        ops.append(UpdateOne({"bill_number": d["bill_number"],
+                                              "bill_date": d["bill_date"]},
+                            {"$set": {**d, "ingest_job_id": job_id},
+                             "$setOnInsert": {"id": uuid.uuid4().hex, "created_at": now()}},
+                            upsert=True))
                     res = await transactions_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
                     updated += res.modified_count
@@ -455,6 +472,28 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
             except Exception as spe:
                 logger.exception(f"Store auto-create post-pass failed: {spe}")
 
+        # =====================================================
+        # R6: Points-ledger post-pass — write earn/redeem/bonus ledger entries for
+        # each loyalty bill (customer_mobile is non-empty) ingested by this job.
+        # R1: ledger entries carry the actual bill_date (NOT ingest time).
+        # =====================================================
+        if dataset == "transactions" and not dry_run:
+            try:
+                await _write_ledger_for_job(job_id)
+            except Exception as ple:
+                logger.exception(f"Points-ledger post-pass failed: {ple}")
+
+        # =====================================================
+        # R1 + R2 + R3: per-customer aggregate recomputation —
+        #   first_purchase_at, last_visit_at, visit_count, home_store_id
+        # Only loyalty customers (with non-empty mobile).
+        # =====================================================
+        if dataset == "transactions" and not dry_run:
+            try:
+                await _recompute_customer_aggregates(job_id)
+            except Exception as cae:
+                logger.exception(f"Customer aggregate recompute failed: {cae}")
+
         final = {
             "status": "completed" if not dry_run else "previewed",
             "completed_at": now(),
@@ -494,6 +533,141 @@ def _get_pk(dataset: str, doc: Dict[str, Any]) -> Tuple[Optional[str], Any]:
     if dataset == "items":
         return "sku", doc.get("sku")
     return None, None
+
+
+# ============================================================
+# Post-pass helpers (R1 / R2 / R3 / R6)
+# ============================================================
+async def _write_ledger_for_job(job_id: str) -> Dict[str, int]:
+    """R6: For each loyalty bill (customer_mobile non-empty) inserted by this job,
+    write `earn` / `redeem` / `bonus` ledger entries timestamped with the bill_date.
+
+    Re-running is idempotent: each ledger doc carries `source_bill_id` so we skip
+    rows that already have entries.
+    """
+    from pymongo import InsertOne
+    counts = {"earn": 0, "redeem": 0, "bonus": 0}
+    cursor = transactions_col.find(
+        {"ingest_job_id": job_id, "customer_mobile": {"$nin": [None, ""]}},
+        {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1, "customer_mobile": 1,
+         "store_id": 1, "points_earned": 1, "points_redeemed": 1, "bonus_points": 1},
+    )
+    ops: List[Any] = []
+    BATCH = 1000
+    async for tx in cursor:
+        bill_id = tx.get("id")
+        if not bill_id:
+            continue
+        # Skip if ledger already exists for this bill (idempotency)
+        if await points_ledger_col.count_documents({"source_bill_id": bill_id}, limit=1):
+            continue
+        base = {
+            "customer_mobile": tx["customer_mobile"],
+            "bill_number": tx.get("bill_number"),
+            "bill_date": tx.get("bill_date"),
+            "store_id": tx.get("store_id"),
+            "source_bill_id": bill_id,
+            "source": "historic_upload",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        earn = int(tx.get("points_earned") or 0)
+        redeem = int(tx.get("points_redeemed") or 0)
+        bonus = int(tx.get("bonus_points") or 0)
+        if earn > 0:
+            ops.append(InsertOne({**base, "id": uuid.uuid4().hex,
+                                  "type": "earn", "points": earn,
+                                  "reason": "Historic earn (CSV ingest)"}))
+            counts["earn"] += 1
+        if redeem > 0:
+            ops.append(InsertOne({**base, "id": uuid.uuid4().hex,
+                                  "type": "redeem", "points": -abs(redeem),
+                                  "reason": "Historic redemption (CSV ingest)"}))
+            counts["redeem"] += 1
+        if bonus > 0:
+            ops.append(InsertOne({**base, "id": uuid.uuid4().hex,
+                                  "type": "bonus", "points": bonus,
+                                  "reason": "Historic bonus (CSV ingest)"}))
+            counts["bonus"] += 1
+        if len(ops) >= BATCH:
+            try:
+                await points_ledger_col.bulk_write(ops, ordered=False)
+            except Exception as e:
+                logger.warning(f"Ledger bulk insert partial failure: {e}")
+            ops.clear()
+    if ops:
+        try:
+            await points_ledger_col.bulk_write(ops, ordered=False)
+        except Exception as e:
+            logger.warning(f"Ledger bulk insert (final) partial failure: {e}")
+    logger.info(f"Wrote points-ledger entries for job {job_id}: {counts}")
+    return counts
+
+
+async def _recompute_customer_aggregates(job_id: str) -> int:
+    """R1+R2+R3: For every loyalty customer touched by this job, recompute
+    first_purchase_at, last_visit_at, visit_count (unique bills), home_store_id
+    (store of earliest bill) from the actual transaction history. R4: keyed by mobile.
+    """
+    from pymongo import UpdateOne
+    # 1. Collect mobiles touched by this job
+    touched_mobiles = await transactions_col.distinct(
+        "customer_mobile",
+        {"ingest_job_id": job_id, "customer_mobile": {"$nin": [None, ""]}},
+    )
+    if not touched_mobiles:
+        return 0
+
+    # 2. Aggregate per-mobile from the FULL transaction history (across all jobs)
+    agg_pipe = [
+        {"$match": {"customer_mobile": {"$in": touched_mobiles}}},
+        {"$sort": {"bill_date": 1}},
+        {"$group": {
+            "_id": "$customer_mobile",
+            "first_purchase_at": {"$first": "$bill_date"},
+            "first_store_id": {"$first": "$store_id"},
+            "last_visit_at": {"$last": "$bill_date"},
+            "unique_bills": {"$addToSet": {"store": "$store_id",
+                                            "bill": "$bill_number",
+                                            "date": "$bill_date"}},
+            "total_spend": {"$sum": "$net_amount"},
+        }},
+    ]
+    rows = await transactions_col.aggregate(agg_pipe).to_list(len(touched_mobiles))
+
+    ops = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        mobile = r["_id"]
+        update_set: Dict[str, Any] = {
+            "first_purchase_at": r["first_purchase_at"],
+            "last_visit_at": r["last_visit_at"],
+            "home_store_id": r["first_store_id"],
+            "visit_count": len(r["unique_bills"]),
+        }
+        update_set_on_insert = {
+            "id": uuid.uuid4().hex,
+            "mobile": mobile,
+            "name": None,
+            "city": None,
+            "state": None,
+            "tier": _derive_tier(r.get("total_spend") or 0),
+            "lifetime_spend": round(r.get("total_spend") or 0, 2),
+            "points_balance": 0,
+            "lifetime_points_earned": 0,
+            "lifetime_points_redeemed": 0,
+            "source": "transaction_derived",
+            "created_at": now_iso,
+        }
+        ops.append(UpdateOne({"mobile": mobile},
+                              {"$set": update_set, "$setOnInsert": update_set_on_insert},
+                              upsert=True))
+    if ops:
+        try:
+            await customers_col.bulk_write(ops, ordered=False)
+        except Exception as e:
+            logger.warning(f"Customer-aggregate bulk write partial failure: {e}")
+    logger.info(f"Recomputed customer aggregates for {len(rows)} mobiles (job {job_id})")
+    return len(rows)
 
 
 def _exists_col(dataset: str):
@@ -1017,3 +1191,126 @@ async def purge_demo(body: PurgeIn,
     if not body.keep_provider_config:
         deleted["provider_config"] = (await db["provider_config"].delete_many({})).deleted_count
     return {"purged": True, "deleted_counts": deleted, "by": user["email"]}
+
+
+# ============================================================
+# Loyalty-model backfill — applies R1+R2+R3 + bill uniqueness index
+# to the ENTIRE existing transactions/customers dataset (one-shot).
+# Run once after upgrading the codebase.
+# ============================================================
+@router.post("/backfill-loyalty-model")
+async def backfill_loyalty_model(
+    user: dict = Depends(require_roles("super_admin", "brand_admin")),
+):
+    """Backfill existing data per the KAZO loyalty data rules:
+    R1  first_purchase_at / last_visit_at sourced from bill_date
+    R2  home_store_id = store_id of customer's earliest bill
+    R3  visit_count = COUNT(distinct (store, bill, date)) per mobile
+    R4  Hard unique index on (store_id, bill_number, bill_date) for transactions
+        + unique index on customers.mobile (loyalty members are deduped by mobile)
+    """
+    from pymongo import UpdateOne
+
+    report: Dict[str, Any] = {"started_at": datetime.now(timezone.utc).isoformat()}
+
+    # ---- Step 1: Build unique indices ----
+    idx_report: Dict[str, str] = {}
+    try:
+        await transactions_col.create_index(
+            [("store_id", 1), ("bill_number", 1), ("bill_date", 1)],
+            unique=True, sparse=True, name="uniq_bill_store_date",
+        )
+        idx_report["transactions_uniq"] = "ok"
+    except Exception as e:
+        idx_report["transactions_uniq"] = f"warn: {e}"
+    try:
+        # Loyalty mobile uniqueness — partial filter so anonymous customers (None mobile)
+        # don't collide. There should be at most ONE document per non-empty mobile.
+        await customers_col.create_index(
+            [("mobile", 1)], unique=True,
+            partialFilterExpression={"mobile": {"$type": "string"}},
+            name="uniq_customer_mobile",
+        )
+        idx_report["customers_mobile_uniq"] = "ok"
+    except Exception as e:
+        idx_report["customers_mobile_uniq"] = f"warn: {e}"
+    report["indices"] = idx_report
+
+    # ---- Step 2: Recompute aggregates for every loyalty mobile ----
+    # Pull every distinct mobile (in chunks to avoid memory)
+    all_mobiles = await transactions_col.distinct(
+        "customer_mobile", {"customer_mobile": {"$nin": [None, ""]}}
+    )
+    report["loyalty_mobiles_found"] = len(all_mobiles)
+    if not all_mobiles:
+        report["completed_at"] = datetime.now(timezone.utc).isoformat()
+        return report
+
+    # Aggregate
+    agg_pipe = [
+        {"$match": {"customer_mobile": {"$in": all_mobiles}}},
+        {"$sort": {"bill_date": 1}},
+        {"$group": {
+            "_id": "$customer_mobile",
+            "first_purchase_at": {"$first": "$bill_date"},
+            "first_store_id": {"$first": "$store_id"},
+            "last_visit_at": {"$last": "$bill_date"},
+            "unique_bills": {"$addToSet": {"store": "$store_id",
+                                            "bill": "$bill_number",
+                                            "date": "$bill_date"}},
+            "total_spend": {"$sum": "$net_amount"},
+            "txn_count": {"$sum": 1},
+        }},
+    ]
+    rows = await transactions_col.aggregate(agg_pipe, allowDiskUse=True).to_list(len(all_mobiles) + 1000)
+    report["mobiles_aggregated"] = len(rows)
+
+    # Bulk upsert customer docs
+    BATCH = 500
+    ops: List[Any] = []
+    upserted = 0
+    updated = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        mobile = r["_id"]
+        ops.append(UpdateOne(
+            {"mobile": mobile},
+            {"$set": {
+                "first_purchase_at": r["first_purchase_at"],
+                "last_visit_at": r["last_visit_at"],
+                "home_store_id": r["first_store_id"],
+                "visit_count": len(r["unique_bills"]),
+            },
+             "$setOnInsert": {
+                 "id": uuid.uuid4().hex,
+                 "mobile": mobile,
+                 "tier": _derive_tier(r.get("total_spend") or 0),
+                 "lifetime_spend": round(r.get("total_spend") or 0, 2),
+                 "points_balance": 0,
+                 "lifetime_points_earned": 0,
+                 "lifetime_points_redeemed": 0,
+                 "source": "transaction_derived",
+                 "created_at": now_iso,
+             }},
+            upsert=True,
+        ))
+        if len(ops) >= BATCH:
+            try:
+                res = await customers_col.bulk_write(ops, ordered=False)
+                upserted += res.upserted_count
+                updated += res.modified_count
+            except Exception as e:
+                logger.warning(f"backfill bulk partial: {e}")
+            ops.clear()
+    if ops:
+        try:
+            res = await customers_col.bulk_write(ops, ordered=False)
+            upserted += res.upserted_count
+            updated += res.modified_count
+        except Exception as e:
+            logger.warning(f"backfill bulk final partial: {e}")
+    report["customers_upserted"] = upserted
+    report["customers_updated"] = updated
+    report["completed_at"] = datetime.now(timezone.utc).isoformat()
+    logger.info(f"Loyalty backfill complete: {report}")
+    return report

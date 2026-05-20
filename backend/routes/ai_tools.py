@@ -10,6 +10,7 @@ from database import (
     customers_col, transactions_col, stores_col, campaigns_col, coupons_col,
     points_ledger_col, nps_col, tickets_col, message_log_col, campaign_metrics_col,
 )
+from routes._loyalty import LOYALTY_TX_MATCH, loyalty_match
 
 
 # ---------------- Tool JSON schemas (OpenAI function-calling) ----------------
@@ -180,13 +181,15 @@ def _norm_days(days: int) -> int:
 async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
     days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
-    total_cust = await customers_col.count_documents({})
+    # R5: loyalty members only
+    total_cust = await customers_col.count_documents({"mobile": {"$nin": [None, ""]}})
     sales = await transactions_col.aggregate([
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$group": {"_id": None, "net": {"$sum": "$net_amount"},
                     "txns": {"$sum": 1}, "gross": {"$sum": "$gross_amount"}}},
     ]).to_list(1)
     pts = await customers_col.aggregate([
+        {"$match": {"mobile": {"$nin": [None, ""]}}},
         {"$group": {"_id": None, "outstanding": {"$sum": "$points_balance"},
                     "earned": {"$sum": "$lifetime_points_earned"},
                     "redeemed": {"$sum": "$lifetime_points_redeemed"}}}
@@ -208,7 +211,8 @@ async def _tool_top_churning_customers(inactive_days: int = 120, min_lifetime_sp
     inactive_days = _norm_days(inactive_days)
     cutoff = _iso(datetime.now(timezone.utc) - timedelta(days=inactive_days))
     rows = await customers_col.find(
-        {"last_visit_at": {"$lt": cutoff}, "lifetime_spend": {"$gte": min_lifetime_spend}},
+        {"mobile": {"$nin": [None, ""]},  # R5: loyalty members only
+         "last_visit_at": {"$lt": cutoff}, "lifetime_spend": {"$gte": min_lifetime_spend}},
         {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1,
          "lifetime_spend": 1, "points_balance": 1, "last_visit_at": 1, "churn_risk": 1}
     ).sort("lifetime_spend", -1).limit(min(limit, 50)).to_list(50)
@@ -220,9 +224,9 @@ async def _tool_store_performance(days: int = 30, limit: int = 30, sort: str = "
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     sort_field = {"net_desc": ("net", -1), "net_asc": ("net", 1), "txns_desc": ("txns", -1)}[sort]
     pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"},
-                    "txns": {"$sum": 1}, "customers": {"$addToSet": "$customer_id"}}},
+                    "txns": {"$sum": 1}, "customers": {"$addToSet": "$customer_mobile"}}},
         {"$sort": {sort_field[0]: sort_field[1]}},
         {"$limit": min(limit, 50)},
     ]
@@ -245,7 +249,7 @@ async def _tool_city_performance(days: int = 30, limit: int = 25) -> Dict[str, A
     days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     pipe = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "s"}},
         {"$unwind": "$s"},
         {"$group": {"_id": "$s.city", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
@@ -298,7 +302,7 @@ async def _tool_top_skus(days: int = 30, limit: int = 15, category: str | None =
     days = _norm_days(days)
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     pipe: List[Dict[str, Any]] = [
-        {"$match": {"bill_date": {"$gte": start}}},
+        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$unwind": "$items"},
     ]
     if category:
@@ -319,6 +323,7 @@ async def _tool_top_skus(days: int = 30, limit: int = 15, category: str | None =
 
 async def _tool_tier_distribution() -> Dict[str, Any]:
     rows = await customers_col.aggregate([
+        {"$match": {"mobile": {"$nin": [None, ""]}}},  # R5: loyalty members only
         {"$group": {"_id": "$tier", "count": {"$sum": 1},
                     "spend": {"$sum": "$lifetime_spend"},
                     "points": {"$sum": "$points_balance"}}}
