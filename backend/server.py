@@ -32,6 +32,8 @@ from routes.drilldown_routes import router as drilldown_router
 from routes.fundlebrain_routes import router as fundlebrain_router
 from routes.communications_routes import router as communications_router
 from routes.historic_routes import router as historic_router
+from routes.pos_ewards_routes import router as pos_ewards_router, bootstrap_pos_defaults
+from routes.live_monitor_routes import router as live_monitor_router, admin_router as pos_creds_router, log_router as api_log_detail_router
 
 app = FastAPI(title="KAZO Fundle Platform", version="1.0.0")
 api_router = APIRouter(prefix="/api")
@@ -75,6 +77,10 @@ api_router.include_router(drilldown_router)
 api_router.include_router(fundlebrain_router)
 api_router.include_router(communications_router)
 api_router.include_router(historic_router)
+api_router.include_router(pos_ewards_router)
+api_router.include_router(live_monitor_router)
+api_router.include_router(pos_creds_router)
+api_router.include_router(api_log_detail_router)
 
 app.include_router(api_router)
 
@@ -217,6 +223,12 @@ async def startup():
         start_scheduler()
     except Exception as e:
         logger.warning(f"Could not start digest scheduler: {e}")
+
+    # Bootstrap POS defaults (credentials + test customer 966681235 + test coupons)
+    try:
+        await bootstrap_pos_defaults()
+    except Exception as e:
+        logger.warning(f"Could not bootstrap POS defaults: {e}")
 
 
 @app.on_event("shutdown")

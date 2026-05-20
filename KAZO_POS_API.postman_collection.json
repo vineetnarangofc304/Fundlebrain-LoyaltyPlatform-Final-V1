@@ -1,0 +1,150 @@
+{
+  "info": {
+    "name": "KAZO × Fundle POS APIs (eWards-spec)",
+    "description": "Mirror of the eWards POS Integration API for KAZO loyalty platform. 14 endpoints — same JSON contract, just swap base URL + x-api-key + merchant_id + customer_key.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "https://kazoloyalty.fundlebrain.ai", "description": "Production base URL" },
+    { "key": "api_key", "value": "REPLACE_WITH_X_API_KEY", "description": "From Admin -> POS Credentials" },
+    { "key": "merchant_id", "value": "KAZO_FUNDLE" },
+    { "key": "customer_key", "value": "KAZO_MASTER_OUTLET" },
+    { "key": "test_mobile", "value": "966681235", "description": "Pre-seeded test customer with 5000 points, gold tier" },
+    { "key": "otp_id", "value": "" },
+    { "key": "redeem_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Customer Check",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "x-api-key", "value": "{{api_key}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": { "raw": "{{base_url}}/api/pos/posCustomerCheck", "host": ["{{base_url}}"], "path": ["api","pos","posCustomerCheck"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"customer_mobile\": \"{{test_mobile}}\",\n  \"country_code\": \"91\",\n  \"bill_amount\": \"2000\"\n}" }
+      }
+    },
+    {
+      "name": "2. Customer Check OTP Request",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "x-api-key", "value": "{{api_key}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": { "raw": "{{base_url}}/api/pos/posCustomerCheckRequest", "host": ["{{base_url}}"], "path": ["api","pos","posCustomerCheckRequest"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"customer_mobile\": \"{{test_mobile}}\",\n  \"country_code\": \"91\",\n  \"bill_amount\": \"2000\"\n}" }
+      }
+    },
+    {
+      "name": "3. Resend OTP (customer check)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/resendOtPcustomercheck", "host": ["{{base_url}}"], "path": ["api","pos","resendOtPcustomercheck"] },
+        "body": { "mode": "raw", "raw": "{\n  \"class\": \"1\",\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"otp_id\": \"{{otp_id}}\"\n}" }
+      }
+    },
+    {
+      "name": "4. Customer Check OTP Verify",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/posCustomerOTPCheck", "host": ["{{base_url}}"], "path": ["api","pos","posCustomerOTPCheck"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"customer_mobile\": \"{{test_mobile}}\",\n  \"country_code\": \"91\",\n  \"bill_amount\": \"2000\",\n  \"otp\": \"123456\"\n}" }
+      }
+    },
+    {
+      "name": "5. Add / Update Member",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/posAddCustomer", "host": ["{{base_url}}"], "path": ["api","pos","posAddCustomer"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"customer\": {\n    \"name\": \"Riya Sharma\",\n    \"mobile\": \"9876543210\",\n    \"email\": \"riya@example.com\",\n    \"city\": \"Mumbai\",\n    \"state\": \"Maharashtra\",\n    \"dob\": \"1995-08-15\",\n    \"doa\": \"2018-12-01\",\n    \"gender\": \"Female\",\n    \"marital\": \"Married\"\n  }\n}" }
+      }
+    },
+    {
+      "name": "6. Redeem Point Request (OTP)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/posRedeemPointRequest", "host": ["{{base_url}}"], "path": ["api","pos","posRedeemPointRequest"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"customer_mobile\": \"{{test_mobile}}\",\n  \"country_code\": \"91\",\n  \"points\": \"500\",\n  \"transaction\": {\n    \"id\": \"BILL-001\",\n    \"number\": \"BILL-001\",\n    \"gross_amount\": \"2000\",\n    \"net_amount\": \"2000\",\n    \"amount\": \"1875\",\n    \"items\": [\n      { \"id\": \"K1001\", \"name\": \"KAZO Crepe Top\", \"category\": \"TOPS\", \"category_id\": \"1\", \"rate\": \"2000\", \"quantity\": \"1\", \"subtotal\": \"2000\" }\n    ]\n  }\n}" }
+      }
+    },
+    {
+      "name": "7. Resend OTP (for redeem)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/resendOtPosRedeemPointRequest", "host": ["{{base_url}}"], "path": ["api","pos","resendOtPosRedeemPointRequest"] },
+        "body": { "mode": "raw", "raw": "{\n  \"class\": \"1\",\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"otp_id\": \"{{redeem_id}}\"\n}" }
+      }
+    },
+    {
+      "name": "8. Redeem Point OTP Verify",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/posRedeemPointOtpCheck", "host": ["{{base_url}}"], "path": ["api","pos","posRedeemPointOtpCheck"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"customer_mobile\": \"{{test_mobile}}\",\n  \"country_code\": \"91\",\n  \"points\": \"500\",\n  \"otp\": \"123456\",\n  \"transaction\": {\n    \"id\": \"BILL-001\",\n    \"number\": \"BILL-001\"\n  }\n}" }
+      }
+    },
+    {
+      "name": "9. Bill Settlement (posAddPoint)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/posAddPoint", "host": ["{{base_url}}"], "path": ["api","pos","posAddPoint"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"customer\": {\n    \"name\": \"KAZO Test Customer\",\n    \"mobile\": \"{{test_mobile}}\",\n    \"email\": \"testpos@kazo.com\",\n    \"city\": \"Mumbai\",\n    \"state\": \"Maharashtra\",\n    \"dob\": \"1995-08-15\"\n  },\n  \"transaction\": {\n    \"id\": \"KZO-POS-LIVE-001\",\n    \"number\": \"KZO-POS-LIVE-001\",\n    \"gross_amount\": \"3500\",\n    \"net_amount\": \"3500\",\n    \"amount\": \"4130\",\n    \"discount\": \"0\",\n    \"loyalty_flag\": \"1\",\n    \"loyalty_gross_amount\": \"3500\",\n    \"loyalty_tax_amount\": \"630\",\n    \"order_time\": \"2026-05-20 14:30:00\",\n    \"outlet\": \"Kazo Mumbai - Phoenix Marketcity\",\n    \"items\": [\n      { \"id\": \"K1001\", \"name\": \"KAZO Crepe Top\", \"category\": \"TOPS\", \"category_id\": \"1\", \"rate\": \"1500\", \"quantity\": \"1\", \"subtotal\": \"1770\" },\n      { \"id\": \"K2002\", \"name\": \"KAZO Wide-Leg Trouser\", \"category\": \"BOTTOMS\", \"category_id\": \"2\", \"rate\": \"2000\", \"quantity\": \"1\", \"subtotal\": \"2360\" }\n    ],\n    \"taxes\": [\n      { \"name\": \"CGST\", \"amount\": \"315\" },\n      { \"name\": \"SGST\", \"amount\": \"315\" }\n    ],\n    \"payment_mode\": [{ \"name\": \"upi\", \"amount\": \"4130\" }],\n    \"cashier_name\": \"Sneha K.\"\n  }\n}" }
+      }
+    },
+    {
+      "name": "10. Verify Coupon",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/posCouponDetails", "host": ["{{base_url}}"], "path": ["api","pos","posCouponDetails"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"coupon_code\": \"POSTEST10\",\n  \"customer_mobile\": \"{{test_mobile}}\",\n  \"country_code\": \"91\",\n  \"bill_amount\": \"1500\",\n  \"transaction\": {\n    \"id\": \"BILL-COUP-1\",\n    \"number\": \"BILL-COUP-1\",\n    \"gross_amount\": \"1500\",\n    \"net_amount\": \"1500\",\n    \"amount\": \"1400\",\n    \"items\": []\n  }\n}" }
+      }
+    },
+    {
+      "name": "11. Redeem Coupon",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/posRedeemCoupon", "host": ["{{base_url}}"], "path": ["api","pos","posRedeemCoupon"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"coupon_code\": \"POSTEST20PCT\",\n  \"customer_mobile\": \"{{test_mobile}}\",\n  \"country_code\": \"91\",\n  \"bill_amount\": \"2500\",\n  \"transaction\": {\n    \"id\": \"BILL-COUP-2\",\n    \"number\": \"BILL-COUP-2\",\n    \"gross_amount\": \"2500\",\n    \"net_amount\": \"2500\",\n    \"amount\": \"2000\",\n    \"items\": []\n  }\n}" }
+      }
+    },
+    {
+      "name": "12. Return Order",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/returnOrder", "host": ["{{base_url}}"], "path": ["api","pos","returnOrder"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"mobile\": \"{{test_mobile}}\",\n  \"transaction\": {\n    \"BILL_GUID\": \"KZO-POS-LIVE-001\",\n    \"number\": \"KZO-POS-LIVE-001\",\n    \"type\": \"Return\",\n    \"return_loyalty_gross_amount\": \"-3500\",\n    \"return_loyalty_tax_amount\": \"-630\",\n    \"return_loyalty_charge_amount\": \"0\",\n    \"return_gross_amount\": \"-3500\",\n    \"return_net_amount\": \"-3500\",\n    \"return_amount\": \"-4130\",\n    \"return_discount\": \"0\",\n    \"return_bill\": \"1\",\n    \"billing_time\": \"2026-05-20\"\n  }\n}" }
+      }
+    },
+    {
+      "name": "13. Wallet Redemption Request",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/requestWalletRedemptionURL", "host": ["{{base_url}}"], "path": ["api","pos","requestWalletRedemptionURL"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"ISDCode\": \"91\",\n  \"mobileNo\": \"{{test_mobile}}\",\n  \"billGUID\": \"BILL-WALLET-001\",\n  \"billValue\": \"1250\",\n  \"proposedDebitAmount\": \"500\"\n}" }
+      }
+    },
+    {
+      "name": "14. Wallet Redemption Status",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "x-api-key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{base_url}}/api/pos/getWalletRedemptionStatus", "host": ["{{base_url}}"], "path": ["api","pos","getWalletRedemptionStatus"] },
+        "body": { "mode": "raw", "raw": "{\n  \"merchant_id\": \"{{merchant_id}}\",\n  \"customer_key\": \"{{customer_key}}\",\n  \"ISDCode\": \"91\",\n  \"mobileNo\": \"{{test_mobile}}\",\n  \"billGUID\": \"BILL-WALLET-001\",\n  \"billValue\": \"1250\",\n  \"proposedDebitAmount\": \"500\",\n  \"transaction_id\": \"PASTE_FROM_STEP_13\"\n}" }
+      }
+    }
+  ]
+}

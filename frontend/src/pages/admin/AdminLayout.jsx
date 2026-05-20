@@ -3,7 +3,7 @@ import { useAuth, hasRole } from "@/lib/auth";
 import {
   LayoutDashboard, TrendingUp, UserRound, Award, BarChart3, Store as StoreIcon, MessageCircle,
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
-  Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload
+  Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound
 } from "lucide-react";
 import { useState } from "react";
 
@@ -12,6 +12,7 @@ const SECTIONS = [
     label: "DASHBOARDS",
     items: [
       { to: "/admin", end: true, icon: LayoutDashboard, label: "Command Center", testid: "nav-command-center" },
+      { to: "/admin/live-monitor", icon: Radio, label: "Live Bill Monitor", testid: "nav-live-monitor" },
       { to: "/admin/dashboards/sales", icon: TrendingUp, label: "Sales", testid: "nav-dash-sales" },
       { to: "/admin/dashboards/customers", icon: UserRound, label: "Customer Analytics", testid: "nav-dash-customers" },
       { to: "/admin/dashboards/loyalty", icon: Award, label: "Loyalty", testid: "nav-dash-loyalty" },
@@ -64,6 +65,7 @@ const SECTIONS = [
       { to: "/admin/stores", icon: StoreIcon, label: "Stores", testid: "nav-stores" },
       { to: "/admin/items", icon: Package, label: "Item Master", testid: "nav-items" },
       { to: "/admin/api-monitor", icon: Activity, label: "API Monitor", testid: "nav-api" },
+      { to: "/admin/pos-credentials", icon: KeyRound, label: "POS Credentials", testid: "nav-pos-creds" },
     ],
   },
   {
