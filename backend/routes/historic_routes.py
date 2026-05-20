@@ -17,8 +17,6 @@ import json
 import re
 import uuid
 import logging
-import shutil
-from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -39,16 +37,13 @@ logger = logging.getLogger("kazo-fundle.historic")
 # Collections for staging
 historic_jobs_col = db["historic_ingest_jobs"]
 historic_raw_col = db["historic_uploads"]  # stores raw uploaded CSV bytes (capped)
+historic_chunks_col = db["historic_chunks"]  # shared chunk store (works across pods/workers)
 
 CHUNK_SIZE = 500
 MAX_FILE_BYTES = 250 * 1024 * 1024  # 250 MB (chunked uploads bypass proxy limits)
 MAX_ERROR_SAMPLES = 25
 ALLOWED_DATASETS = {"customers", "transactions", "stores", "items"}
 DUPLICATE_MODES = {"upsert", "skip", "fail"}
-
-# Chunked-upload temp dir
-UPLOAD_TMP_DIR = Path("/tmp/historic_uploads")
-UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------- Date parsing ----------------
@@ -639,8 +634,6 @@ async def ingest_init(body: IngestInitIn, user: dict = Depends(get_current_user)
         raise HTTPException(413, f"File too large (max {MAX_FILE_BYTES // (1024*1024)} MB)")
 
     job_id = uuid.uuid4().hex
-    job_dir = UPLOAD_TMP_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     job_doc = {
         "id": job_id,
@@ -671,7 +664,7 @@ async def ingest_chunk(
     chunk: UploadFile = File(...),
     user: dict = Depends(get_current_user),
 ):
-    """Step 2 of chunked upload: receive one chunk and persist to disk."""
+    """Step 2 of chunked upload: receive one chunk and persist to MongoDB (shared across pods)."""
     job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
@@ -680,19 +673,28 @@ async def ingest_chunk(
     if chunk_index < 0 or chunk_index >= job.get("total_chunks", 1):
         raise HTTPException(400, "chunk_index out of range")
 
-    job_dir = UPLOAD_TMP_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-    chunk_path = job_dir / f"chunk-{chunk_index:05d}.bin"
-
     data = await chunk.read()
     if len(data) > 10 * 1024 * 1024:  # 10MB hard cap per chunk
         raise HTTPException(413, "Single chunk too large (max 10MB per chunk)")
-    chunk_path.write_bytes(data)
 
-    await historic_jobs_col.update_one(
-        {"id": job_id},
-        {"$inc": {"chunks_uploaded": 1, "size_bytes": len(data)}},
+    # Idempotent upsert — store in MongoDB so chunks landing on different pods all converge
+    result = await historic_chunks_col.update_one(
+        {"job_id": job_id, "chunk_index": chunk_index},
+        {"$set": {
+            "job_id": job_id,
+            "chunk_index": chunk_index,
+            "data": data,
+            "size": len(data),
+        }},
+        upsert=True,
     )
+
+    # Only increment counter when this was a fresh insert (avoid double-count on retries)
+    if result.upserted_id is not None:
+        await historic_jobs_col.update_one(
+            {"id": job_id},
+            {"$inc": {"chunks_uploaded": 1, "size_bytes": len(data)}},
+        )
     return {"ok": True, "chunk_index": chunk_index, "bytes": len(data)}
 
 
@@ -702,29 +704,40 @@ async def ingest_finalize(
     background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
-    """Step 3 of chunked upload: stitch chunks, queue background ingest, cleanup."""
+    """Step 3 of chunked upload: stitch chunks from MongoDB, queue background ingest, cleanup."""
     job = await historic_jobs_col.find_one({"id": body.job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
     if job.get("status") != "uploading":
         raise HTTPException(400, f"Job is not in uploading state (status={job.get('status')})")
 
-    job_dir = UPLOAD_TMP_DIR / body.job_id
-    if not job_dir.exists():
-        raise HTTPException(400, "No uploaded chunks found on disk")
-
-    chunk_files = sorted(job_dir.glob("chunk-*.bin"))
     expected = job.get("total_chunks", 0)
-    if len(chunk_files) != expected:
+    found = await historic_chunks_col.count_documents({"job_id": body.job_id})
+    if found != expected:
         raise HTTPException(
             400,
-            f"Chunk count mismatch — expected {expected}, found {len(chunk_files)}. Please retry the upload.",
+            f"Chunk count mismatch — expected {expected}, found {found}. Please retry the upload.",
         )
 
-    # Stitch all chunks (33MB → ~200MB is OK in memory; FastAPI worker has plenty of RAM)
+    # Stitch all chunks in order (streaming to avoid loading 250MB array at once)
     try:
-        raw = b"".join(p.read_bytes() for p in chunk_files)
+        cursor = historic_chunks_col.find(
+            {"job_id": body.job_id},
+            {"_id": 0, "chunk_index": 1, "data": 1},
+        ).sort("chunk_index", 1)
+        parts: List[bytes] = []
+        last_index = -1
+        async for doc in cursor:
+            idx = doc["chunk_index"]
+            if idx != last_index + 1:
+                raise HTTPException(400, f"Chunk gap detected at index {last_index + 1}. Please retry the upload.")
+            parts.append(doc["data"])
+            last_index = idx
+        raw = b"".join(parts)
+        parts.clear()
         text = raw.decode("utf-8-sig", errors="replace")
+    except HTTPException:
+        raise
     except Exception as e:
         await historic_jobs_col.update_one(
             {"id": body.job_id},
@@ -753,11 +766,8 @@ async def ingest_finalize(
         job["duplicate_mode"], job["dry_run"],
     )
 
-    # Cleanup chunk files (keep dir until task done? safer to nuke now)
-    try:
-        shutil.rmtree(job_dir, ignore_errors=True)
-    except Exception:
-        pass
+    # Cleanup: remove chunk docs from MongoDB
+    await historic_chunks_col.delete_many({"job_id": body.job_id})
 
     updated = await historic_jobs_col.find_one({"id": body.job_id}, {"_id": 0})
     return updated or {"id": body.job_id, "status": "queued", "row_count_estimated": row_count}
@@ -765,15 +775,13 @@ async def ingest_finalize(
 
 @router.post("/ingest/abort/{job_id}")
 async def ingest_abort(job_id: str, user: dict = Depends(get_current_user)):
-    """Cancel an in-flight chunked upload (clean temp files)."""
+    """Cancel an in-flight chunked upload (clean temp chunks from MongoDB)."""
     job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
     if job.get("status") not in {"uploading", "queued"}:
         return {"ok": True, "noop": True}
-    job_dir = UPLOAD_TMP_DIR / job_id
-    if job_dir.exists():
-        shutil.rmtree(job_dir, ignore_errors=True)
+    await historic_chunks_col.delete_many({"job_id": job_id})
     await historic_jobs_col.update_one(
         {"id": job_id},
         {"$set": {"status": "failed", "error": "Aborted by user",

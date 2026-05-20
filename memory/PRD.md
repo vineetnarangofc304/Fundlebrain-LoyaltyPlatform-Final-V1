@@ -31,6 +31,19 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 10.1 (May 2026) — ✅ Chunked Upload Multi-Pod Fix
+
+**Issue**: First chunked-upload deploy failed in production with `Chunk count mismatch — expected 24, found 13`. Root cause: production runs multiple backend pods; chunks were persisted to each pod's local `/tmp/historic_uploads`, so finalize only saw the chunks on its own pod.
+
+**Fix** — `routes/historic_routes.py`
+- Switched chunk storage from local filesystem to MongoDB collection `historic_chunks` (shared across all pods/workers)
+- Idempotent upsert by `{job_id, chunk_index}` — chunk retries don't double-count
+- Streaming async cursor sorted by `chunk_index` in finalize to stitch in correct order; explicit gap detection
+- Cleanup deletes chunk docs from MongoDB after stitch
+- Dropped local filesystem dependency entirely (`UPLOAD_TMP_DIR`, `shutil`, `pathlib` no longer needed)
+
+**Verification**: End-to-end test with 26.6 MB / 190,000-row transactions CSV split into 18 chunks → finalize → background ingest running cleanly. Zero chunks leaked.
+
 ### Iteration 10 (May 2026) — ✅ Chunked Upload for Large CSVs (Production Fix)
 
 **Issue**: Production upload of 33MB / 1.9-lakh-row CSV was failing partway — root cause was Kubernetes ingress body-size limit on the single multipart POST.
