@@ -1,121 +1,117 @@
-<analysis>**original_problem_statement**: Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign automation, customer intelligence, support, reporting and API-monitoring platform for KAZO (premium women's fashion brand), powered by Fundle. PRODUCT REQUIREMENTS: Single-tenant (one independent frontend, backend, database). Zero fake data (except auth users which are seeded), real-time live computations. All API routes prefixed with . Implement 10 specific analytical dashboards, an AI Conversation Engine with function calling, and a Communications Module for SMS/WhatsApp/RCS via Karix.
+<analysis>**original_problem_statement**: Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign automation, customer intelligence, support, reporting and API-monitoring platform for KAZO, powered by Fundle. PRODUCT REQUIREMENTS: Single-tenant (zero fake data except seeded users). Recent addition: Build exact replica APIs of their previous POS vendor (eWards) so KAZO can switch the base URL without changing their ERP system. Include a Live Bill Monitor cockpit and ensure robust, multi-megabyte historical data CSV ingestion.
 
 **User's preferred language**: English (INSTRUCT next agent to respond in English only)
 
 **what currently exists?** 
-A robust, production-grade MVP is live. Features include real-time live compute across modular dashboards, an AI Conversation Engine with true function calling, Communications module (Karix API integration, WABA templates), background executive digest scheduler, and a Historical Data CSV ingestion module. Auth is JWT-based and 11 demo user accounts are seeded automatically on boot. CORS is configured to handle the user's custom production domain securely.
+A production-grade MVP is live. Features include modular analytical dashboards, AI Conversation Engine, Communications module (Karix API), a resilient background scheduler for multi-megabyte CSV data ingestion (using MongoDB chunking to bypass pod limits), an exact replica of 14 eWards POS API endpoints, a Live Bill Monitor cockpit for real-time transaction tracking (highlighting anonymous walk-ins as Lost Opportunities), and upgraded API payload monitoring. Critical POS OTP/redemption security vulnerabilities have been patched. 
 
 **Last working item**: 
-    - Last item agent was working: Fixing a CORS-related login failure on the user's live custom domain. The frontend was sending requests with credentials (cookies) while the backend was returning a wildcard , which browsers reject. The agent updated  to echo the specific custom domain dynamically instead of a wildcard.
-    - Status: USER VERIFICATION PENDING (User needs to redeploy to see the fix on the production environment)
+    - Last item agent was working: Fixing a critical POS security vulnerability where users could bypass OTP verification and tamper with redemption amounts (e.g., requesting OTP for 10 points but redeeming 100 points). Also seeded the correct 10-digit test customer number (9266681235) as requested by the user.
+    - Status: USER VERIFICATION PENDING (Completed in preview environment, user must redeploy to see on production)
     - Agent Testing Done: Y
-    - Which testing method agent to use? manual testing by curl
+    - Which testing method agent to use? manual testing by bash/curl
     - User Testing Done: N
 
 **All Pending/In progress Issue list**: 
-  Issue 1: Verify Custom Domain Login on Production
-     - Attempted fixes: Updated  to remove wildcard CORS origin and allow  explicitly with .
-     - Next debug checklist: Ask user to confirm if login is successful after they redeploy to production.
-     - Why fix this issue and what will be achieved with the fix? Enables auth access for users on their custom URL.
-     - Status: USER VERIFICATION PENDING
-     - Is recurring issue? N
-     - Should Test frontend/backend/both after fix? Frontend (Smoke test after user confirms deployment)
-     - Blocked on other issue: None
+  None. (All reported bugs regarding large CSV uploads, POS payload tampering, and missing test points were successfully resolved and tested).
 
 **In progress Task List**: 
-  None currently.
+  None. 
 
 **Upcoming and Future Tasks**
     Upcoming Tasks:
-    - P0: KAZO POS APIs Integration: Review the ingested historic data structure and build the live API endpoints () that KAZO will use to integrate their POS system with Fundle. (Note: Wait for user's approval/answers on the implementation plan and payload structure for this).
-    - P1: Server-Level Live Data Scheduler: Implement a background scheduler to fetch or process live transactional data post-POS integration.
+    - P1: Refactor POS API File: The newly created  exceeds 1400 lines. The testing agent recommended splitting this into 4-5 smaller modules to adhere to maintainability guidelines.
     
     Future Tasks:
     - P2: Post-Ingest Auto-Report: Add a Fundle Brain hook to auto-generate a narrative email summarising what changed in the database after a successful historical data upload.
+    - P2: Drag-and-drop report builder, support bot, mobile app (Noted in PRD).
 
 **Completed work in this session**
-- Identified root cause of production login failure on custom domain (CORS wildcard rejection for credentialed requests) (DONE)
-- Updated FastAPI CORS middleware in  to allow the specific custom domain (DONE)
-- Updated  to document the fix (DONE)
+- Built 14 eWards-compatible POS APIs at  mapping to platform logic (DONE)
+- Created Live Monitor cockpit and POS Credentials admin pages (DONE)
+- Upgraded API Monitor to show clickable request/response payloads in a modal (DONE)
+- Refactored CSV ingestion to use chunked frontend uploads, MongoDB shared storage (to support multi-pod production), and an  background job for resilience (DONE)
+- Fixed ingestion mapping to process anonymous walk-ins as  (Lost Opportunities) rather than failing the upload (DONE)
+- Patched critical POS API security bug (enforced OTP presence, amount matching, and bill matching) (DONE)
+- Generated a Postman Collection for POS APIs (DONE)
 
 **Earlier issues found/mentioned but not fixed**
-   None.
+   None. All user-reported issues were thoroughly debugged and fixed.
 
 **Known issue recurrence from previous fork**
-  - Issue recurrence in previous fork: None
-  - Recurrence count: 0
-  - Status: RESOLVED
+  - Issue recurrence in previous fork: The large CSV upload failed across 3 different iterations due to varying production environment constraints (Ingress limits, multi-pod  isolation,  worker timeouts, and mapping logic dropping empty mobiles).
+  - Recurrence count: 3 (within this session)
+  - Status: RESOLVED (Do NOT modify the current  background ingestion or MongoDB chunking logic for uploads, as it is perfectly tuned for the user's production constraints).
 
 **Code Architecture**
 
 
 **Key Technical Concepts**
 - Frontend: React, TailwindCSS, Recharts, shadcn/ui. 
-- Backend: FastAPI, Async Motor MongoDB driver, JWT cookie sessions,  for CRON tasks.
-- AI: True MongoDB function-calling & CSV Narratives using Emergent LLM Key (GPT-5.2).
-- Security: CORS configured dynamically to support custom domain frontend targeting Emergent-hosted backend.
+- Backend: FastAPI, Async Motor MongoDB driver,  for CRON tasks and resilient background data ingestion.
+- POS Integration: eWards API schema replication (unauthenticated but requires , ,  headers).
 
 **key DB schema**
-  - : {email, role, store_id}
-  - : {mobile, points, tier, join_date}
-  - : {mobile, bill_number, store_id, amount, points}
-  - : {campaign_id, channel, sent, delivered, opened, clicked, converted, revenue}
+  - : 
+  -  (NEW): Temporary collection for storing CSV chunks to bypass Kubernetes ingress and multi-pod restrictions.
+  - : Tracks background ingestion progress with a  and  state updated via heartbeat.
 
 **changes in tech stack**
-  - None this session.
+  - Heavy utilization of  for background tasks to prevent worker-timeout deaths during massive CSV parsing.
 
 **All files of reference** 
-  -  (Updated CORS middleware to fix custom domain credentialed requests)
-  -  (Updated with completion notes)
-  -  (Contains login emails and passwords)
-  -  (Reviewed during debugging)
+  -  (New: Houses the 14 replica eWards endpoints)
+  -  (New: Feeds the Live Monitor Cockpit)
+  -  (Updated extensively for resilient chunked/scheduled uploads)
+  -  (New: Cockpit view)
+  -  (New: Admin view for Postman keys)
+  -  (Updated to handle 15-second interval ingest polling)
+  -  (Updated with new 10-digit test customer)
 
 **Areas that need refactoring**: 
-  None identified.
+  - : Contains over 1400 lines of code. Needs to be split into logical sub-modules (e.g., point redemption, bill settlement, customer lookup).
 
 **key api endpoints**
--  (JWT generation, explicitly supports custom origins now)
--  (Upcoming: Unauthenticated endpoints to be built for POS)
+-  (Unauthenticated ERP system endpoints, secured by specific headers)
+-  and  (Upload flow)
+-  (Cockpit endpoints)
 
 **Critical Info for New Agent** 
-- **CORS Configuration:** Do NOT revert CORS in  to . The frontend uses , and the user runs the app from a custom domain (). Browsers will immediately block wildcard origins for credentialed requests.
-- **STRICT DATA RULE:** The user explicitly demands zero mock/dummy business data (customers, transactions). The only allowed seeded data is the  collection for authentication.
-- **POS INTEGRATION NEXT:** The next phase relies on building out the endpoints that the user's ERP/POS will hit (). Await user instruction/clarification on the POS structure before beginning.
+- **ENVIRONMENT DUALITY**: The user deploys the app to a custom production domain (). You only have access to the PREVIEW environment. If the user reports an issue, ALWAYS clarify if it is happening on preview or production. Fixes made in preview require the user to redeploy to see them in production.
+- **ANONYMOUS WALK-INS**: Transactions with no mobile number are considered Lost Opportunities. Do NOT drop them during ingestion; they must be saved with  so they appear highlighted in red on the Live Monitor.
+- **SECURITY INTEGRITY**: The  must strictly validate that the OTP is present, the bill number matches, and the requested points exactly match the points authorized by the generated OTP.
 
 **documents and test reports created in this job** 
   - 
+  - 
+  - 
+  - 
 
 **Last 10 User Messages and any pending HUMAN messages** 
- - User: the login fails on live site.. I have redeployed as fresh fully fresh then too..
- - Agent: Tested production directly and verified APIs were functioning locally. 
- - User: am live on kazoloyalty.fundlebrain.ai (Revealed custom domain usage)
- - Agent: Discovered CORS error through frontend screenshot tool. The custom domain was hitting the wildcard CORS setup on the backend with cookies enabled.
- - Agent: Modified  to fix CORS explicitly. Tested preflight and POST requests to ensure compliance.
- - Agent: Finished the task, prompting the user to redeploy and offered an enhancement (Status badge).
- - *Pending User Message*: Await user verification of the deployed CORS fix and their decision on proceeding to POS Integration.
+ 1. User: upload still not working.. it took 2000 records and aborted... (Agent refactored to  background job).
+ 2. User: Shared screenshot showing upload aborted at 199,897 rows out of 199,999. Shared CSV file. (Agent identified trailing rows lacked mobile numbers and were crashing the mapper; fixed to ingest as Lost Opportunities).
+ 3. User: cant see points on this number 9266681235. (Agent seeded the 10-digit number and verified it).
+ 4. User: Uploaded 4 screenshots showing a critical POS security vulnerability (OTP bypass and point tampering).
+ 5. Agent: Identified the bug, applied stringent verification logic, tested attack vectors via bash, and finished the task.
+ - *Pending User Message*: None. Await user verification of the security patch and new POS flow.
 
 **Project Health Check:**
-- Broken: None (Pending user redeploy)
-- Mocked: None
+- Broken: None
+- Mocked: None (Zero fake data rule actively enforced; only test users/POS customers seeded)
 
 **3rd Party Integrations** 
-- OpenAI GPT-5.2 (AI Narratives & Dashboard Insights) — uses Emergent LLM Key.
+- OpenAI GPT-5.2 (AI Narratives) — uses Emergent LLM Key.
 - Karix SMS/WhatsApp/RCS — requires User API Key.
 
 **Testing status**
-  - Testing agent used after significant changes: NO (Minor backend fix)
+  - Testing agent used after significant changes: YES (iteration 10)
   - Troubleshoot agent used after agent stuck in loop: NO
   - Test files created: None
   - Known regressions: None
 
 **Credentials to test flow:**
-Refer to  (e.g.,  / )
+Refer to . 
+New test customer seeded for POS testing: Mobile  (5000 points, Gold tier).
 
 **What agent forgot to execute**
-Everything was handled correctly. Agent properly identified the deployment discrepancy and resolved the backend CORS issue. 
-
-**Debugging checklist for current issue**
-    Issue: P0 - KAZO POS APIs Integration (Upcoming Task)
-    Frontend files to check: To be determined based on user requirements.
-    Backend files to check:  (To be created)
-    Database to check: ,  collections.</analysis>
+Everything requested was thoroughly executed, including rigorous local testing of edge-case security exploits.</analysis>
