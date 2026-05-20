@@ -700,7 +700,19 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
                        bill_number=bill_number, payload=payload, response=resp)
         return resp
 
-    # OTP / non-OTP path
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
+    burn_ratio = cfg.get("burn_ratio", 0.25)
+    require_otp = bool(cfg.get("require_otp_for_redeem", True))
+
+    # SECURITY: OTP is mandatory when redemption requires OTP. Empty OTP is a tamper attempt.
+    if require_otp and not otp:
+        resp = _err(400, "OTP is required to verify this redemption")
+        await _log_api(endpoint=endpoint, method="POST", status=400,
+                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                       bill_number=bill_number, error="missing OTP",
+                       payload=payload, response=resp, api_key_label=cred.get("label"))
+        return resp
+
     if otp:
         session = await pos_otp_col.find_one({
             "mobile": mobile, "otp": otp, "purpose": "redeem_points", "verified": False,
@@ -713,12 +725,41 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
                            payload=payload, response=resp, api_key_label=cred.get("label"))
             return resp
         if session.get("expires_at", "") < _now_iso():
-            resp = _err(400, "Invalid OTP.")
+            resp = _err(400, "OTP expired. Please request a new one.")
             await _log_api(endpoint=endpoint, method="POST", status=400,
                            ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
                            bill_number=bill_number, error="OTP expired",
                            payload=payload, response=resp, api_key_label=cred.get("label"))
             return resp
+
+        # SECURITY: parameter-tampering defense — points must equal the value the OTP was issued for
+        snapshot = session.get("payload_snapshot") or {}
+        original_points = _parse_int(snapshot.get("points"))
+        if original_points and original_points != points_requested:
+            resp = _err(400,
+                         f"Redemption amount mismatch — OTP was issued for {original_points} "
+                         f"points but the request is for {points_requested} points. "
+                         f"Please re-initiate the redemption with the correct amount.")
+            await _log_api(endpoint=endpoint, method="POST", status=400,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number,
+                           error=f"points tamper: otp={original_points} req={points_requested}",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
+
+        # Bill-number tampering defense (when both sides have a bill)
+        orig_bill = ((snapshot.get("transaction") or {}).get("number")
+                       or (snapshot.get("transaction") or {}).get("id") or "").strip()
+        if orig_bill and bill_number and orig_bill != bill_number:
+            resp = _err(400,
+                         "Bill number mismatch — OTP was issued for a different transaction.")
+            await _log_api(endpoint=endpoint, method="POST", status=400,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number,
+                           error=f"bill tamper: otp={orig_bill} req={bill_number}",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
+
         await pos_otp_col.update_one({"otp_id": session["otp_id"]}, {"$set": {"verified": True, "verified_at": _now_iso()}})
 
     if int(cust.get("points_balance") or 0) < points_requested:
@@ -729,8 +770,6 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
-    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
-    burn_ratio = cfg.get("burn_ratio", 0.25)
     points_value = round(points_requested * burn_ratio, 2)
     await customers_col.update_one(
         {"id": cust["id"]},
@@ -744,7 +783,7 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         "points": -points_requested,
         "reference_type": "transaction",
         "reference_id": bill_number,
-        "note": "POS OTP redemption" if otp else "POS non-OTP redemption",
+        "note": "POS OTP redemption",
         "created_at": _now_iso(),
     })
     resp = _ok({
@@ -1385,36 +1424,37 @@ async def bootstrap_pos_defaults():
         })
         logger.info(f"Bootstrapped default POS credentials (api_key starts with {api_key[:8]}...)")
 
-    # 2. Test customer 966681235
-    test_mobile = "966681235"
-    existing = await customers_col.find_one({"mobile": test_mobile}, {"_id": 0})
-    if not existing:
-        now = _now_iso()
-        await customers_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "mobile": test_mobile,
-            "name": "KAZO Test Customer",
-            "email": "testpos@kazo.com",
-            "city": "Mumbai",
-            "state": "Maharashtra",
-            "tier": "gold",
-            "points_balance": 5000,
-            "lifetime_points_earned": 5000,
-            "lifetime_points_redeemed": 0,
-            "lifetime_spend": 50000,
-            "visit_count": 12,
-            "first_purchase_at": now,
-            "last_visit_at": now,
-            "source": "pos_test_seed",
-            "created_at": now,
-        })
-        logger.info(f"Bootstrapped POS test customer {test_mobile} with 5000 points")
-    elif (existing.get("points_balance") or 0) < 1000:
-        # Top up if previously seeded customer drifted
-        await customers_col.update_one(
-            {"mobile": test_mobile},
-            {"$set": {"points_balance": 5000, "tier": "gold"}, "$inc": {"lifetime_points_earned": 5000}},
-        )
+    # 2. Test customer 9266681235 (KAZO designated test number — 10-digit Indian)
+    test_mobiles = ["9266681235", "966681235"]  # both seeded; primary is the 10-digit
+    for test_mobile in test_mobiles:
+        existing = await customers_col.find_one({"mobile": test_mobile}, {"_id": 0})
+        if not existing:
+            now = _now_iso()
+            await customers_col.insert_one({
+                "id": uuid.uuid4().hex,
+                "mobile": test_mobile,
+                "name": "KAZO Test Customer",
+                "email": "testpos@kazo.com",
+                "city": "Mumbai",
+                "state": "Maharashtra",
+                "tier": "gold",
+                "points_balance": 5000,
+                "lifetime_points_earned": 5000,
+                "lifetime_points_redeemed": 0,
+                "lifetime_spend": 50000,
+                "visit_count": 12,
+                "first_purchase_at": now,
+                "last_visit_at": now,
+                "source": "pos_test_seed",
+                "created_at": now,
+            })
+            logger.info(f"Bootstrapped POS test customer {test_mobile} with 5000 points")
+        elif (existing.get("points_balance") or 0) < 1000:
+            # Top up if previously seeded customer drifted
+            await customers_col.update_one(
+                {"mobile": test_mobile},
+                {"$set": {"points_balance": 5000, "tier": "gold"}, "$inc": {"lifetime_points_earned": 5000}},
+            )
 
     # 3. Test coupons for the test customer (system-wide coupons; will surface in posCustomerCheck)
     test_coupons = [

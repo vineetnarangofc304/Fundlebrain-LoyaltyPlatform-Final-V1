@@ -31,6 +31,27 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.3 (May 2026) — 🔒 CRITICAL POS Redemption Security Fix
+
+**Vulnerability reported by KAZO POS team (Hardik)**: Two-stage tampering on `/api/pos/posRedeemPointOtpCheck`:
+1. **OTP bypass** — sending `"otp": ""` (empty string) made my code's `if otp:` check skip OTP verification entirely → unauthenticated deduction worked
+2. **Parameter tampering** — request OTP for 10 points, then verify with `"points": "100"` → system accepted and debited 100 instead of 10
+
+Both issues meant a malicious actor could empty any customer's wallet by manipulating the JSON body between OTP request and verify.
+
+**Fix** in `routes/pos_ewards_routes.py::pos_redeem_point_otp_check`:
+- **OTP is now mandatory** when `require_otp_for_redeem=True` (default). Empty/missing OTP → `400 "OTP is required to verify this redemption"`
+- **Points-tamper defense**: when verifying, the `points` value in the request MUST equal the `points` stored in the original OTP session's `payload_snapshot`. Mismatch → `400 "Redemption amount mismatch — OTP was issued for X points but the request is for Y points"`
+- **Bill-tamper defense**: same comparison for `transaction.number/id` between the OTP-request payload and the verify payload → `400 "Bill number mismatch"` on mismatch
+- Removed misleading "POS non-OTP redemption" ledger label that masked the bypass — all OTP-path redemptions now log as "POS OTP redemption"
+
+**Verification** (preview, curl):
+- Reset test customer 9266681235 to 5000 points
+- Empty-OTP attack → 400 ✅
+- Issue OTP for 10 → tamper to 100 in verify → 400 ✅
+- Same OTP + wrong bill → 400 ✅
+- Happy path (correct OTP + 10 + correct bill) → 200 OK, balance went 5000 → 4990 (exactly 10 deducted) ✅
+
 ### Iteration 11.2 (May 2026) — ✅ Anonymous Walk-In Bills + Bulletproof Ingest
 
 **Issue from production**: 33MB billing CSV was being marked "Failed" at 199,897 / 199,999 rows. Two root causes:

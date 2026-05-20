@@ -9,7 +9,7 @@
     { "key": "api_key", "value": "REPLACE_WITH_X_API_KEY", "description": "From Admin -> POS Credentials" },
     { "key": "merchant_id", "value": "KAZO_FUNDLE" },
     { "key": "customer_key", "value": "KAZO_MASTER_OUTLET" },
-    { "key": "test_mobile", "value": "966681235", "description": "Pre-seeded test customer with 5000 points, gold tier" },
+    { "key": "test_mobile", "value": "9266681235", "description": "Pre-seeded test customer with 5000 points, gold tier" },
     { "key": "otp_id", "value": "" },
     { "key": "redeem_id", "value": "" }
   ],
