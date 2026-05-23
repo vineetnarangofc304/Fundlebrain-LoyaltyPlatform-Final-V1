@@ -31,6 +31,58 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.8 (May 2026) — ✅ Campaign Manager · Segment Builder v2
+
+User asked: *"need to build a detailed exhaustive All Filter campaign manager that allows to dice slice data on every single parameter possible and create cohorts and segments also need to have AND and OR both option."*
+
+**Backend** — new `/api/segments/*` module (`routes/segments_routes.py`, ~700 lines):
+
+Endpoints
+- `GET  /segments/filter-schema` — full filter taxonomy
+- `POST /segments/facets`        — type-ahead distinct values (city, store, sku, category, etc.)
+- `POST /segments/preview`       — live count + reach breakdown + 5 sample customers
+- `POST /segments/`              — save named segment (cached counts)
+- `GET  /segments/`              — list all
+- `GET  /segments/{id}`          — fetch one
+- `PUT  /segments/{id}`          — update (creator + brand_admin/super_admin only)
+- `DELETE /segments/{id}`        — delete (creator + brand_admin/super_admin only)
+- `POST /segments/{id}/refresh`  — recompute cached counts
+
+**Filter taxonomy (KAZO-adapted, 7 categories × 46 fields)**:
+- **📍 Geography (6)**: customer city / state / country_code, home store (R2) by id / region / city
+- **👤 Identity (8)**: gender, age band, tier, language, source, card validity, birthday + anniversary window
+- **📞 Channel & Consent (5)**: has mobile, has email, WA / SMS / Email opt-in
+- **💰 Purchase (10)**: lifecycle (R3 buckets), visit_count, lifetime_spend, AOV, recency band, days since last visit, categories purchased, SKUs purchased, distinct SKU count, visited stores
+- **🗓 Time-Window (5)**: first_purchase_at, last_visit_at, txn_count_in_window, day-of-week pattern, time-of-day pattern
+- **🎁 Loyalty (6)**: points_balance, lifetime_earned, lifetime_redeemed, burn ratio, has unredeemed coupon, redeemed in last N days
+- **🤝 Engagement (6)**: churn_risk, nps_band, nps_score, open_tickets, last_campaign_engagement, campaign_cooldown_days
+
+**Operators**: `in / not_in / eq / neq / gte / lte / between` — schema-driven per field
+
+**Filter tree** — max 2 levels of AND/OR nesting; transaction-derived fields (categories, SKUs, day pattern, time-of-day, NPS, support tickets, campaign engagement, cooldown) resolved to mobile-list then `$in`-joined into the customer filter
+
+**Frontend** (`pages/admin/SegmentBuilderPage.jsx` + `_segment_group.jsx` + `_segment_inputs.jsx`):
+- 3-column layout: filter editor (2/3) + sticky live preview (1/3)
+- AND/OR pill toggle per group · nested group button (depth-limited to 2)
+- Per-field input control auto-renders by type: chips for `multi`, type-ahead with `multi_async`, date pickers, number with min/max for `between`, Yes/No for `boolean`
+- 500ms debounced live preview with KPIs (Matched / WhatsApp / SMS / Email), opted-out warning, 5 sample customers
+- Save dialog with name + description; saved segments list with Load / Delete actions
+- Note: used `React.createElement` for the recursive `FilterGroup` to bypass the visual-edits babel-plugin's infinite-loop on self-referencing JSX components
+
+**Sidebar nav** — new "Segment Builder" entry at top of MARKETING section. Mobile drawer (iter 11.7) still works.
+
+**Verified on preview**:
+- Schema returns 7 categories × 46 fields ✅
+- Facets endpoint returns typeahead suggestions for stores / customers.city / transactions.items.category ✅
+- Preview with AND-of-tier + nested OR-of-spend-or-recency returns the right matched + reach counts ✅
+- Screenshot: filter editor renders chips, nested OR group, live KPI cards (41 matched · 41 WA · 41 SMS · 10 Email), 5 real-customer sample list (Karan Singh, Sabah Akhtar, Santana) ✅
+- Python + JS lint clean
+
+**User next steps**:
+- Redeploy production → log in → Marketing › Segment Builder
+- Build a segment, save it (e.g. "Lucknow Gold · 90d-active")
+- Integration with `CampaignManager` (pick saved segment in send flow) — pending small UI hook-up: ~15 min if you want it next.
+
 ### Iteration 11.7 (May 2026) — ✅ Mobile Sidebar + Batch B + Reconciliation Engine
 
 **1) Collapsible sidebar on mobile** (`AdminLayout.jsx`):
