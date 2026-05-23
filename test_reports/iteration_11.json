@@ -1,0 +1,39 @@
+{
+  "summary": "P1+P2 features tested end-to-end: auto-campaigns (rules, preview, run, log), campaign launch (simulated + karix modes), items/points_ledger schemas, points_ledger CSV ingest, and AI narrative generation. All 11 backend tests pass. Frontend admin/auto-campaigns and admin/historic-data pages render all 6 rule cards / 5 dataset tiles with correct testids. Campaign Manager modal renders Karix section + send-limit-input correctly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CampaignManager.NewModal", "issue": "data-testid 'campaign-template-select' is only rendered when active templates exist for the currently selected channels. With a fresh tenant or when default channel is 'whatsapp' (no SMS/RCS templates), the dropdown is replaced by a hint paragraph and the testid is absent. Recommend keeping a stable testid wrapper even when showing the empty hint, to make automation predictable.", "selector": "[data-testid='campaign-template-select']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Campaign New Modal", "issues": ["Default selected channel is 'whatsapp' which immediately shows 'no active templates' hint; consider defaulting to a channel that has active templates, or auto-selecting the channel that has the most templates."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration11_p1p2_test.py",
+    "/app/test_reports/pytest/iteration11_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Wrap CampaignManager template dropdown / no-template-hint with a single stable data-testid='campaign-template-select' for predictable test selectors.",
+    "(Optional) Auto-select a channel with active templates when opening the New Campaign modal."
+  ],
+  "critical_code_review_comments": [
+    "historic_routes.py is 1450+ lines — exceeds 700-line guideline, recommend splitting (mappers, scheduler, narrative wiring, purge, backfill).",
+    "auto_campaigns_routes.py inlines communication imports inside _run_rule to avoid circular imports — fine for now, but worth extracting a thin send-helper module.",
+    "ingest_narrative._snapshot uses count_documents on transactions/customers which can be slow at >1M docs; cache snapshot for narrative under TTL if dataset grows.",
+    "campaigns_routes.launch_campaign returns 'Linked template not found' as 400 (per spec), but campaign remains in 'draft' — consider marking campaign as 'failed_launch' so the UI can surface the error without re-querying.",
+    "_map_points_ledger_row returns (None, error) for type validation but doesn't check that 'reason' length is bounded — could allow injection of long-form text; trim to 500 chars."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "~95% (all tiles, cards, buttons render; one minor testid placement nit)"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026",
+  "seed_data_creation": "Created 3 TEST_ prefixed communication templates, 2 TEST_ prefixed campaigns (simulated + karix), 1 points_ledger ingest job with 3 rows (mobiles 9876501234, 9876501235). Auto-campaign config for birthday_today now enabled with daily_cap=50 and linked to TEST_auto_tpl_*.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "P1/P2 features fully working. backend_test file is /app/backend/tests/iteration11_p1p2_test.py — covers auto-campaigns CRUD/preview/run-all, campaign launch (sim + karix), schemas, points_ledger ingest + narrative. Campaign creation requires both 'channels' (array) AND 'channel' fields. Narrative may use template_fallback or fundle_brain_gpt5 — both are valid per spec.",
+  "rca of the issue": "No bugs found. Two initial test failures were test-side mismatches (Campaign model requires 'channels' list; LLM call takes 30+ seconds so polling timeout was bumped to 120s). Both fixed in test file."
+}

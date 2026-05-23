@@ -86,9 +86,20 @@ def start_scheduler():
                    coalesce=True,
                    misfire_grace_time=30)
 
+    # Auto-Campaigns daily worker — fires birthday / win-back / abandoned-visit
+    # rules every day at 10:00 IST (after KAZO opens).
+    from routes.auto_campaigns_routes import run_all_auto_campaigns
+    sched.add_job(run_all_auto_campaigns,
+                   CronTrigger(hour=10, minute=0, timezone="Asia/Kolkata"),
+                   id="auto_campaigns_daily",
+                   replace_existing=True,
+                   max_instances=1,
+                   coalesce=True,
+                   misfire_grace_time=3600)
+
     sched.start()
     _scheduler = sched
-    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s")
+    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST")
     return sched
 
 

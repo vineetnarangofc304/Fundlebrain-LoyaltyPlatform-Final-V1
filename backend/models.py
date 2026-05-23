@@ -238,12 +238,14 @@ class CampaignBase(BaseModel):
     name: str
     description: Optional[str] = None
     channels: List[str]  # whatsapp, sms, email, push
-    audience_type: str  # all | tier | city | cohort | custom
+    audience_type: str  # all | tier | city | cohort | custom | segment
     audience_filter: Dict[str, Any] = {}
-    message_template: str
+    message_template: str = ""  # free-text fallback / preview (only used when no template_id)
+    template_id: Optional[str] = None  # link to a comms Template for real Karix sends
     coupon_code: Optional[str] = None
     schedule_at: Optional[datetime] = None
     status: str = "draft"  # draft | scheduled | running | completed | cancelled
+    send_limit: int = 50000  # safety cap per launch
 
 
 class CampaignCreate(CampaignBase):
@@ -262,6 +264,8 @@ class Campaign(CampaignBase):
     created_at: datetime = Field(default_factory=utcnow)
     created_by: Optional[str] = None
     launched_at: Optional[datetime] = None
+    bulk_job_id: Optional[str] = None  # links to bulk_send_jobs when real send used
+    send_mode: Optional[str] = None    # "karix" | "simulated"
 
 
 # ---------- Points ledger ----------

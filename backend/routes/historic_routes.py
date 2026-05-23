@@ -29,7 +29,7 @@ from database import (
     points_ledger_col, api_logs_col, nps_col, tickets_col, ai_chats_col,
     campaign_metrics_col, message_log_col, audit_logs_col, coupon_redemptions_col,
 )
-from auth import get_current_user, require_roles
+from auth import get_current_user, require_roles, MANAGEMENT_ROLES
 
 router = APIRouter(prefix="/historic-data", tags=["historic-data"])
 logger = logging.getLogger("kazo-fundle.historic")
@@ -42,7 +42,7 @@ historic_chunks_col = db["historic_chunks"]  # shared chunk store (works across 
 CHUNK_SIZE = 500
 MAX_FILE_BYTES = 250 * 1024 * 1024  # 250 MB (chunked uploads bypass proxy limits)
 MAX_ERROR_SAMPLES = 25
-ALLOWED_DATASETS = {"customers", "transactions", "stores", "items"}
+ALLOWED_DATASETS = {"customers", "transactions", "stores", "items", "points_ledger"}
 DUPLICATE_MODES = {"upsert", "skip", "fail"}
 
 
@@ -254,17 +254,105 @@ def _make_store_code(name: str) -> str:
 
 
 def _map_item_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    sku = (r.get("SKU") or r.get("sku") or r.get("Item Code") or "").strip()
+    # Accept common KAZO column variants for SKU
+    sku = (
+        r.get("SKU") or r.get("sku") or r.get("Sku")
+        or r.get("Item Code") or r.get("ITEM CODE") or r.get("Article")
+        or r.get("Style Code") or r.get("StyleCode")
+        or ""
+    ).strip()
     if not sku:
-        return None, "Missing SKU"
-    return ({
+        return None, "Missing SKU / Item Code / Style Code"
+
+    name = (
+        r.get("Name") or r.get("Item Name") or r.get("Product Name")
+        or r.get("Style Name") or r.get("Description") or ""
+    ).strip() or None
+
+    category = (
+        r.get("Category") or r.get("Item Category") or r.get("Product Category")
+        or r.get("Class") or ""
+    ).strip() or None
+
+    sub_category = (r.get("Sub Category") or r.get("Sub-Category") or "").strip() or None
+
+    price = parse_float(
+        r.get("MRP") or r.get("mrp") or r.get("MRP Price") or r.get("List Price")
+        or r.get("Price") or r.get("Selling Price")
+    )
+
+    color = (r.get("Color") or r.get("Colour") or "").strip() or None
+    size = (r.get("Size") or "").strip() or None
+    brand = (r.get("Brand") or "").strip() or None
+    season = (r.get("Season") or "").strip() or None
+    hsn = (r.get("HSN") or r.get("HSN Code") or r.get("hsn") or "").strip() or None
+    tax_pct = parse_float(r.get("Tax %") or r.get("Tax Rate") or r.get("GST"))
+
+    doc = {
         "sku": sku,
-        "name": (r.get("Name") or r.get("Item Name") or "").strip() or None,
-        "category": (r.get("Category") or "").strip() or None,
-        "price": parse_float(r.get("Price") or r.get("MRP")),
+        "name": name,
+        "category": category,
+        "sub_category": sub_category,
+        "price": price,
+        "color": color,
+        "size": size,
+        "brand": brand,
+        "season": season,
+        "hsn": hsn,
+        "tax_pct": tax_pct,
         "is_active": True,
         "source": "historic_upload",
-    }, None)
+    }
+    # Strip None to keep the document tidy
+    doc = {k: v for k, v in doc.items() if v is not None}
+    return doc, None
+
+
+def _map_points_ledger_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Direct points-ledger ingest — for brands that already track their own
+    earn/redeem/bonus ledger and want to migrate it verbatim into Fundle."""
+    mobile = (r.get("Mobile") or r.get("Customer Mobile") or r.get("Customer Mobile Number") or "").strip()
+    if not mobile:
+        return None, "Missing Mobile"
+    # Normalize 10-digit
+    mobile = mobile.replace(" ", "").replace("-", "").replace("+", "")
+    if mobile.startswith("91") and len(mobile) == 12:
+        mobile = mobile[2:]
+    if len(mobile) != 10:
+        return None, f"Invalid mobile length: {mobile}"
+
+    points = parse_float(r.get("Points") or r.get("Point") or r.get("Quantity"))
+    if points is None or points == 0:
+        return None, "Missing/zero Points"
+    type_raw = (r.get("Type") or r.get("Direction") or "").strip().lower()
+    if not type_raw:
+        type_raw = "earn" if points > 0 else "redeem"
+    if type_raw not in {"earn", "redeem", "bonus", "adjust", "expire"}:
+        return None, f"Unknown type: {type_raw}"
+
+    # ledger stored with signed points (earn/bonus positive, redeem/expire negative)
+    signed_points = abs(points)
+    if type_raw in {"redeem", "expire"}:
+        signed_points = -signed_points
+
+    bill_no = (r.get("Bill Number") or r.get("Bill") or r.get("Reference") or "").strip() or None
+    bill_date = parse_date(r.get("Date") or r.get("Bill Date") or r.get("Transaction Date"))
+    reason = (r.get("Reason") or r.get("Description") or r.get("Note") or "").strip() or None
+    source_bill_id = (r.get("Source Bill Id") or r.get("SourceBillId") or bill_no or "").strip() or None
+
+    doc = {
+        "customer_mobile": mobile,
+        "type": type_raw,
+        "points": signed_points,
+        "bill_number": bill_no,
+        "bill_date": bill_date.isoformat() if bill_date else None,
+        "reason": reason or f"{type_raw} (historic ingest)",
+        "source_bill_id": source_bill_id,
+        "source": "historic_upload",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    doc = {k: v for k, v in doc.items() if v is not None}
+    return doc, None
 
 
 MAPPERS = {
@@ -272,6 +360,7 @@ MAPPERS = {
     "transactions": _map_transaction_row,  # special: store_cache passed
     "stores": _map_store_row,
     "items": _map_item_row,
+    "points_ledger": _map_points_ledger_row,
 }
 
 
@@ -356,6 +445,28 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                       }},
                                       upsert=True) for d in buffer_insert]
                     res = await items_col.bulk_write(ops, ordered=False)
+                    inserted += res.upserted_count
+                    updated += res.modified_count
+                    buffer_insert.clear()
+            elif dataset == "points_ledger":
+                if buffer_insert:
+                    from pymongo import UpdateOne
+                    ops = []
+                    for d in buffer_insert:
+                        # Composite key — same mobile + bill + type combo upserts (not duplicates)
+                        sbi = d.get("source_bill_id") or d.get("bill_number")
+                        if sbi:
+                            key = {"customer_mobile": d["customer_mobile"],
+                                    "source_bill_id": sbi, "type": d["type"]}
+                        else:
+                            # No bill reference — use bill_date + type to dedupe loosely
+                            key = {"customer_mobile": d["customer_mobile"],
+                                    "bill_date": d.get("bill_date"), "type": d["type"],
+                                    "points": d["points"]}
+                        ops.append(UpdateOne(key,
+                            {"$set": d, "$setOnInsert": {"id": uuid.uuid4().hex}},
+                            upsert=True))
+                    res = await points_ledger_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
                     updated += res.modified_count
                     buffer_insert.clear()
@@ -508,6 +619,17 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         }
         await historic_jobs_col.update_one({"id": job_id}, {"$set": final})
         logger.info(f"Historic ingest job {job_id} done: {final}")
+
+        # =====================================================
+        # POST-INGEST AI NARRATIVE — best-effort, never breaks the job
+        # =====================================================
+        if not dry_run:
+            try:
+                from routes.ingest_narrative import build_and_store_narrative
+                await build_and_store_narrative(job_id)
+                logger.info(f"AI narrative generated for job {job_id}")
+            except Exception as nx:
+                logger.warning(f"AI narrative generation failed for job {job_id}: {nx}")
     except Exception as e:
         logger.exception(f"Historic ingest job {job_id} crashed")
         # ALWAYS persist the partial counts so the UI shows what was achieved
@@ -532,6 +654,11 @@ def _get_pk(dataset: str, doc: Dict[str, Any]) -> Tuple[Optional[str], Any]:
         return "code", doc.get("code")
     if dataset == "items":
         return "sku", doc.get("sku")
+    if dataset == "points_ledger":
+        # Composite key — same mobile + bill + type combo should upsert (not duplicate)
+        mobile = doc.get("customer_mobile", "")
+        bill = doc.get("source_bill_id") or doc.get("bill_number") or ""
+        return "source_bill_id", f"{mobile}::{bill}::{doc.get('type', '')}"
     return None, None
 
 
@@ -757,10 +884,46 @@ async def get_schema(dataset: str, user: dict = Depends(get_current_user)):
             "primary_key": "SKU",
             "duplicate_strategy": "Upsert by SKU",
             "required_columns": ["SKU"],
-            "recognised_columns": ["SKU", "Name", "Category", "Price", "MRP"],
+            "recognised_columns": [
+                "SKU", "Item Code", "Style Code", "Article",
+                "Name", "Item Name", "Product Name", "Style Name", "Description",
+                "Category", "Sub Category", "Class",
+                "MRP", "Price", "Selling Price",
+                "Color", "Size", "Brand", "Season", "HSN", "Tax %",
+            ],
             "sample_row": {"SKU": "KZ-TOP-001", "Name": "Crepe Top",
-                            "Category": "TOPS", "Price": "1990"},
-            "notes": [],
+                            "Category": "TOPS", "Sub Category": "BLOUSE",
+                            "MRP": "1990", "Color": "Black", "Size": "M",
+                            "Brand": "KAZO", "HSN": "6109"},
+            "notes": [
+                "SKU accepts multiple aliases: SKU / Item Code / Style Code / Article.",
+                "MRP / Selling Price are interchangeable.",
+                "All optional fields (color, size, brand, season, HSN, tax %) are persisted when present.",
+            ],
+        },
+        "points_ledger": {
+            "primary_key": "Mobile + Source Bill Id + Type",
+            "duplicate_strategy": "Upsert by composite key (idempotent re-runs)",
+            "required_columns": ["Mobile", "Points"],
+            "recognised_columns": [
+                "Mobile", "Customer Mobile", "Customer Mobile Number",
+                "Points", "Point", "Type", "Direction",
+                "Date", "Bill Date", "Transaction Date",
+                "Bill Number", "Bill", "Reference",
+                "Reason", "Description", "Note",
+                "Source Bill Id",
+            ],
+            "sample_row": {
+                "Mobile": "9876543210", "Type": "earn", "Points": "500",
+                "Date": "01-04-2026", "Bill Number": "BILL12345",
+                "Reason": "Bill earn", "Source Bill Id": "BILL12345",
+            },
+            "notes": [
+                "Type is one of: earn / redeem / bonus / adjust / expire (defaults to 'earn' if positive, 'redeem' if negative).",
+                "Points are stored signed (redeem/expire negative, earn/bonus positive) regardless of the sign in the CSV.",
+                "Mobile is normalised to 10 digits (91 prefix stripped).",
+                "Source Bill Id makes ingest idempotent — re-running the same CSV won't double-write entries.",
+            ],
         },
     }
     return schemas[dataset]
@@ -1123,6 +1286,24 @@ async def get_job(job_id: str, user: dict = Depends(get_current_user)):
     if not j:
         raise HTTPException(404, "Job not found")
     return j
+
+
+@router.post("/jobs/{job_id}/narrative")
+async def regenerate_narrative(job_id: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    """Generate (or regenerate) the AI narrative for a completed ingest job."""
+    from routes.ingest_narrative import build_and_store_narrative
+    res = await build_and_store_narrative(job_id)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@router.get("/jobs/{job_id}/narrative")
+async def get_narrative(job_id: str, user: dict = Depends(get_current_user)):
+    j = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0, "ai_narrative": 1})
+    if not j:
+        raise HTTPException(404, "Job not found")
+    return j.get("ai_narrative") or {"narrative": "", "source": "not_generated"}
 
 
 # ---------------- Purge demo data ----------------

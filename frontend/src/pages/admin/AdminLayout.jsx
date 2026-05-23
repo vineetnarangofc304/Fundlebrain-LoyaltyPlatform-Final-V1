@@ -4,7 +4,7 @@ import {
   LayoutDashboard, TrendingUp, UserRound, Award, BarChart3, Store as StoreIcon, MessageCircle,
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
   Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound,
-  Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter
+  Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter, Cake
 } from "lucide-react";
 import { useState, useEffect } from "react";
 
@@ -38,6 +38,7 @@ const SECTIONS = [
     items: [
       { to: "/admin/segments", icon: Filter, label: "Segment Builder", testid: "nav-segments" },
       { to: "/admin/campaigns", icon: Send, label: "Campaigns", testid: "nav-campaigns" },
+      { to: "/admin/auto-campaigns", icon: Cake, label: "Auto Campaigns", testid: "nav-auto-campaigns" },
       { to: "/admin/coupons", icon: Ticket, label: "Coupons", testid: "nav-coupons" },
     ],
   },

@@ -6,14 +6,15 @@ import { PageHeader, SectionHeading } from "./_shared";
 import { fmtDateTime } from "@/lib/format";
 import {
   Upload, FileText, RefreshCw, Database, AlertTriangle,
-  CheckCircle2, AlertCircle, Loader2, Clock, Trash2,
+  CheckCircle2, AlertCircle, Loader2, Clock, Trash2, Sparkles,
 } from "lucide-react";
 
 const DATASETS = [
   { key: "customers", label: "Customers", desc: "CRM master — mobile, points, lifetime billing.", accent: "#571326" },
   { key: "transactions", label: "Transactions", desc: "Bill-level history with outlet + tax + revenue.", accent: "#1E3A8A" },
   { key: "stores", label: "Stores", desc: "Outlet master (auto-created from transaction uploads).", accent: "#0E7C7B" },
-  { key: "items", label: "Items / SKUs", desc: "Optional SKU master if you have it.", accent: "#B45309" },
+  { key: "items", label: "Items / SKUs", desc: "SKU master · MRP, color, size, category, HSN.", accent: "#B45309" },
+  { key: "points_ledger", label: "Points Ledger", desc: "Raw earn / redeem / bonus history (idempotent).", accent: "#7C3AED" },
 ];
 
 const STATUS_STYLES = {
@@ -337,8 +338,14 @@ export default function HistoricDataPage() {
                 {jobs.map((j) => {
                   const st = STATUS_STYLES[j.status] || STATUS_STYLES.queued;
                   const Icon = st.icon;
+                  const isActive = activeJobId === j.id;
                   return (
-                    <tr key={j.id} data-testid={`hist-job-${j.id}`}>
+                    <tr
+                      key={j.id}
+                      data-testid={`hist-job-${j.id}`}
+                      onClick={() => setActiveJobId(j.id)}
+                      className={`cursor-pointer ${isActive ? "bg-amber-50/60" : "hover:bg-neutral-50"}`}
+                    >
                       <td className="text-xs uppercase tracking-widest font-medium">{j.dataset}</td>
                       <td className="text-xs font-mono">{j.filename}</td>
                       <td>
@@ -371,6 +378,8 @@ export default function HistoricDataPage() {
               </ul>
             </div>
           )}
+
+          <AINarrative jobs={jobs} activeJobId={activeJobId} onRefresh={loadJobs} />
         </div>
 
         <div className="text-xs text-neutral-500 leading-relaxed">
@@ -443,3 +452,63 @@ function PurgeModal({ onClose, onDone }) {
     </div>
   );
 }
+
+
+function AINarrative({ jobs, activeJobId, onRefresh }) {
+  const [generating, setGenerating] = useState(false);
+  const job = jobs.find((j) => j.id === activeJobId);
+  if (!job || !["completed", "previewed"].includes(job.status)) return null;
+  const narrative = job.ai_narrative;
+
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      await api.post(`/historic-data/jobs/${job.id}/narrative`);
+      toast.success("AI narrative generated");
+      onRefresh && onRefresh();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Generation failed");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 p-4 border border-indigo-200 bg-gradient-to-br from-indigo-50/50 to-amber-50/30 rounded" data-testid="ai-narrative-card">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[10px] uppercase tracking-widest text-indigo-700 flex items-center gap-1 font-medium">
+          <Sparkles className="w-3 h-3" /> Fundle Brain · Post-Ingest Report
+          {narrative?.source && (
+            <span className="text-neutral-500 normal-case tracking-normal ml-2">
+              {narrative.source === "fundle_brain_gpt5" ? "GPT-5" : narrative.source === "template_fallback" ? "Template" : narrative.source}
+              {narrative.generated_at && ` · ${fmtDateTime(narrative.generated_at)}`}
+            </span>
+          )}
+        </div>
+        <button
+          onClick={generate}
+          disabled={generating}
+          className="text-[10px] flex items-center gap-1 px-2 py-1 border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-50 disabled:opacity-50"
+          data-testid="ai-narrative-regen"
+        >
+          {generating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+          {narrative ? "Regenerate" : "Generate now"}
+        </button>
+      </div>
+      {narrative?.narrative ? (
+        <div className="text-sm text-neutral-800 leading-relaxed whitespace-pre-wrap">{narrative.narrative}</div>
+      ) : (
+        <div className="text-xs text-neutral-500 italic">Narrative not generated yet — click "Generate now" to ask Fundle Brain to summarise this ingest.</div>
+      )}
+      {narrative?.snapshot && (
+        <div className="mt-3 pt-3 border-t border-indigo-100 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Loyalty Customers</div><div className="font-mono">{narrative.snapshot.customers_loyalty?.toLocaleString()}</div></div>
+          <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Loyalty Bills</div><div className="font-mono">{narrative.snapshot.transactions_loyalty?.toLocaleString()}</div></div>
+          <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Net Sales</div><div className="font-mono">₹{narrative.snapshot.loyalty_net_sales?.toLocaleString()}</div></div>
+          <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Points Outstanding</div><div className="font-mono">{narrative.snapshot.points_outstanding?.toLocaleString()}</div></div>
+        </div>
+      )}
+    </div>
+  );
+}
+

@@ -1,12 +1,13 @@
 """Campaign manager."""
+import asyncio
+import random
+import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from database import campaigns_col, customers_col
 from auth import get_current_user, require_roles, log_audit, MANAGEMENT_ROLES
 from models import CampaignCreate, Campaign
-import uuid
-import random
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
@@ -99,14 +100,81 @@ async def _audience_filter_async(c: dict) -> dict:
 
 @router.post("/{campaign_id}/launch")
 async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    """Launch a campaign.
+
+    - If the campaign has a `template_id` linking to an active comms template,
+      we enqueue a REAL Karix bulk-send job (SMS / WhatsApp / RCS) and link
+      the resulting `bulk_job_id` back onto the campaign.
+    - If no template_id is set, we fall back to the legacy SIMULATED metrics
+      mode so demo/preview campaigns still work.
+    """
     c = await campaigns_col.find_one({"id": campaign_id}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Campaign not found")
     if c["status"] not in ("draft", "scheduled"):
         raise HTTPException(400, f"Campaign already {c['status']}")
+
     fil = await _audience_filter_async(c)
     audience_size = await customers_col.count_documents(fil)
-    # Simulate sending metrics (in real system this connects to WhatsApp/SMS gateway)
+
+    template_id = c.get("template_id")
+    if template_id:
+        # ---------- REAL Karix bulk send path ----------
+        from database import db as _db
+        templates_col = _db["communication_templates"]
+        bulk_jobs_col = _db["bulk_send_jobs"]
+        from routes.communications_routes import _run_bulk_send_job
+
+        t = await templates_col.find_one({"id": template_id}, {"_id": 0})
+        if not t:
+            raise HTTPException(400, "Linked template not found — clear template_id or pick another template")
+        if t.get("status") != "active":
+            raise HTTPException(400, "Template must be active to launch a real send")
+        if t["channel"] in {"whatsapp", "rcs"}:
+            if not t.get("waba_template_id"):
+                raise HTTPException(400, "WhatsApp/RCS template requires waba_template_id")
+            if t.get("waba_approval_status") != "approved":
+                raise HTTPException(400, "WhatsApp/RCS template must be approved before launch")
+
+        limit = int(c.get("send_limit") or 50000)
+        job_id = uuid.uuid4().hex
+        job_doc = {
+            "id": job_id,
+            "template_id": template_id,
+            "template_name": t.get("name"),
+            "channel": t["channel"],
+            "audience_filter": fil,
+            "audience_size_total": audience_size,
+            "limit": limit,
+            "status": "queued",
+            "processed": 0, "sent": 0, "failed": 0,
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "queued_by": user["email"],
+            "source": "campaign",
+            "campaign_id": campaign_id,
+        }
+        await bulk_jobs_col.insert_one(job_doc)
+
+        # Fire-and-forget background task
+        asyncio.create_task(_run_bulk_send_job(job_id, template_id, fil, limit))
+
+        await campaigns_col.update_one(
+            {"id": campaign_id},
+            {"$set": {
+                "status": "running",
+                "launched_at": datetime.now(timezone.utc).isoformat(),
+                "bulk_job_id": job_id,
+                "send_mode": "karix",
+                "sent": 0, "delivered": 0, "opened": 0, "clicked": 0,
+                "redeemed": 0, "revenue_generated": 0.0,
+            }},
+        )
+        await log_audit(user, "launch_campaign", "campaign", campaign_id,
+                          {"audience": audience_size, "bulk_job_id": job_id, "mode": "karix"})
+        return {"success": True, "audience": audience_size, "bulk_job_id": job_id,
+                 "mode": "karix", "channel": t["channel"]}
+
+    # ---------- SIMULATED metrics path (fallback) ----------
     sent = audience_size
     delivered = int(sent * 0.94)
     opened = int(delivered * 0.42)
@@ -118,12 +186,14 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
         {"$set": {
             "status": "running",
             "launched_at": datetime.now(timezone.utc).isoformat(),
+            "send_mode": "simulated",
             "sent": sent, "delivered": delivered, "opened": opened, "clicked": clicked,
             "redeemed": redeemed, "revenue_generated": float(revenue),
         }}
     )
-    await log_audit(user, "launch_campaign", "campaign", campaign_id, {"audience": audience_size})
-    return {"success": True, "audience": audience_size, "sent": sent}
+    await log_audit(user, "launch_campaign", "campaign", campaign_id,
+                      {"audience": audience_size, "mode": "simulated"})
+    return {"success": True, "audience": audience_size, "sent": sent, "mode": "simulated"}
 
 
 @router.patch("/{campaign_id}")

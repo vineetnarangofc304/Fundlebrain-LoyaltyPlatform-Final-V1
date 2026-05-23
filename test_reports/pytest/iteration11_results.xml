@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" skipped="0" tests="11" time="20.164" timestamp="2026-05-23T21:02:54.196963+00:00" hostname="agent-env-7ac52215-7f1a-46c4-bd6f-8a7a25b5dccb"><testcase classname="backend.tests.iteration11_p1p2_test" name="test_auto_campaigns_list_rules" time="0.658" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_auto_campaigns_patch_rule_persists" time="0.501" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_auto_campaigns_preview" time="0.429" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_auto_campaigns_dry_run_single" time="0.405" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_auto_campaigns_run_all_dry" time="0.414" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_auto_campaigns_log" time="0.393" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_campaign_launch_simulated_mode" time="0.384"><failure message="AssertionError: {&quot;detail&quot;:[{&quot;type&quot;:&quot;missing&quot;,&quot;loc&quot;:[&quot;body&quot;,&quot;channels&quot;],&quot;msg&quot;:&quot;Field required&quot;,&quot;input&quot;:{&quot;name&quot;:&quot;TEST_sim_9e37d0&quot;,&quot;channel&quot;:&quot;sms&quot;,&quot;audience_type&quot;:&quot;tier&quot;,&quot;audience_filter&quot;:{&quot;tier&quot;:&quot;silver&quot;},&quot;message&quot;:&quot;hi&quot;,&quot;status&quot;:&quot;draft&quot;},&quot;url&quot;:&quot;https://errors.pydantic.dev/2.13/v/missing&quot;}]}&#10;assert 422 in (200, 201)&#10; +  where 422 = &lt;Response [422]&gt;.status_code">backend/tests/iteration11_p1p2_test.py:127: in test_campaign_launch_simulated_mode
+    assert cr.status_code in (200, 201), cr.text
+E   AssertionError: {"detail":[{"type":"missing","loc":["body","channels"],"msg":"Field required","input":{"name":"TEST_sim_9e37d0","channel":"sms","audience_type":"tier","audience_filter":{"tier":"silver"},"message":"hi","status":"draft"},"url":"https://errors.pydantic.dev/2.13/v/missing"}]}
+E   assert 422 in (200, 201)
+E    +  where 422 = &lt;Response [422]&gt;.status_code</failure></testcase><testcase classname="backend.tests.iteration11_p1p2_test" name="test_campaign_launch_karix_mode_with_template" time="0.451"><failure message="AssertionError: {&quot;detail&quot;:[{&quot;type&quot;:&quot;missing&quot;,&quot;loc&quot;:[&quot;body&quot;,&quot;channels&quot;],&quot;msg&quot;:&quot;Field required&quot;,&quot;input&quot;:{&quot;name&quot;:&quot;TEST_kx_d5c597&quot;,&quot;channel&quot;:&quot;sms&quot;,&quot;audience_type&quot;:&quot;tier&quot;,&quot;audience_filter&quot;:{&quot;tier&quot;:&quot;silver&quot;},&quot;message&quot;:&quot;hi&quot;,&quot;status&quot;:&quot;draft&quot;,&quot;template_id&quot;:&quot;d7e98eecaa62449295a678f3f14140a1&quot;,&quot;send_limit&quot;:5},&quot;url&quot;:&quot;https://errors.pydantic.dev/2.13/v/missing&quot;}]}&#10;assert 422 in (200, 201)&#10; +  where 422 = &lt;Response [422]&gt;.status_code">backend/tests/iteration11_p1p2_test.py:155: in test_campaign_launch_karix_mode_with_template
+    assert cr.status_code in (200, 201), cr.text
+E   AssertionError: {"detail":[{"type":"missing","loc":["body","channels"],"msg":"Field required","input":{"name":"TEST_kx_d5c597","channel":"sms","audience_type":"tier","audience_filter":{"tier":"silver"},"message":"hi","status":"draft","template_id":"d7e98eecaa62449295a678f3f14140a1","send_limit":5},"url":"https://errors.pydantic.dev/2.13/v/missing"}]}
+E   assert 422 in (200, 201)
+E    +  where 422 = &lt;Response [422]&gt;.status_code</failure></testcase><testcase classname="backend.tests.iteration11_p1p2_test" name="test_items_schema" time="0.418" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_points_ledger_schema" time="0.384" /><testcase classname="backend.tests.iteration11_p1p2_test" name="test_points_ledger_ingest_and_narrative" time="15.412"><failure message="requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)">/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:534: in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/urllib3/connection.py:571: in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/http/client.py:1415: in getresponse
+    response.begin()
+/usr/local/lib/python3.11/http/client.py:330: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/http/client.py:291: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/socket.py:718: in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/ssl.py:1314: in recv_into
+    return self.read(nbytes, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/ssl.py:1166: in read
+    return self._sslobj.read(len, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TimeoutError: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+/root/.venv/lib/python3.11/site-packages/requests/adapters.py:696: in send
+    resp = conn.urlopen(
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:842: in urlopen
+    retries = retries.increment(
+/root/.venv/lib/python3.11/site-packages/urllib3/util/retry.py:498: in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/urllib3/util/util.py:39: in reraise
+    raise value
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:788: in urlopen
+    response = self._make_request(
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:536: in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:367: in _raise_timeout
+    raise ReadTimeoutError(
+E   urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)
+
+During handling of the above exception, another exception occurred:
+backend/tests/iteration11_p1p2_test.py:221: in test_points_ledger_ingest_and_narrative
+    gr = s.get(f"{API}/historic-data/jobs/{job_id}", timeout=15)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/sessions.py:671: in get
+    return self.request("GET", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/sessions.py:651: in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/sessions.py:784: in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/adapters.py:742: in send
+    raise ReadTimeout(e, request=request)
+E   requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)</failure></testcase></testsuite></testsuites>
