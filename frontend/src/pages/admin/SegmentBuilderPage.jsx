@@ -193,7 +193,7 @@ export default function SegmentBuilderPage() {
         </div>
 
         <div className="space-y-4">
-          <div className="chart-card p-5 sticky top-4" data-accent="burgundy">
+          <div className="chart-card p-5 lg:sticky lg:top-4" data-accent="burgundy">
             <SectionHeading eyebrow="LIVE PREVIEW" title="Audience snapshot" accent="burgundy" />
             <div className="mt-4 grid grid-cols-2 gap-3">
               <KPICard label="Matched" value={fmtNum(preview && preview.matched_total)} accent="burgundy" testid="kpi-matched" />

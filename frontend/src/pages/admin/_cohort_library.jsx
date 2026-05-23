@@ -18,15 +18,11 @@ export default function CohortLibrary({ onLoad }) {
   const loadCatalog = async () => {
     setLoading(true);
     try {
-      // Fast path: no counts. Counts are loaded lazily per category.
+      // Fast path: no counts. Counts are loaded lazily per category on expand.
       const r = await api.get("/segments/cohort-library/");
       setData(r.data);
-      // Open the first 4 categories by default
-      const next = {};
-      r.data.categories.slice(0, 4).forEach((c) => { next[c.name] = true; });
-      setOpenCats(next);
-      // Fire-and-forget count loads for the initially open categories
-      r.data.categories.slice(0, 4).forEach((c) => fetchCountsFor(c));
+      // All categories start COLLAPSED — user picks what to open.
+      setOpenCats({});
     } catch (e) {
       toast.error(e.response?.data?.detail || "Failed to load cohort library");
     } finally {
@@ -83,7 +79,7 @@ export default function CohortLibrary({ onLoad }) {
         <Sparkles className="w-3 h-3 text-amber-500" />
         Live ATV: <strong>₹{data.context.atv}</strong> · {fmtNum(data.context.total_loyalty_customers)} loyalty members · {fmtNum(data.context.total_bills)} bills
       </div>
-      <div className="space-y-2 max-h-[560px] overflow-y-auto pr-1">
+      <div className="space-y-2">
         {data.categories.map((cat) => {
           const open = !!openCats[cat.name];
           const status = catCountStatus[cat.name];
