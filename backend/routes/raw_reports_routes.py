@@ -57,13 +57,33 @@ class ReportFilter(BaseModel):
     page_size: int = 200              # generous default — these are aggregate rows
 
 
+# Helper expression: convert any bill_date (string OR datetime) to a YYYY-MM string.
+# Bills stored from CSV ingest are ISO strings; bills from POS APIs are BSON datetimes.
+_MONTH_KEY_TXN = {
+    "$cond": {
+        "if":   {"$eq": [{"$type": "$bill_date"}, "string"]},
+        "then": {"$substr": ["$bill_date", 0, 7]},
+        "else": {"$dateToString": {"format": "%Y-%m", "date": "$bill_date"}},
+    }
+}
+
+_MONTH_KEY_CUST_FIRST = {
+    "$cond": {
+        "if":   {"$eq": [{"$type": "$first_purchase_at"}, "string"]},
+        "then": {"$substr": ["$first_purchase_at", 0, 7]},
+        "else": {"$dateToString": {"format": "%Y-%m",
+                                       "date": {"$ifNull": ["$first_purchase_at", None]}}},
+    }
+}
+
+
 # Group key column resolution (txn-level)
 GROUP_FIELD_TXN = {
     "location": "$store_name",
     "city":     "$city",
     "state":    {"$ifNull": ["$state", "$zone"]},
     "zone":     "$zone",
-    "month":    {"$dateToString": {"format": "%Y-%m", "date": "$bill_date"}},
+    "month":    _MONTH_KEY_TXN,
     "tier":     None,  # resolved via customer join — special-case
 }
 
@@ -88,7 +108,13 @@ def _parse_iso(d: Optional[str]) -> Optional[datetime]:
 
 
 def _date_match(f: ReportFilter) -> Dict[str, Any]:
-    """Build a {bill_date: {$gte, $lte}} clause from filter dates."""
+    """Build a {bill_date: {$gte, $lte}} clause from filter dates.
+
+    Note: bill_date is stored as ISO string in CSV-ingested data and as BSON
+    datetime in POS-ingested data. MongoDB's $gte / $lte work natively for
+    ISO-8601 strings (lexicographic order matches chronological order) AND
+    for datetimes, so the same clause works for both.
+    """
     s = _parse_iso(f.start_date)
     e = _parse_iso(f.end_date)
     if not s and not e:
@@ -99,7 +125,13 @@ def _date_match(f: ReportFilter) -> Dict[str, Any]:
     if e:
         # Include the entire end day
         clause["$lte"] = e + timedelta(days=1) - timedelta(seconds=1)
-    return {"bill_date": clause}
+    # When bill_date is stored as a string, MongoDB's comparison still works
+    # if both operands are comparable. Cast datetime → string for safety when
+    # bill_date is unmixed type. We use $expr with $convert to be safe.
+    return {"$or": [
+        {"bill_date": clause},
+        {"bill_date": {k: v.isoformat() for k, v in clause.items()}},
+    ]}
 
 
 def _base_match(f: ReportFilter) -> Dict[str, Any]:
@@ -142,43 +174,118 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
         # Group customers by tier — independent of date range
         agg = customers_col.aggregate([
             {"$match": {"mobile": {"$nin": [None, ""]}}},
-            {"$group": {"_id": "$tier", "total_customers": {"$sum": 1}}},
-            {"$project": {"_id": 0, "group_key": "$_id", "total_customers": 1}},
+            {"$group": {
+                "_id": "$tier",
+                "total_customers": {"$sum": 1},
+                "total_lifetime_spend": {"$sum": {"$ifNull": ["$lifetime_spend", 0]}},
+                "total_lifetime_points_earned": {"$sum": {"$ifNull": ["$lifetime_points_earned", 0]}},
+                "total_points_balance": {"$sum": {"$ifNull": ["$points_balance", 0]}},
+                "total_visit_count": {"$sum": {"$ifNull": ["$visit_count", 0]}},
+            }},
+            {"$project": {
+                "_id": 0, "group_key": "$_id",
+                "total_customers": 1,
+                "total_lifetime_spend": {"$round": ["$total_lifetime_spend", 2]},
+                "total_lifetime_points_earned": 1,
+                "total_points_balance": 1,
+                "avg_lifetime_spend": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                                 {"$divide": ["$total_lifetime_spend", "$total_customers"]}, 0]}, 2]},
+                "avg_visit_count": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                              {"$divide": ["$total_visit_count", "$total_customers"]}, 0]}, 2]},
+            }},
         ])
     elif gb == "month":
-        # Customers' first_purchase_at month — but excludes customers added without an explicit first_purchase
+        # Customers' first_purchase_at month — handle string and datetime types
         agg = customers_col.aggregate([
             {"$match": {"mobile": {"$nin": [None, ""]}, "first_purchase_at": {"$ne": None}}},
             {"$group": {
-                "_id": {"$dateToString": {"format": "%Y-%m", "date": "$first_purchase_at"}},
+                "_id": _MONTH_KEY_CUST_FIRST,
                 "total_customers": {"$sum": 1},
+                "total_lifetime_spend": {"$sum": {"$ifNull": ["$lifetime_spend", 0]}},
+                "total_lifetime_points_earned": {"$sum": {"$ifNull": ["$lifetime_points_earned", 0]}},
+                "total_points_balance": {"$sum": {"$ifNull": ["$points_balance", 0]}},
+                "total_visit_count": {"$sum": {"$ifNull": ["$visit_count", 0]}},
             }},
-            {"$project": {"_id": 0, "group_key": "$_id", "total_customers": 1}},
+            {"$project": {
+                "_id": 0, "group_key": "$_id",
+                "total_customers": 1,
+                "total_lifetime_spend": {"$round": ["$total_lifetime_spend", 2]},
+                "total_lifetime_points_earned": 1,
+                "total_points_balance": 1,
+                "avg_lifetime_spend": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                                 {"$divide": ["$total_lifetime_spend", "$total_customers"]}, 0]}, 2]},
+                "avg_visit_count": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                              {"$divide": ["$total_visit_count", "$total_customers"]}, 0]}, 2]},
+            }},
         ])
     else:
+        # location / city / state / zone — group transactions by store/city/state/zone,
+        # then enrich with per-group customer roll-ups
         field = GROUP_FIELD_TXN[gb]
         agg = transactions_col.aggregate([
             {"$match": _base_match(f)},
+            # Stage 1: per-(group, mobile) per-bill snapshot
             {"$group": {
-                "_id": {"key": field, "mobile": "$customer_mobile"},
+                "_id": {"key": field, "mobile": "$customer_mobile", "bill": "$bill_number"},
+                "net": {"$sum": "$net_amount"},
+                "earn": {"$sum": "$points_earned"},
             }},
-            {"$group": {"_id": "$_id.key", "total_customers": {"$sum": 1}}},
-            {"$project": {"_id": 0, "group_key": "$_id", "total_customers": 1}},
+            # Stage 2: per-(group, mobile): bills count + spend + earn
+            {"$group": {
+                "_id": {"key": "$_id.key", "mobile": "$_id.mobile"},
+                "bills": {"$sum": 1},
+                "spend": {"$sum": "$net"},
+                "earn":  {"$sum": "$earn"},
+            }},
+            # Stage 3: per-group rollup with repeat detection
+            {"$group": {
+                "_id": "$_id.key",
+                "total_customers":  {"$sum": 1},
+                "total_bills":      {"$sum": "$bills"},
+                "total_purchase":   {"$sum": "$spend"},
+                "total_earn_points": {"$sum": "$earn"},
+                "repeat_customers": {"$sum": {"$cond": [{"$gt": ["$bills", 1]}, 1, 0]}},
+                "one_timer_customers": {"$sum": {"$cond": [{"$eq": ["$bills", 1]}, 1, 0]}},
+            }},
+            {"$project": {
+                "_id": 0, "group_key": "$_id",
+                "total_customers": 1,
+                "total_bills": 1,
+                "total_purchase":     {"$round": ["$total_purchase", 2]},
+                "total_earn_points":  {"$round": ["$total_earn_points", 2]},
+                "repeat_customers": 1,
+                "one_timer_customers": 1,
+                "avg_lifetime_spend": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                                 {"$divide": ["$total_purchase", "$total_customers"]}, 0]}, 2]},
+                "avg_bills_per_customer": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                                      {"$divide": ["$total_bills", "$total_customers"]}, 0]}, 2]},
+                "repeat_pct": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                          {"$multiply": [{"$divide": ["$repeat_customers", "$total_customers"]}, 100]}, 0]}, 1]},
+            }},
         ])
 
     raw = [r async for r in agg]
-    # Apply tier refine on raw rows when grouping is not tier
-    if f.tier and gb != "tier":
-        # Need to subtract customers not in this tier — for simplicity, re-run with tier filter on customer
-        pass
     raw = [r for r in raw if r.get("group_key") not in (None, "")]
     rows, total = _apply_sort_and_paginate(raw, f, default_key="total_customers")
     grand_total = sum(r["total_customers"] for r in raw)
+    totals: Dict[str, Any] = {"total_customers": grand_total}
+    # Aggregate optional metrics into totals row
+    for fld in ("total_bills", "total_purchase", "total_earn_points", "repeat_customers",
+                 "one_timer_customers", "total_lifetime_spend", "total_lifetime_points_earned",
+                 "total_points_balance"):
+        if raw and fld in raw[0]:
+            totals[fld] = round(sum(r.get(fld, 0) for r in raw), 2)
+    if "total_purchase" in totals and grand_total:
+        totals["avg_lifetime_spend"] = round(totals["total_purchase"] / grand_total, 2)
+    if "total_bills" in totals and grand_total:
+        totals["avg_bills_per_customer"] = round(totals["total_bills"] / grand_total, 2)
+    if "repeat_customers" in totals and grand_total:
+        totals["repeat_pct"] = round(totals["repeat_customers"] * 100 / grand_total, 1)
     return {
         "group_by": gb,
         "rows": rows,
         "total": total,
-        "totals": {"total_customers": grand_total},
+        "totals": totals,
         "chart": [{"label": r["group_key"], "value": r["total_customers"]} for r in raw[:30]],
     }
 
@@ -199,8 +306,10 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
         # Stage 1: build per-(group,mobile) per-bill snapshot
         {"$group": {
             "_id": {"key": field, "mobile": "$customer_mobile", "bill": "$bill_number"},
-            "net": {"$sum": "$net_amount"},
-            "earn": {"$sum": "$points_earned"},
+            "net":      {"$sum": "$net_amount"},
+            "gross":    {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
+            "discount": {"$sum": {"$ifNull": ["$discount_amount", 0]}},
+            "earn":     {"$sum": "$points_earned"},
         }},
         # Stage 2: roll up to group level
         {"$group": {
@@ -208,6 +317,8 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
             "total_customers": {"$addToSet": "$_id.mobile"},
             "total_bills": {"$sum": 1},
             "total_purchase": {"$sum": "$net"},
+            "total_gross_purchase": {"$sum": "$gross"},
+            "total_discount": {"$sum": "$discount"},
             "total_earn_points": {"$sum": "$earn"},
         }},
         {"$project": {
@@ -215,8 +326,16 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
             "group_key": "$_id",
             "total_customers": {"$size": "$total_customers"},
             "total_bills": 1,
-            "total_purchase": {"$round": ["$total_purchase", 2]},
-            "total_earn_points": {"$round": ["$total_earn_points", 2]},
+            "total_purchase":      {"$round": ["$total_purchase", 2]},
+            "total_gross_purchase": {"$round": ["$total_gross_purchase", 2]},
+            "total_discount":      {"$round": ["$total_discount", 2]},
+            "total_earn_points":   {"$round": ["$total_earn_points", 2]},
+            "avg_bill_value": {"$round": [{"$cond": [{"$gt": ["$total_bills", 0]},
+                                                          {"$divide": ["$total_purchase", "$total_bills"]}, 0]}, 2]},
+            "avg_customer_spend": {"$round": [{"$cond": [{"$gt": [{"$size": "$total_customers"}, 0]},
+                                                              {"$divide": ["$total_purchase", {"$size": "$total_customers"}]}, 0]}, 2]},
+            "discount_pct": {"$round": [{"$cond": [{"$gt": ["$total_gross_purchase", 0]},
+                                                       {"$multiply": [{"$divide": ["$total_discount", "$total_gross_purchase"]}, 100]}, 0]}, 1]},
         }},
     ])
     raw = [r async for r in agg if r.get("group_key") not in (None, "")]
@@ -225,8 +344,16 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
         "total_customers": sum(r["total_customers"] for r in raw),
         "total_bills": sum(r["total_bills"] for r in raw),
         "total_purchase": round(sum(r["total_purchase"] for r in raw), 2),
+        "total_gross_purchase": round(sum(r.get("total_gross_purchase", 0) for r in raw), 2),
+        "total_discount": round(sum(r.get("total_discount", 0) for r in raw), 2),
         "total_earn_points": round(sum(r["total_earn_points"] for r in raw), 2),
     }
+    if totals["total_bills"]:
+        totals["avg_bill_value"] = round(totals["total_purchase"] / totals["total_bills"], 2)
+    if totals["total_customers"]:
+        totals["avg_customer_spend"] = round(totals["total_purchase"] / totals["total_customers"], 2)
+    if totals["total_gross_purchase"]:
+        totals["discount_pct"] = round(totals["total_discount"] * 100 / totals["total_gross_purchase"], 1)
     return {
         "group_by": gb,
         "rows": rows,
@@ -443,10 +570,14 @@ async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
             - r["total_redeem_points"] - prorated_expired,
             2,
         )
+        gross_earned = r["total_earn_points"] + r["total_bonus_points"]
+        redemption_rate = round((r["total_redeem_points"] / gross_earned * 100), 1) if gross_earned else 0.0
         raw.append({
             **r,
             "total_expired_points": prorated_expired,
             "total_liability": liability,
+            "gross_points_earned": round(gross_earned, 2),
+            "redemption_rate_pct": redemption_rate,
         })
 
     rows, total = _apply_sort_and_paginate(raw, f, default_key="total_earn_points")
@@ -456,7 +587,12 @@ async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
         "total_bonus_points":  round(sum(r["total_bonus_points"] for r in raw), 2),
         "total_expired_points": round(sum(r["total_expired_points"] for r in raw), 2),
         "total_liability":     round(sum(r["total_liability"] for r in raw), 2),
+        "gross_points_earned": round(sum(r["gross_points_earned"] for r in raw), 2),
     }
+    if totals["gross_points_earned"]:
+        totals["redemption_rate_pct"] = round(
+            totals["total_redeem_points"] * 100 / totals["gross_points_earned"], 1
+        )
     return {
         "group_by": gb,
         "rows": rows,
@@ -480,10 +616,28 @@ async def customers_by_visit(f: ReportFilter, user: dict = Depends(get_current_u
     given window. Visits = unique bill_number in the window."""
     pipeline: List[Dict[str, Any]] = [
         {"$match": _base_match(f)},
-        {"$group": {"_id": {"mobile": "$customer_mobile", "bill": "$bill_number"}}},
-        {"$group": {"_id": "$_id.mobile", "visits": {"$sum": 1}}},
-        {"$group": {"_id": "$visits", "total_customers": {"$sum": 1}}},
-        {"$project": {"_id": 0, "visits": "$_id", "total_customers": 1}},
+        {"$group": {
+            "_id": {"mobile": "$customer_mobile", "bill": "$bill_number"},
+            "net": {"$sum": "$net_amount"},
+        }},
+        {"$group": {
+            "_id": "$_id.mobile",
+            "visits": {"$sum": 1},
+            "spend":  {"$sum": "$net"},
+        }},
+        {"$group": {
+            "_id": "$visits",
+            "total_customers": {"$sum": 1},
+            "total_spend": {"$sum": "$spend"},
+        }},
+        {"$project": {
+            "_id": 0,
+            "visits": "$_id",
+            "total_customers": 1,
+            "total_purchase": {"$round": ["$total_spend", 2]},
+            "avg_customer_spend": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
+                                                              {"$divide": ["$total_spend", "$total_customers"]}, 0]}, 2]},
+        }},
         {"$sort": {"visits": 1}},
     ]
 
@@ -500,9 +654,15 @@ async def customers_by_visit(f: ReportFilter, user: dict = Depends(get_current_u
     raw = [r async for r in transactions_col.aggregate(pipeline, allowDiskUse=True)]
     grand_visits = sum(r["visits"] * r["total_customers"] for r in raw)
     grand_customers = sum(r["total_customers"] for r in raw)
+    grand_purchase = round(sum(r.get("total_purchase", 0) for r in raw), 2)
     return {
         "rows": raw,
-        "totals": {"visits": grand_visits, "total_customers": grand_customers},
+        "totals": {
+            "visits": grand_visits,
+            "total_customers": grand_customers,
+            "total_purchase": grand_purchase,
+            "avg_customer_spend": round(grand_purchase / grand_customers, 2) if grand_customers else 0,
+        },
     }
 
 

@@ -7,9 +7,9 @@ import {
   CartesianGrid, ComposedChart, Line, LabelList,
 } from "recharts";
 import {
-  Calendar, Filter as FilterIcon, Search, Sparkles, Loader2,
+  Filter as FilterIcon, Search, Sparkles, Loader2,
   Download, FileText, FileSpreadsheet, FileType2, ChevronDown,
-  ChevronUp, ChevronsUpDown, RefreshCw, Eye,
+  ChevronUp, ChevronsUpDown, RefreshCw, Columns3, Check,
 } from "lucide-react";
 import CustomerDetailDrawer from "../_customer_drawer";
 
@@ -21,9 +21,12 @@ export const KAZO_PALETTE = [
 
 export const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
 export const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+export const fmtPct = (v) => v == null ? "—" : `${Number(v).toFixed(1)}%`;
+export const fmtDecimal = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
 /* ============================================================
  * Filter Bar — date range + group_by radio + apply
+ * group_by clicks auto-trigger refetch via onChange(value, true).
  * ============================================================ */
 export function FilterBar({ groupOptions, value, onChange, onApply, loading, extraSlot }) {
   return (
@@ -69,10 +72,10 @@ export function FilterBar({ groupOptions, value, onChange, onApply, loading, ext
               <button
                 key={opt}
                 type="button"
-                onClick={() => onChange({ ...value, group_by: opt })}
+                onClick={() => onChange({ ...value, group_by: opt }, true)}
                 className={`text-xs px-3 py-1 rounded-full border ${
                   value.group_by === opt
-                    ? "bg-amber-50 text-burgundy border-burgundy font-medium"
+                    ? "bg-amber-50 font-medium"
                     : "bg-white text-neutral-600 border-neutral-300 hover:bg-neutral-50"
                 }`}
                 style={value.group_by === opt ? { color: "#9b2c2c", borderColor: "#9b2c2c" } : {}}
@@ -89,7 +92,8 @@ export function FilterBar({ groupOptions, value, onChange, onApply, loading, ext
 }
 
 /* ============================================================
- * AI Narrative Card
+ * AI Narrative Card — DEFERRED: fires 1s AFTER data lands, so the
+ * report renders first. Lives at the BOTTOM of the page.
  * ============================================================ */
 export function NarrativeCard({ report, group_by, rows, totals, filters, deps }) {
   const [data, setData] = useState(null);
@@ -102,7 +106,7 @@ export function NarrativeCard({ report, group_by, rows, totals, filters, deps })
       const r = await api.post("/raw-reports/narrative", { report, group_by, rows, totals, filters });
       setData(r.data);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Narrative failed");
+      // Silent — narrative is non-critical
     } finally {
       setLoading(false);
     }
@@ -110,13 +114,16 @@ export function NarrativeCard({ report, group_by, rows, totals, filters, deps })
 
   useEffect(() => {
     setData(null);
-    if (rows && rows.length > 0) generate();
+    if (!rows || rows.length === 0) return;
+    // Defer so the report renders FIRST, then narrative kicks in
+    const t = setTimeout(generate, 1000);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(deps || [rows?.length, group_by])]);
 
   if (!rows || rows.length === 0) return null;
   return (
-    <div className="border border-indigo-200 bg-gradient-to-br from-indigo-50/40 to-amber-50/30 rounded-lg p-4 mb-4" data-testid="narrative-card">
+    <div className="mt-4 border border-indigo-200 bg-gradient-to-br from-indigo-50/40 to-amber-50/30 rounded-lg p-4" data-testid="narrative-card">
       <div className="flex items-center justify-between mb-2">
         <div className="text-[10px] uppercase tracking-widest text-indigo-700 font-medium flex items-center gap-1">
           <Sparkles className="w-3 h-3" /> Fundle Brain · AI Insights
@@ -137,12 +144,14 @@ export function NarrativeCard({ report, group_by, rows, totals, filters, deps })
         </button>
       </div>
       {loading && !data ? (
-        <div className="text-sm text-neutral-500 italic">Analyzing your data…</div>
+        <div className="text-xs text-neutral-500 italic flex items-center gap-1.5">
+          <Loader2 className="w-3 h-3 animate-spin" /> Fundle Brain is reading your data…
+        </div>
       ) : data?.bullets?.length > 0 ? (
         <ul className="space-y-1.5 text-sm text-neutral-800">
           {data.bullets.map((b, i) => (
             <li key={i} className="flex gap-2">
-              <span className="text-burgundy mt-0.5" style={{ color: "#9b2c2c" }}>•</span>
+              <span style={{ color: "#9b2c2c" }}>•</span>
               <span>{b}</span>
             </li>
           ))}
@@ -150,6 +159,70 @@ export function NarrativeCard({ report, group_by, rows, totals, filters, deps })
       ) : data?.narrative ? (
         <div className="text-sm text-neutral-800 whitespace-pre-wrap">{data.narrative}</div>
       ) : null}
+    </div>
+  );
+}
+
+/* ============================================================
+ * Column Picker — toggle visibility of optional columns
+ * ============================================================ */
+export function ColumnPicker({ allColumns, visibleKeys, onChange, requiredKeys = [] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+
+  const toggle = (k) => {
+    if (requiredKeys.includes(k)) return;
+    onChange(visibleKeys.includes(k) ? visibleKeys.filter((x) => x !== k) : [...visibleKeys, k]);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="text-xs flex items-center gap-1 px-3 py-1.5 border border-neutral-300 bg-white rounded hover:bg-neutral-50"
+        data-testid="column-picker-btn"
+      >
+        <Columns3 className="w-3.5 h-3.5" />
+        Columns ({visibleKeys.length}/{allColumns.length})
+        <ChevronDown className="w-3 h-3" />
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-1 w-64 bg-white border border-neutral-200 rounded shadow-lg z-30 overflow-hidden max-h-80 overflow-y-auto" data-testid="column-picker-menu">
+          <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-neutral-400 border-b border-neutral-100 bg-neutral-50">
+            Show / hide columns
+          </div>
+          {allColumns.map((c) => {
+            const isVisible = visibleKeys.includes(c.key);
+            const isLocked = requiredKeys.includes(c.key);
+            return (
+              <button
+                key={c.key}
+                type="button"
+                onClick={() => toggle(c.key)}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-amber-50 ${
+                  isLocked ? "opacity-60 cursor-not-allowed" : ""
+                }`}
+                data-testid={`col-toggle-${c.key}`}
+              >
+                <div className={`w-3.5 h-3.5 border rounded flex items-center justify-center ${
+                  isVisible ? "bg-emerald-600 border-emerald-600" : "border-neutral-300 bg-white"
+                }`}>
+                  {isVisible && <Check className="w-2.5 h-2.5 text-white" />}
+                </div>
+                <span className="flex-1">{c.label}</span>
+                {isLocked && <span className="text-[9px] text-neutral-400">locked</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -227,6 +300,7 @@ export function ExportMenu({ report, group_by, columns, rows, totals }) {
 
 /* ============================================================
  * Sortable / searchable / paginated table
+ * EVERY numeric cell is drill-down clickable when onCellClick is set.
  * ============================================================ */
 export function ReportTable({ columns, rows, totals, onCellClick, defaultSort, multiHeader }) {
   const [sort, setSort] = useState(defaultSort || { key: null, dir: -1 });
@@ -314,27 +388,30 @@ export function ReportTable({ columns, rows, totals, onCellClick, defaultSort, m
           <tbody>
             {pageRows.map((r, i) => (
               <tr key={i} className="border-t border-neutral-100 hover:bg-amber-50/30" data-testid={`row-${i}`}>
-                {columns.map((c) => (
-                  <td
-                    key={c.key}
-                    className={`px-3 py-2 ${c.align === "right" ? "text-right font-mono" : ""}`}
-                  >
-                    {c.render ? c.render(r[c.key], r) : (
-                      onCellClick && c.drillable !== false && c.key !== "group_key" && c.key !== "visits" ? (
-                        <button
-                          onClick={() => onCellClick(c, r)}
-                          className="underline decoration-dotted hover:text-burgundy"
-                          style={{ color: "#9b2c2c" }}
-                          data-testid={`cell-${i}-${c.key}`}
-                        >
-                          {c.format ? c.format(r[c.key]) : (r[c.key] ?? "—")}
-                        </button>
-                      ) : (
-                        c.format ? c.format(r[c.key]) : (r[c.key] ?? "—")
-                      )
-                    )}
-                  </td>
-                ))}
+                {columns.map((c) => {
+                  const val = r[c.key];
+                  const formatted = c.format ? c.format(val) : (val ?? "—");
+                  const isNumber = typeof val === "number";
+                  const drillable = onCellClick && c.drillable !== false && c.key !== "sno";
+                  return (
+                    <td key={c.key} className={`px-3 py-2 ${c.align === "right" ? "text-right font-mono" : ""}`}>
+                      {c.render ? c.render(val, r) : (
+                        drillable && isNumber ? (
+                          <button
+                            onClick={() => onCellClick(c, r)}
+                            className="underline decoration-dotted hover:text-burgundy"
+                            style={{ color: "#9b2c2c" }}
+                            data-testid={`cell-${i}-${c.key}`}
+                          >
+                            {formatted}
+                          </button>
+                        ) : (
+                          formatted
+                        )
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
             {pageRows.length === 0 && (
@@ -379,7 +456,7 @@ export function DrillModal({ open, onClose, report, group_by, group_key, metric,
     setLoading(true);
     api.post("/raw-reports/drill", {
       report, group_by, group_key, metric, visits, filters, page, page_size: 50,
-    }).then((r) => setData(r.data)).catch((e) => toast.error("Drill failed"))
+    }).then((r) => setData(r.data)).catch(() => toast.error("Drill failed"))
       .finally(() => setLoading(false));
   }, [open, group_key, metric, visits, page]); // eslint-disable-line
 

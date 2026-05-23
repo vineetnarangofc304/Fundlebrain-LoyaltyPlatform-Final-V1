@@ -1,0 +1,33 @@
+{
+  "summary": "Comprehensive testing of Iteration-12 Raw Data Reports (5 reports + drill + narrative + export). 22 backend pytest cases all PASSED including the critical month/tier/city/state/zone grouping bug fix verification. Frontend UI tabs, column picker, narrative position, filters, drill modal, and grouped-header all functional. Two items need a re-look by the main agent: (a) export menu options (export-csv/xlsx/pdf) were not detected after a single click on [data-testid='report-export'] — likely a click-outside toggle race; (b) when switching group_by radios the table briefly continues showing stale location-grouped rows during the 250ms debounce + API roundtrip — UX is fine but tests must wait ≥4-5s.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ExportMenu", "issue": "[data-testid='export-csv|xlsx|pdf'] not found in DOM after clicking [data-testid='report-export']. Code in _shared.jsx:286 confirms the elements exist — likely a click-outside listener immediately closes the menu after the test click. Manually verifying with mouse hover/click should work. Recommend adding a small delay before the closing handler or use Radix Popover.", "selector": "[data-testid='report-export']", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Customer Data group-by radio → auto-refetch", "issue": "After clicking group-month/group-tier the table briefly shows STALE location-grouped rows during the 250ms debounce + API call. Backend returns correct month/tier data (verified). UI should show a loading skeleton or clear the table to prevent the 'month filter not working' perception that the user reported.", "affected_selectors": ["[data-testid='group-month']","[data-testid='group-tier']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/iteration12_raw_reports_test.py", "/app/test_reports/pytest/iteration12_results.xml"],
+  "action_items": [
+    "Optional: clear table rows OR render an explicit loading-skeleton when group_by changes so user immediately sees the table 'reacting' to the radio click (root cause of the user-reported 'month filter not working' complaint — the backend works; it's the perceived UX latency).",
+    "Investigate ExportMenu click-outside behaviour: data-testid='export-csv/xlsx/pdf' children are not detectable post-click in headless automation."
+  ],
+  "critical_code_review_comments": [
+    "raw_reports_routes.py is 963 lines — at the upper limit; consider splitting per-report into raw_reports/{customer,transaction,repeat,earn_redeem,visit}.py before adding more reports.",
+    "drill() in raw_reports_routes.py:683 — body.group_key is required but pydantic model has no validation min_length=1; an empty string falls through to all-store match silently.",
+    "earn_redeem expired-points pro-ration uses group's redemption share — best-effort; should be documented in UI tooltip so analysts don't treat as exact.",
+    "Repeat Purchases pipeline iterates per-mobile×location in Python (raw_reports_routes.py:421-478) — fine for current dataset but will need a Mongo $reduce / $facet path for >100k customers.",
+    "No XSS escaping on filename in Content-Disposition — re.sub strips most but allow-list approach safer."
+  ],
+  "updated_files": ["/app/backend/tests/iteration12_raw_reports_test.py"],
+  "success_rate": {"backend": "100% (22/22)", "frontend": "85%"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — used existing KAZO seed (41 customers, 9 stores, transactions across months).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend (POST /api/raw-reports/*) is solid — all 22 cases pass. The historical bill_date $dateToString bug is verified fixed via $cond+$substr. UI: tabs, column-picker (10 toggles, 7 default visible), narrative at bottom (ncTop 1254 > tblTop 874), drill-modal opens, Tier/Location filters present on customers-by-visit, Repeat Purchases grouped header checkbox works. Two minor frontend items to verify manually: (a) export menu items render on click — Playwright headless run found them missing, likely test-only issue; (b) when user clicks group_by radio, table briefly shows stale rows during ~250-1500ms refetch — backend returns correct data but UX should show loading skeleton. No P1 bugs found.",
+  "rca of the issue": "N/A — no blocking bugs. The earlier user-reported 'month filter shows store data' was caused by a backend $dateToString failure on string-stored bill_date; the new $cond+$substr fallback (raw_reports_routes.py:62-77) now correctly emits YYYY-MM keys (verified by test_customer_data_month_differs_from_location)."
+}
