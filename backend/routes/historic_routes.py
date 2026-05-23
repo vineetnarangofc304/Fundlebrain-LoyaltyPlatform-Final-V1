@@ -338,6 +338,8 @@ def _map_points_ledger_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]],
     bill_no = (r.get("Bill Number") or r.get("Bill") or r.get("Reference") or "").strip() or None
     bill_date = parse_date(r.get("Date") or r.get("Bill Date") or r.get("Transaction Date"))
     reason = (r.get("Reason") or r.get("Description") or r.get("Note") or "").strip() or None
+    if reason and len(reason) > 500:
+        reason = reason[:500]
     source_bill_id = (r.get("Source Bill Id") or r.get("SourceBillId") or bill_no or "").strip() or None
 
     doc = {

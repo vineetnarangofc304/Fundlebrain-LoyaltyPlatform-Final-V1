@@ -239,7 +239,7 @@ export default function CampaignManager() {
               </div>
 
               {/* Karix Template picker for real sends */}
-              <div className="border border-neutral-200 rounded p-3 bg-neutral-50">
+              <div className="border border-neutral-200 rounded p-3 bg-neutral-50" data-testid="campaign-template-select">
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-[10px] uppercase tracking-widest text-neutral-700 font-medium flex items-center gap-1">
                     <Send className="w-3 h-3" /> Send via Karix template (real send)
@@ -249,11 +249,11 @@ export default function CampaignManager() {
                   )}
                 </div>
                 {compatibleTemplates.length === 0 ? (
-                  <div className="text-xs text-neutral-500">
+                  <div className="text-xs text-neutral-500" data-testid="campaign-template-empty">
                     No active templates for selected channels — create one in <a href="/admin/communications/templates" className="underline text-burgundy">Templates</a>. Without a template the campaign will only generate simulated metrics.
                   </div>
                 ) : (
-                  <select className="k-input" value={form.template_id} onChange={(e) => setForm({ ...form, template_id: e.target.value })} data-testid="campaign-template-select">
+                  <select className="k-input" value={form.template_id} onChange={(e) => setForm({ ...form, template_id: e.target.value })} data-testid="campaign-template-dropdown">
                     <option value="">— Simulated metrics only (no real send) —</option>
                     {compatibleTemplates.map((t) => (
                       <option key={t.id} value={t.id}>

@@ -31,6 +31,101 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 13 (May 2026) — ✅ P1+P2 Wave: Real Karix Sends · Auto-Campaigns · AI Post-Ingest Narrative · Ledger Ingest
+
+User: *"yes continue to build p1 and p2"*
+
+**Four high-impact features shipped together — testing agent verified 100% backend / ~95% frontend pass.**
+
+#### 1) Real Karix Campaign Sends (P1)
+
+`campaigns_routes.py::launch_campaign` rewritten with dual-mode dispatch:
+- **Karix path** (when campaign has `template_id`): validates linked template is active, WABA-approved when needed, then enqueues a `bulk_send_job` via `asyncio.create_task(_run_bulk_send_job)` exactly like the bulk-send module. Job-id linked back to the campaign as `bulk_job_id` and `send_mode='karix'`.
+- **Simulated path** (no template_id): legacy demo-metrics generation preserved so existing campaigns/dashboards still work.
+
+`models.py::Campaign` extended with `template_id`, `send_limit` (default 50,000 cap), `bulk_job_id`, `send_mode`.
+
+Frontend `CampaignManager.jsx` rebuilt:
+- New "Send via Karix template (real send)" panel in the create-modal — dropdown of active templates filtered by selected channels; clear note when no templates exist
+- New "Send Mode" column on the campaign table: Real-Karix · Karix-ready · Simulated · No-template pills
+- New "Send limit" input (1-500,000) for safety cap
+- 4-second progress polling on running campaigns via `/communications/bulk-jobs/{id}` — shows processed/total + failed count
+- Launch button shows spinner during the call, toast distinguishes between Karix-queued and simulated outcomes
+
+#### 2) Auto-Campaigns (P2)
+
+New module `routes/auto_campaigns_routes.py` with **6 daily-trigger rules**:
+- **Lifecycle**: birthday_today (cooldown 350d), birthday_7d (350d), anniversary_today (350d)
+- **Win-back**: winback_60d (90d cooldown), winback_180d (180d), abandoned_visit_30d (45d, repeat customers 3+ visits only)
+
+Endpoints (`/api/auto-campaigns/*`):
+- `GET /rules` — list all 6 with current config (enabled, template_id, daily_cap, last_run stats)
+- `PATCH /rules/{rule_key}` — enable/disable, link Karix template, set daily cap
+- `POST /rules/{rule_key}/preview` — audience_total + fireable_now + on_cooldown + samples
+- `POST /rules/{rule_key}/run?dry_run=bool` — fire one rule immediately
+- `POST /run-all?dry_run=bool` — fire all enabled rules
+- `GET /log?rule_key=...&limit=N` — audit trail of every fired/skipped attempt
+
+Audience selectors:
+- Birthday/anniversary: regex on `YYYY-{MM:02d}-{DD:02d}` against IST-shifted today / today+7d
+- Win-back: bills with `last_visit_at` in the `(target-15d, target)` window (60d / 180d) — avoids re-firing the same customer day after day
+- Abandoned visit: same window logic + `visit_count >= 3` filter to skip one-timers
+
+Per-customer cooldown enforced via `auto_campaign_log` collection (idempotent — re-running the same day won't re-fire). Every send goes through the existing `send_sms_karix` / `send_whatsapp_karix` helpers, so the Karix provider settings remain the single source of truth.
+
+**Scheduler hook** in `scheduler.py`: `CronTrigger(hour=10, minute=0, timezone="Asia/Kolkata")` runs `run_all_auto_campaigns` daily at 10 AM IST. `max_instances=1`, `coalesce=True`, `misfire_grace_time=3600`.
+
+Frontend `AutoCampaignsPage.jsx` (new at `/admin/auto-campaigns`, MARKETING > Auto Campaigns nav):
+- 6 rule cards grouped by category (Lifecycle / Win-back)
+- Each card: enable toggle + Karix template dropdown + daily cap + cooldown display + last-run stats
+- Per-card actions: Save (only when dirty) · Preview audience (shows fireable count + 5 sample names) · Dry-run · Run live now
+- Page header shows enabled-count + scheduler reminder ("runs every day at 10:00 IST")
+- Top-right "Dry-run all" / "Run all now" buttons
+
+#### 3) Post-Ingest AI Auto-Narrative (P2)
+
+New `routes/ingest_narrative.py`:
+- After every successful `_run_ingest_job` (excluding dry-runs), best-effort fires `build_and_store_narrative(job_id)` — wrapped in try/except so a failed LLM call never breaks the ingest
+- Builds a JSON-ish prompt with the job's stats + a fresh DB snapshot (loyalty customers, txns, net sales, points outstanding, tier mix)
+- Calls Fundle Brain via Emergent LLM Key with GPT-5 + a tight "1-page brand-manager narrative" system message
+- **Graceful fallback**: if no LLM key or call fails, generates a deterministic template-based summary so brand managers always get a report
+
+Two new endpoints in historic_routes:
+- `POST /api/historic-data/jobs/{job_id}/narrative` — regenerate (super_admin/brand_admin/crm_manager/marketing_manager)
+- `GET /api/historic-data/jobs/{job_id}/narrative` — fetch stored narrative
+
+Frontend `HistoricDataPage.jsx`:
+- Job rows are now clickable → set `activeJobId` → "Fundle Brain · Post-Ingest Report" card surfaces below the table
+- Card shows source label (GPT-5 vs Template), generated_at, the narrative text, and 4-tile snapshot (loyalty customers, bills, net sales, points outstanding)
+- "Generate now" / "Regenerate" button calls the POST endpoint
+
+**Verified**: GPT-5 narrative for the 3-row points_ledger ingest returned: *"Bottom line: The points_ledger CSV ingest completed successfully and refreshed existing records only … Loyalty-attributed net sales stand at ₹41,229, and members are holding 6,875 unredeemed points. Tier distribution continues to skew heavily toward silver…"* ✅
+
+#### 4) Item Master + Points Ledger CSV Ingest (P1)
+
+`historic_routes.py::_map_item_row` expanded from 4 columns to **21 recognised columns**:
+- SKU aliases: SKU / Item Code / Style Code / Article
+- Names: Name / Item Name / Product Name / Style Name / Description
+- Category fields: Category / Sub Category / Class
+- Pricing: MRP / Selling Price / Price / List Price
+- Attributes: Color / Size / Brand / Season
+- Tax: HSN / Tax % / GST
+
+New `_map_points_ledger_row` + 5th ingest dataset:
+- Required: Mobile, Points (signed handling — positive → earn, negative → redeem unless explicit Type given)
+- Optional: Type (earn/redeem/bonus/adjust/expire), Date, Bill Number, Reason (capped 500 chars), Source Bill Id
+- Composite upsert key (mobile + bill + type) makes re-runs **idempotent**
+- Mobile normalised (10-digit, 91-prefix stripped)
+
+`ALLOWED_DATASETS` now includes `points_ledger`; schema endpoint exposes both Items + Points Ledger with KAZO-friendly sample rows + parsing notes. Frontend `HistoricDataPage.jsx` shows 5 dataset tiles (Customers, Transactions, Stores, Items, **Points Ledger** in purple).
+
+**Testing**: `/app/test_reports/iteration_11.json` — backend 11/11 pass, frontend all 6 rule cards + 5 dataset tiles render with correct testids. End-to-end live test: ingested 3-row points_ledger CSV via curl → job completed → GPT-5 narrative generated with full snapshot in <30s ✅
+
+**User next steps**: Redeploy production →
+1. Marketing › **Auto Campaigns** → enable Birthday-Today + pick a Karix SMS template + Save → tomorrow 10 AM IST it auto-fires
+2. Marketing › **Campaigns** → New campaign → pick a template in the new "Send via Karix template" section → Launch → real messages dispatch via Karix
+3. Data › **Historical Upload** → upload a points_ledger CSV using the new Points Ledger tile → click the completed job row → see the AI narrative below
+
 ### Iteration 12.1 (May 2026) — ✅ Full Audience Export · CSV · XLSX · PDF
 
 User: *"segment builder. need export full report not just page... in csv, xlsx and pdf formats."*
@@ -513,21 +608,29 @@ Both issues meant a malicious actor could empty any customer's wallet by manipul
 - [x] Fix CORS for custom domain `kazoloyalty.fundlebrain.ai` — replaced wildcard `*` (incompatible with credentialed XHR) with explicit allowlist + regex covering `*.fundlebrain.ai`, `*.emergent.host`, `*.emergentagent.com` (2026-05-19). Requires redeploy.
 - [x] Idempotent seed of all 11 demo users on backend boot (2026-05-19)
 
-### P1 — Next
-- [ ] **Campaign Manager send channels** — wire actual Email / WhatsApp / RCS sending via Karix from the Segment Builder "Send Campaign" CTA (currently navigates to Campaign Manager pre-filled but transmit is mocked)
-- [ ] **Refactor oversized route files**:
-  - `/app/backend/routes/pos_ewards_routes.py` (~1400 lines → split by domain: customer lookup, redemption, bill settlement, coupons, returns/wallet)
-  - `/app/backend/routes/fundlebrain_routes.py` (~1500 lines → split into rfm/cohort/customer360/store-perf/dashboard-utility modules)
-- [ ] **KAZO POS API integration** (Phase 2) — User to share KAZO POS API docs/Swagger/Postman if any additional endpoints beyond the 14 already mirrored
-- [ ] Wire optional email transport (Resend / SendGrid / Karix Email) for scheduled digest
-- [ ] Item Master + Points Ledger ingest variants (currently only customers/transactions/stores have row mappers)
+### P1 — DONE (Iteration 13, May 2026)
+- [x] Campaign Manager → real Karix bulk-send wiring (template_id + bulk_job_id linkage)
+- [x] Item Master CSV mapper expanded to 21 columns + new Points Ledger CSV ingest dataset
 
-### P2
-- [ ] Post-Ingest Auto-Report: Fundle Brain hook to auto-generate a narrative email summarising what changed in the database after a successful historical data upload
+### P1 — Next
+- [ ] **Refactor oversized route files** (mechanical cleanup, no user-facing change):
+  - `/app/backend/routes/historic_routes.py` (~1700 lines → mappers, ingest worker, narrative wiring, purge, backfill)
+  - `/app/backend/routes/pos_ewards_routes.py` (~1400 lines → split by domain: customer lookup, redemption, bill settlement, coupons, returns/wallet)
+  - `/app/backend/routes/fundlebrain_routes.py` (~1500 lines → split into rfm/cohort/customer360/store-perf modules)
+- [ ] **KAZO POS API integration** (Phase 2) — Pull-scheduler that polls KAZO POS for live transactions (push side done)
+- [ ] **Email transport** for scheduled digest + post-ingest narrative (Resend / SendGrid / Karix Email)
+- [ ] Item-level loyalty rules (currently SKU master is ingested but not yet used in points-engine)
+
+### P2 — DONE (Iteration 13)
+- [x] Post-Ingest AI Auto-Narrative report (Fundle Brain GPT-5 with template fallback)
+- [x] Birthday / win-back / abandoned-visit auto-campaigns (6 daily-trigger rules)
+
+### P2 — Next
 - [ ] Drag-and-drop report builder, support bot, mobile app
 - [ ] Move AI insight cache to Redis (multi-worker)
-- [ ] Birthday / win-back / abandoned-visit auto-campaigns
 - [ ] Carry-over CommandCenter hydration warning `<span> in <option>` cleanup
+- [ ] Auto-narrative delivered via email (depends on email transport above)
+- [ ] Per-rule WhatsApp template approval helper (currently WABA-templates must already exist + be approved before linking)
 
 ## Test credentials
 See `/app/memory/test_credentials.md` — Brand Admin: `admin@kazo.com / Kazo@2026`
