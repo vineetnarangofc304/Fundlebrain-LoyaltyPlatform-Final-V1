@@ -59,6 +59,7 @@ const SECTIONS = [
   {
     label: "DATA",
     items: [
+      { to: "/admin/raw-reports", icon: BarChart3, label: "Raw Data Reports", testid: "nav-raw-reports" },
       { to: "/admin/historic-data", icon: Database, label: "Historical Upload", testid: "nav-historic-data" },
       { to: "/admin/reconciliation", icon: ShieldCheck, label: "Data Reconciliation", testid: "nav-reconciliation" },
     ],

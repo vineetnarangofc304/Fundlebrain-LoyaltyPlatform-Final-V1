@@ -59,6 +59,7 @@ import TemplatesPage from "@/pages/admin/communications/TemplatesPage";
 import ProviderSettingsPage from "@/pages/admin/communications/ProviderSettingsPage";
 import BulkJobsPage from "@/pages/admin/communications/BulkJobsPage";
 import AutoCampaignsPage from "@/pages/admin/AutoCampaignsPage";
+import RawReportsPage from "@/pages/admin/RawReportsPage";
 import DigestsPage from "@/pages/admin/DigestsPage";
 import HistoricDataPage from "@/pages/admin/HistoricDataPage";
 import ReconciliationPage from "@/pages/admin/ReconciliationPage";
@@ -128,6 +129,7 @@ function App() {
             <Route path="coupons" element={<CouponEngine />} />
             <Route path="campaigns" element={<CampaignManager />} />
             <Route path="auto-campaigns" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><AutoCampaignsPage /></ProtectedRoute>} />
+            <Route path="raw-reports" element={<RawReportsPage />} />
             <Route path="ai" element={<FundleBrain />} />
             <Route path="api-monitor" element={<APIMonitor />} />
             <Route path="users" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><UserManagement /></ProtectedRoute>} />

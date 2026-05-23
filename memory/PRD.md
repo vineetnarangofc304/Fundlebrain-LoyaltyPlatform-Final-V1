@@ -31,6 +31,59 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 14 (May 2026) — ✅ Raw Data Reports (5 high-density operational reports)
+
+User: *"need some raw data reports in a new section.. with all filters all sorting,, graphs and drill downs.. nicely AI curated Raw data reports.....see attached screenshots as samples"*
+
+**5 brand-new tabbed reports under `/admin/raw-reports` modelled after the eWards screenshots provided**:
+
+#### 1) Customer Data
+- Group-by: Location / City / State / Zone / Month / Tier
+- Bar chart of customer count by selected group
+- Sortable, searchable table `[Location, Total Customers]`
+- Every count is drill-down clickable → modal showing the underlying customers list with rows clickable to open the Customer 360 drawer
+
+#### 2) Transaction Data
+- Group-by: Location / City / State / Zone / Month
+- Composed chart: 3 bars (Total Purchase / Total Earn Points / Total Bills) + 1 line (Unique Customers)
+- Table `[Location, Total Customers, Total Bills, Total Purchase, Total Earn Points]` with TOTAL footer row + drill-down
+
+#### 3) Repeat Purchases
+- 3-tier multi-level table header (Purchase + Repeat Purchase × {Total, Current 90d, Earlier})
+- 13 leaf columns: Unique Loyalty Customers, Total Loyalty Bills, Total Loyalty Purchase, then per-segment Unique Customers/Total Bills/Repeat Purchase
+- Algorithm: per (customer × group) we sort their bills, treat the 1st as initial purchase and bills 2..N as repeats; Current = repeats within last 90 days, Earlier = older repeats (still within the filter window)
+
+#### 4) Earn-Redeem
+- Composed chart: 2 bars (Earn / Redeem) + 1 line (Bonus) + 1 dotted line (Expired)
+- Table `[S.No., Location, Total Earn, Total Redeem, Total Bonus, Total Expired, Total Liability]`
+- Expired points pro-rated by group's share of redemption (since ledger doesn't store store-of-expiry); Liability = Earn + Bonus - Redeem - Expired
+
+#### 5) Customers by Visit
+- Frequency distribution: how many unique customers had exactly N bills in the window
+- Additional filters: Tier dropdown + Location dropdown (loaded from /dashboard/stores)
+- Table `[S.No., Visits, Total Customers]` with TOTAL footer
+- Clicking any count opens drill modal listing those customers
+
+**Shared scaffolding** (`_shared.jsx`):
+- `FilterBar` — date range + report-type radio + Apply button
+- `NarrativeCard` — auto-fires `/raw-reports/narrative` and shows 3-bullet GPT-5 commentary (template fallback when LLM key missing)
+- `ExportMenu` — CSV / XLSX / PDF via `/raw-reports/export` (reuses the same patterns from segment export)
+- `ReportTable` — sortable, searchable, paginated, TOTAL footer row, supports multi-row headers, drill-down clickable cells
+- `DrillModal` — modal showing the underlying customers list with infinite-scroll/pagination, rows open the existing `CustomerDetailDrawer`
+- `ReportBarChart` + `ReportComposedChart` — recharts wrappers with KAZO palette, value labels, angled X-axis labels
+
+**Backend** (`routes/raw_reports_routes.py`, 7 endpoints):
+- `POST /raw-reports/customer-data`, `/transaction-data`, `/repeat-purchases`, `/earn-redeem`, `/customers-by-visit` — all respect R1 (bill_date is source of truth) + R5 (loyalty filter excludes anonymous walk-ins)
+- `POST /raw-reports/drill` — unified drill endpoint returning paginated customer list for any cell
+- `POST /raw-reports/narrative` — GPT-5 commentary with template fallback
+- `POST /raw-reports/export` — universal exporter handling CSV (streaming) / XLSX (openpyxl) / PDF (reportlab + KAZO branding)
+
+**Verified live**: All 5 backend endpoints curl-tested with real data. Frontend screenshot shows Customer Data tab rendering with bar chart "Customer Count by Location" (9 stores, hover tooltip working), AI Insights panel, sortable table. Repeat Purchases tab confirmed showing the exact 3-tier multi-header structure from the provided screenshot.
+
+**Sidebar**: New "Raw Data Reports" entry under DATA section (BarChart3 icon).
+
+**User next steps**: Redeploy production → Data › Raw Data Reports → flip through the 5 tabs. Share additional report specs to extend the section.
+
 ### Iteration 13 (May 2026) — ✅ P1+P2 Wave: Real Karix Sends · Auto-Campaigns · AI Post-Ingest Narrative · Ledger Ingest
 
 User: *"yes continue to build p1 and p2"*
