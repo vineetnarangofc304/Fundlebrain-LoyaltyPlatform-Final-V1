@@ -225,6 +225,204 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
     }
 
 
+# ============================================================
+# Customer 360 by mobile (R4: mobile is the canonical loyalty identity).
+# Same payload shape as customer-360 by id but every lookup uses mobile.
+# ============================================================
+@router.get("/customer-by-mobile/{mobile}")
+async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_user)):
+    customer = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+
+    # Monthly spend (last 24 months)
+    monthly_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$group": {
+            "_id": {"$substr": ["$bill_date", 0, 7]},
+            "spend": {"$sum": "$net_amount"}, "visits": {"$sum": 1},
+            "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+            "discount": {"$sum": "$discount_amount"},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    monthly_rows = await transactions_col.aggregate(monthly_pipe).to_list(60)
+    monthly = [{
+        "month": r["_id"],
+        "spend": round(r["spend"], 2),
+        "visits": r["visits"],
+        "items": r["items"],
+        "aov": round(r["spend"] / r["visits"], 2) if r["visits"] else 0,
+        "discount": round(r["discount"], 2),
+    } for r in monthly_rows]
+
+    # Store affinity
+    store_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": "$net_amount"}}},
+        {"$sort": {"visits": -1}}, {"$limit": 8},
+    ]
+    s_rows = await transactions_col.aggregate(store_pipe).to_list(10)
+    s_ids = [r["_id"] for r in s_rows if r["_id"]]
+    stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": s_ids}}, {"_id": 0})}
+    store_affinity = [{
+        "store_id": r["_id"],
+        "name": stores.get(r["_id"], {}).get("name", "Unknown"),
+        "city": stores.get(r["_id"], {}).get("city", "—"),
+        "code": stores.get(r["_id"], {}).get("code"),
+        "visits": r["visits"],
+        "spend": round(r["spend"], 2),
+    } for r in s_rows]
+
+    # Category affinity
+    cat_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$unwind": "$items"},
+        {"$group": {"_id": "$items.category", "qty": {"$sum": "$items.quantity"},
+                    "spend": {"$sum": "$items.total"}}},
+        {"$sort": {"spend": -1}}, {"$limit": 8},
+    ]
+    cat_rows = await transactions_col.aggregate(cat_pipe).to_list(20)
+    categories = [{"category": r["_id"], "qty": r["qty"], "spend": round(r["spend"], 2)} for r in cat_rows]
+
+    # RFM
+    now = datetime.now(timezone.utc)
+    last_visit_str = customer.get("last_visit_at")
+    recency_days = 9999
+    if last_visit_str:
+        try:
+            last_visit_dt = datetime.fromisoformat(last_visit_str.replace("Z", "+00:00"))
+            recency_days = max(0, (now - last_visit_dt).days)
+        except Exception:
+            pass
+    rfm_breakpoints = await _rfm_breakpoints()
+    r_q = 6 - _quintile(recency_days, rfm_breakpoints["recency"])
+    f_q = _quintile(customer.get("visit_count", 0) or 0, rfm_breakpoints["frequency"])
+    m_q = _quintile(customer.get("lifetime_spend", 0) or 0, rfm_breakpoints["monetary"])
+    segment = _segment_label(r_q, f_q, m_q)
+
+    # Recent transactions (last 25)
+    recent = await transactions_col.find(
+        {"customer_mobile": mobile},
+        {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1, "store_id": 1, "store_name": 1,
+         "city": 1, "net_amount": 1, "gross_amount": 1, "discount_amount": 1, "tax_amount": 1,
+         "items": 1, "points_earned": 1, "points_redeemed": 1, "bonus_points": 1, "return_marker": 1}
+    ).sort("bill_date", -1).limit(25).to_list(25)
+
+    # Points ledger (last 30)
+    ledger = await points_ledger_col.find(
+        {"customer_mobile": mobile},
+        {"_id": 0, "type": 1, "points": 1, "reason": 1, "bill_date": 1, "created_at": 1, "bill_number": 1}
+    ).sort("bill_date", -1).limit(30).to_list(30)
+
+    # NPS history
+    nps = await nps_col.find(
+        {"customer_mobile": mobile},
+        {"_id": 0, "score": 1, "comment": 1, "created_at": 1}
+    ).sort("created_at", -1).limit(10).to_list(10)
+    # NPS may also be keyed by customer_id legacy
+    if not nps and customer.get("id"):
+        nps = await nps_col.find(
+            {"customer_id": customer["id"]},
+            {"_id": 0, "score": 1, "comment": 1, "created_at": 1}
+        ).sort("created_at", -1).limit(10).to_list(10)
+
+    # Lifetime live recompute
+    lifetime_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$group": {
+            "_id": None,
+            "spend": {"$sum": "$net_amount"},
+            "gross": {"$sum": "$gross_amount"},
+            "discount": {"$sum": "$discount_amount"},
+            "visits": {"$sum": 1},
+            "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+            "first": {"$min": "$bill_date"},
+            "last": {"$max": "$bill_date"},
+            "first_store": {"$first": "$store_id"},
+        }},
+    ]
+    life = (await transactions_col.aggregate(lifetime_pipe).to_list(1)) or [{}]
+    life = life[0] if life else {}
+    lifetime = {
+        "spend": round(life.get("spend", 0) or 0, 2),
+        "gross": round(life.get("gross", 0) or 0, 2),
+        "discount": round(life.get("discount", 0) or 0, 2),
+        "visits": life.get("visits", 0) or 0,
+        "items": life.get("items", 0) or 0,
+        "aov": round((life.get("spend", 0) or 0) / (life.get("visits", 1) or 1), 2) if life.get("visits") else 0,
+        "first_purchase": life.get("first"),
+        "last_purchase": life.get("last"),
+    }
+
+    # Home store details
+    home_store = None
+    if customer.get("home_store_id"):
+        home_store = await stores_col.find_one({"id": customer["home_store_id"]}, {"_id": 0})
+
+    # Day-of-week + time-of-day patterns
+    pattern_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$project": {
+            "dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$bill_date"}}},
+            "hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}},
+        }},
+    ]
+    pattern_rows = await transactions_col.aggregate(pattern_pipe).to_list(1000)
+    weekday_n = sum(1 for r in pattern_rows if 2 <= r.get("dow", 0) <= 6)
+    weekend_n = sum(1 for r in pattern_rows if r.get("dow") in (1, 7))
+    if weekday_n == 0 and weekend_n == 0:
+        day_pattern = "—"
+    elif weekend_n == 0:
+        day_pattern = "weekday_only"
+    elif weekday_n == 0:
+        day_pattern = "weekend_only"
+    else:
+        day_pattern = "mixed"
+    # Time-of-day histogram
+    tod_buckets = {"morning": 0, "afternoon": 0, "evening": 0, "night": 0}
+    for r in pattern_rows:
+        h = r.get("hour", 0)
+        if 6 <= h < 12:
+            tod_buckets["morning"] += 1
+        elif 12 <= h < 17:
+            tod_buckets["afternoon"] += 1
+        elif 17 <= h < 21:
+            tod_buckets["evening"] += 1
+        else:
+            tod_buckets["night"] += 1
+    dominant_tod = max(tod_buckets, key=lambda k: tod_buckets[k]) if pattern_rows else "—"
+
+    customer.pop("password_hash", None)
+
+    return {
+        "customer": customer,
+        "home_store": home_store,
+        "lifetime": lifetime,
+        "rfm": {
+            "recency_days": recency_days,
+            "frequency": customer.get("visit_count", 0),
+            "monetary": round(customer.get("lifetime_spend", 0) or 0, 2),
+            "r": r_q, "f": f_q, "m": m_q,
+            "score": f"{r_q}{f_q}{m_q}",
+            "segment": segment,
+        },
+        "patterns": {
+            "day_pattern": day_pattern,
+            "weekday_visits": weekday_n,
+            "weekend_visits": weekend_n,
+            "time_of_day": tod_buckets,
+            "dominant_time_of_day": dominant_tod,
+        },
+        "monthly_spend": monthly,
+        "store_affinity": store_affinity,
+        "category_affinity": categories,
+        "recent_transactions": recent,
+        "points_ledger": ledger,
+        "nps_history": nps,
+    }
+
+
 async def _rfm_breakpoints() -> Dict[str, List[float]]:
     """Compute quintile breakpoints for R/F/M from the whole customer base (live)."""
     now = datetime.now(timezone.utc)

@@ -3,6 +3,7 @@ import api from "@/lib/api";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 import { Loader2, Send, Download, ChevronLeft, ChevronRight, Users, ArrowDownAZ } from "lucide-react";
+import CustomerDetailDrawer from "./_customer_drawer";
 
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
 const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
@@ -15,6 +16,7 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [sendOpen, setSendOpen] = useState(false);
+  const [drawerMobile, setDrawerMobile] = useState(null);
   const debounceRef = useRef(null);
   const navigate = useNavigate();
 
@@ -147,8 +149,13 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
           </thead>
           <tbody>
             {data && data.rows.map((r) => (
-              <tr key={r.id || r.mobile} className="border-b border-neutral-100 hover:bg-neutral-50" data-testid={`audience-row-${r.mobile}`}>
-                <td className="px-2 py-2 font-mono">{r.mobile || "—"}</td>
+              <tr
+                key={r.id || r.mobile}
+                className="border-b border-neutral-100 hover:bg-amber-50 cursor-pointer"
+                onClick={() => r.mobile && setDrawerMobile(r.mobile)}
+                data-testid={`audience-row-${r.mobile}`}
+              >
+                <td className="px-2 py-2 font-mono text-indigo-700 underline-offset-2 hover:underline">{r.mobile || "—"}</td>
                 <td className="px-2 py-2 truncate max-w-[180px]" title={r.name}>{r.name || <span className="text-neutral-400">—</span>}</td>
                 <td className="px-2 py-2 text-neutral-600">{r.city || "—"}</td>
                 <td className="px-2 py-2"><span className="inline-block px-1.5 py-0.5 bg-neutral-100 rounded text-[10px] uppercase">{r.tier || "—"}</span></td>
@@ -190,6 +197,13 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
           defaultName={segmentNameHint || ""}
           onClose={() => setSendOpen(false)}
           onConfirm={(name) => { setSendOpen(false); sendCampaign(name); }}
+        />
+      )}
+
+      {drawerMobile && (
+        <CustomerDetailDrawer
+          mobile={drawerMobile}
+          onClose={() => setDrawerMobile(null)}
         />
       )}
     </div>
