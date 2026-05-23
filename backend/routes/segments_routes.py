@@ -841,10 +841,15 @@ async def compile_tree(tree: Dict[str, Any], window: Optional[Dict[str, str]] = 
                        _depth: int = 0) -> Dict[str, Any]:
     """Translate a filter tree into a customer-collection match dict.
 
-    Returns a Mongo filter that can be passed directly to customers_col.find().
+    Accepts either a group ({op, rules}) or a single rule
+    ({field, operator, value}) at the root.
     """
     if _depth > 2:
         raise HTTPException(400, "Max 2 levels of nesting allowed")
+
+    # Allow callers to pass a bare rule at the root — wrap it in an AND group.
+    if tree and "field" in tree and "operator" in tree and "rules" not in tree:
+        tree = {"op": "AND", "rules": [tree]}
 
     op = (tree.get("op") or "AND").upper()
     if op not in ("AND", "OR"):

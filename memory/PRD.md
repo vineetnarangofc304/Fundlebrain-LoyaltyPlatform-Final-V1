@@ -31,6 +31,52 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 11.9 (May 2026) — ✅ Cohort Library (70 KAZO Loyalty Segments)
+
+User: *"U need to go deeper into cohorts and segments of loyalty… not visited in 3 months / 6 / 12 months, One Timer + Above ATV…"*
+
+**Backend** — new `routes/cohort_library.py`:
+- 70 hand-curated cohorts grouped into 12 categories
+- Each cohort = name + description + filter-tree builder closure
+- Endpoints under `/api/segments/cohort-library/`:
+  - `GET /` (optionally `?include_counts=true` for live tile counts) — returns the catalog grouped by category + system context (ATV, totals)
+  - `GET /{cohort_id}` — resolves a single cohort's filter tree with live ATV substituted
+  - `POST /{cohort_id}/preview` — full preview (count + reach + sample) for one cohort
+
+**Catalog categories**:
+- **Overall** (2): Loyalty Members · Zero Purchase
+- **One-Timer** (3): Overall · Above ATV · Below ATV
+- **One-Timer Recency × Spend** (18): 3 recency bands × 2 ATV bands × 3 day-patterns (weekday/weekend/any) — matching user's exact spec
+- **One-Timer Dormant** (2): 12-24m · 24+m
+- **Repeat** (3): Overall · Above ATV · Below ATV
+- **Repeat Frequency × Spend** (10): visit buckets 2-5/6-10/11-15/16-20/21+ × Above/Below ATV
+- **Repeat Dormant** (2): 12-24m · 24+m
+- **Recency** (5): 0-3m / 3-6m / 6-12m / 12-24m / 24+m
+- **Lifecycle Journey** (4): First-30d · First-90d · 2nd-visit milestone · Reactivated-after-gap
+- **Tier Strategy** (6): tier-by-tier + Gold/Platinum dormant 90d + Silver-high-visit-tier-upgrade-candidates
+- **Wallet & Points** (5): rich-never-redeemed · rich-heavy-burner · low-active · lifetime-1k-never-burned · 5k+ lifetime redeemed
+- **Birthday & Anniversary** (4): 30d / 7d / premium birthday / anniversary 30d
+- **Channel Reach** (4): WA-reachable / Email-reachable / Multi-channel / Opted-out
+- **Risk & Retention** (2): high-churn-risk / VIPs at risk 90+ days
+
+**Live ATV** is computed once per request from MongoDB (₹net / bill_count over all loyalty bills) and substituted into the description text + filter thresholds, so "Above ATV" always means the current system-wide average.
+
+**Compiler fix** — `compile_tree` now accepts a bare-rule at the root (auto-wraps in AND-group) so cohorts that return a single rule (e.g. recency, churn-risk) work end-to-end.
+
+**Frontend** — new `_cohort_library.jsx` component embedded as a 3rd column in `SegmentBuilderPage.jsx`:
+- Vertical scrollable list of expandable categories
+- Each cohort tile shows name + description (max 2 lines) + live count + "Use" button
+- Clicking "Use" loads the resolved filter tree into the AND/OR editor, fills the name field, and the live preview refreshes automatically
+- 4-column responsive layout: Library (1) | Filter editor + saved segments (2) | Live preview (1)
+
+**Verified on preview**:
+- `GET /cohort-library/?include_counts=true` returns 70 cohorts in 12 categories with live counts ✅
+- Counts sensible: ATV ₹1212, Silver = 39, Gold = 2, Platinum = 0, Recency 0-3m = 2, 3-6m = 2, 6-12m = 1, 12-24m = 3, 24+m = 19 ✅
+- Clicking "Use" on Recency 6-12m loads `Days since last visit between 181 to 365` into editor, live preview shows 1 matched (newmember · silver · 1v · ₹2,490), toast confirms load ✅
+- Python + JS lint clean
+
+**User next steps**: Redeploy → Marketing › Segment Builder → expand any category → click "Use" → tweak in the editor → Save segment.
+
 ### Iteration 11.8 (May 2026) — ✅ Campaign Manager · Segment Builder v2
 
 User asked: *"need to build a detailed exhaustive All Filter campaign manager that allows to dice slice data on every single parameter possible and create cohorts and segments also need to have AND and OR both option."*

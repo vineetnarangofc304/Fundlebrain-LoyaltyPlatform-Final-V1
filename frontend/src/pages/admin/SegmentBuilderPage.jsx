@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Sparkles, Save, RefreshCw, Trash2, Loader2 } from "lucide-react";
 import { PageHeader, SectionHeading, KPICard } from "./_shared";
 import { FilterGroup, newRule } from "./_segment_group";
+import CohortLibrary from "./_cohort_library";
 
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
 const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -93,7 +94,11 @@ export default function SegmentBuilderPage() {
       }
       return { kind: "rule", field: node.field, operator: node.operator, value: node.value };
     };
-    setRoot(wrap(s.tree));
+    let wrapped = wrap(s.tree);
+    if (wrapped.kind !== "group") {
+      wrapped = { kind: "group", op: "AND", rules: [wrapped] };
+    }
+    setRoot(wrapped);
     toast.success(`Loaded "${s.name}"`);
   };
 
@@ -127,7 +132,33 @@ export default function SegmentBuilderPage() {
         }
       />
 
-      <div className="p-4 md:p-8 grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="p-4 md:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
+        <div className="lg:col-span-1 space-y-4">
+          <div className="chart-card p-4" data-accent="amber">
+            <SectionHeading eyebrow="COHORT LIBRARY" title="Pre-built segments" accent="amber" />
+            <div className="mt-3">
+              <CohortLibrary
+                onLoad={({ name, tree }) => {
+                  const wrap = (node) => {
+                    if (!node) return { kind: "group", op: "AND", rules: [newRule()] };
+                    if (node.rules) {
+                      return { kind: "group", op: node.op || "AND", rules: node.rules.map(wrap) };
+                    }
+                    return { kind: "rule", field: node.field, operator: node.operator, value: node.value };
+                  };
+                  // Ensure root is always a group, wrap bare rule in AND-group
+                  let wrapped = wrap(tree);
+                  if (wrapped.kind !== "group") {
+                    wrapped = { kind: "group", op: "AND", rules: [wrapped] };
+                  }
+                  setRoot(wrapped);
+                  setSegmentName(name);
+                }}
+              />
+            </div>
+          </div>
+        </div>
+
         <div className="lg:col-span-2 space-y-4">
           <div className="chart-card p-5" data-accent="indigo">
             <SectionHeading eyebrow="FILTERS" title="Build your audience" accent="indigo" />
