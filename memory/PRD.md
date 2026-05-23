@@ -31,6 +31,49 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 12 (May 2026) — ✅ Customer 360 Drill-Down Drawer + Audience Table
+
+User: *"customer details should be fully drill-down clickable in the report, showing a nicely designed pop-up with full details."*
+
+**Backend** — new endpoint in `routes/fundlebrain_routes.py` (router prefix `/api/dashboard`):
+- `GET /dashboard/customer-by-mobile/{mobile}` returns a unified Customer 360 payload composed in a single async aggregation pass:
+  - `customer` — identity (name, email, mobile, city/state, gender, source, language, birthday, anniversary, card_validity)
+  - `home_store` — R2 home store resolved by `home_store_id` (name, code, city)
+  - `lifetime` — `{spend, gross, discount, visits, items, aov, first_purchase, last_purchase}` from txn rollup
+  - `rfm` — `{recency_days, frequency, monetary, r, f, m, score, segment}` (Champions / Loyal / At-Risk / etc.)
+  - `patterns` — `day_pattern` (weekday/weekend/mixed) + `dominant_time_of_day` (morning/afternoon/evening/night)
+  - `monthly_spend` — last 12-month trend (month, spend, visits)
+  - `store_affinity` — top stores by spend (name, code, city, spend, visits)
+  - `category_affinity` — top categories from `items[]` arrays on bills
+  - `recent_transactions` — last 20 bills (bill_number, bill_date, store_name, net/gross/discount, points earned/redeemed)
+  - `points_ledger` — last 20 earn/redeem/bonus entries with reason + bill_number
+  - `nps_history` — recent NPS responses (score, comment, created_at)
+
+Mobile normalization handles `+91`-prefixed and stripped formats. Returns 404 if customer not found, with detail.
+
+**Frontend** — new component `pages/admin/_customer_drawer.jsx` (331 lines):
+- Right-side slide-out (820px lg / 680px md / full-width mobile), backdrop dismisses
+- Sticky header: name + tier pill (platinum/gold/silver/bronze colour-coded) + RFM segment pill + mobile / email / city
+- 8-tile metric strip: Lifetime Spend · Bills · AOV · Points Balance · Lifetime Earned · Lifetime Redeemed · Recency · RFM Score
+- Tabbed sections: Overview · Transactions (count) · Points Ledger (count) · Stores & Categories · NPS (count)
+- Overview: 2-column identity + loyalty-journey fields + 32px monthly-spend mini-area chart
+- Transactions: compact table with bill, date, store, amount, discount, points earned/redeemed
+- Points Ledger: colour-coded earn (teal) / redeem (rose) / bonus (amber) entries
+- Stores & Categories: store-affinity list (with spend + visit count) + horizontal bar chart for category-affinity
+- NPS: per-response card with promoter/passive/detractor banding + comment + timestamp
+
+**Audience Table wire-up** — `_audience_table.jsx`:
+- Each row gets `data-testid="audience-row-{mobile}"` and click → sets `drawerMobile` state → drawer opens
+- Drawer is unmounted (`drawerMobile=null`) on close, freeing memory
+- All 25 rows per page are clickable; pagination preserved
+
+**Verified on preview**:
+- Curl `GET /api/dashboard/customer-by-mobile/966681235` returns full 11-section payload: 19 recent transactions, 10 ledger entries, 3 store affinities, 1 category, 2-month trend, home store `ITERATION10_TEST_OUTLET`, RFM `555/Champions` ✅
+- Curl with test customer `9266681235` returns gold-tier 5000-pt customer (no historical tx) — drawer renders empty-state messaging correctly ✅
+- Screenshot from previous session showed drawer rendering with all 8 metric chips populated, tabs functional, monthly chart drawn ✅
+
+**User next steps**: Marketing › Segment Builder → expand any cohort → click "Use" → audience table renders → click any customer row → 360 drawer slides in.
+
 ### Iteration 11.9 (May 2026) — ✅ Cohort Library (70 KAZO Loyalty Segments)
 
 User: *"U need to go deeper into cohorts and segments of loyalty… not visited in 3 months / 6 / 12 months, One Timer + Above ATV…"*
@@ -440,12 +483,16 @@ Both issues meant a malicious actor could empty any customer's wallet by manipul
 - [x] Idempotent seed of all 11 demo users on backend boot (2026-05-19)
 
 ### P1 — Next
-- [ ] **KAZO POS API integration** (Phase 2) — User to share KAZO POS API docs/Swagger/Postman. Will build: (a) push endpoints we expose for KAZO POS to call, (b) optional pull-scheduler that polls KAZO POS for live transactions, (c) reconciliation between live + historic.
+- [ ] **Campaign Manager send channels** — wire actual Email / WhatsApp / RCS sending via Karix from the Segment Builder "Send Campaign" CTA (currently navigates to Campaign Manager pre-filled but transmit is mocked)
+- [ ] **Refactor oversized route files**:
+  - `/app/backend/routes/pos_ewards_routes.py` (~1400 lines → split by domain: customer lookup, redemption, bill settlement, coupons, returns/wallet)
+  - `/app/backend/routes/fundlebrain_routes.py` (~1500 lines → split into rfm/cohort/customer360/store-perf/dashboard-utility modules)
+- [ ] **KAZO POS API integration** (Phase 2) — User to share KAZO POS API docs/Swagger/Postman if any additional endpoints beyond the 14 already mirrored
 - [ ] Wire optional email transport (Resend / SendGrid / Karix Email) for scheduled digest
-- [ ] CSV upload: support chunked >50 MB files via signed-URL streaming
 - [ ] Item Master + Points Ledger ingest variants (currently only customers/transactions/stores have row mappers)
 
 ### P2
+- [ ] Post-Ingest Auto-Report: Fundle Brain hook to auto-generate a narrative email summarising what changed in the database after a successful historical data upload
 - [ ] Drag-and-drop report builder, support bot, mobile app
 - [ ] Move AI insight cache to Redis (multi-worker)
 - [ ] Birthday / win-back / abandoned-visit auto-campaigns
