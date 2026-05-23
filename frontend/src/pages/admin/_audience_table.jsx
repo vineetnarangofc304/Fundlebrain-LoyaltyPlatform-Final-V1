@@ -2,12 +2,18 @@ import { useEffect, useState, useRef } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
-import { Loader2, Send, Download, ChevronLeft, ChevronRight, Users, ArrowDownAZ } from "lucide-react";
+import { Loader2, Send, Download, ChevronLeft, ChevronRight, Users, ArrowDownAZ, FileSpreadsheet, FileText, FileType2, ChevronDown } from "lucide-react";
 import CustomerDetailDrawer from "./_customer_drawer";
 
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
 const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const fmtDate = (s) => !s ? "—" : new Date(s).toLocaleDateString("en-IN", { year: "numeric", month: "short", day: "2-digit" });
+
+const EXPORT_FORMATS = [
+  { key: "csv",  label: "CSV (.csv)",   icon: FileText,        mime: "text/csv" },
+  { key: "xlsx", label: "Excel (.xlsx)", icon: FileSpreadsheet, mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+  { key: "pdf",  label: "PDF (.pdf)",   icon: FileType2,       mime: "application/pdf" },
+];
 
 export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved }) {
   const [page, setPage] = useState(1);
@@ -17,8 +23,23 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
   const [loading, setLoading] = useState(false);
   const [sendOpen, setSendOpen] = useState(false);
   const [drawerMobile, setDrawerMobile] = useState(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exporting, setExporting] = useState(null);  // 'csv' | 'xlsx' | 'pdf' | null
   const debounceRef = useRef(null);
+  const exportMenuRef = useRef(null);
   const navigate = useNavigate();
+
+  // Close export menu on outside click
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handler = (e) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [exportMenuOpen]);
 
   // Count of non-empty leaves
   const hasFilter = (() => {
@@ -73,26 +94,51 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
     }
   };
 
-  const exportCsv = () => {
-    if (!data || !data.rows.length) { toast.error("Nothing to export"); return; }
-    const headers = ["Mobile", "Name", "City", "Tier", "Bills", "Lifetime Spend", "Last Visit", "Points Balance", "Lifetime Earned", "Lifetime Redeemed"];
-    const lines = [headers.join(",")];
-    data.rows.forEach((r) => {
-      lines.push([
-        r.mobile || "", `"${(r.name || "").replace(/"/g, '""')}"`, r.city || "",
-        r.tier || "", r.visit_count || 0, r.lifetime_spend || 0,
-        r.last_visit_at ? r.last_visit_at.slice(0, 10) : "",
-        r.points_balance || 0, r.lifetime_points_earned || 0, r.lifetime_points_redeemed || 0,
-      ].join(","));
-    });
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `audience_${Date.now()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success(`Exported ${data.rows.length} rows (this page)`);
+  const exportFullReport = async (fmt) => {
+    if (!hasFilter) { toast.error("Build a filter first"); return; }
+    if (!data || data.total === 0) { toast.error("Nothing to export"); return; }
+    setExporting(fmt);
+    setExportMenuOpen(false);
+    const tid = toast.loading(`Preparing ${fmt.toUpperCase()} for ${fmtNum(data.total)} customers…`);
+    try {
+      const resp = await api.post("/segments/audience/export", {
+        tree,
+        sort_by: sort.by,
+        sort_dir: sort.dir,
+        format: fmt,
+        segment_name: (segmentNameHint || "audience").slice(0, 60),
+      }, { responseType: "blob", timeout: 300000 });
+      // Filename from Content-Disposition
+      const cd = resp.headers["content-disposition"] || resp.headers["Content-Disposition"] || "";
+      let filename = `audience_${Date.now()}.${fmt}`;
+      const m = /filename="?([^";]+)"?/.exec(cd);
+      if (m) filename = m[1];
+      const blob = new Blob([resp.data], { type: EXPORT_FORMATS.find(f => f.key === fmt)?.mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${fmtNum(data.total)} customers as ${fmt.toUpperCase()}`, { id: tid });
+    } catch (e) {
+      let msg = "Export failed";
+      // Blob error → try to read JSON detail
+      if (e.response?.data instanceof Blob) {
+        try {
+          const text = await e.response.data.text();
+          const parsed = JSON.parse(text);
+          msg = parsed.detail || msg;
+        } catch { msg = e.message || msg; }
+      } else {
+        msg = e.response?.data?.detail || e.message || msg;
+      }
+      toast.error(msg, { id: tid });
+    } finally {
+      setExporting(null);
+    }
   };
 
   if (!hasFilter) {
@@ -118,9 +164,49 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
           <div className="font-display text-2xl">{fmtNum(total)} <span className="text-sm font-normal text-neutral-500">matched customers</span></div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <button type="button" onClick={exportCsv} className="text-xs flex items-center gap-1 px-3 py-1.5 border border-neutral-300 rounded hover:bg-neutral-50" data-testid="audience-export">
-            <Download className="w-3.5 h-3.5" /> Export page
-          </button>
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              type="button"
+              onClick={() => setExportMenuOpen((o) => !o)}
+              disabled={!!exporting || !data || data.total === 0}
+              className="text-xs flex items-center gap-1 px-3 py-1.5 border border-neutral-300 rounded hover:bg-neutral-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              data-testid="audience-export"
+            >
+              {exporting ? (
+                <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Exporting {exporting.toUpperCase()}…</>
+              ) : (
+                <><Download className="w-3.5 h-3.5" /> Export full report <ChevronDown className="w-3 h-3" /></>
+              )}
+            </button>
+            {exportMenuOpen && (
+              <div
+                className="absolute right-0 mt-1 w-56 bg-white border border-neutral-200 rounded-md shadow-lg z-20 overflow-hidden"
+                data-testid="audience-export-menu"
+              >
+                <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-neutral-400 border-b border-neutral-100">
+                  Export {fmtNum(data?.total || 0)} matched
+                </div>
+                {EXPORT_FORMATS.map(({ key, label, icon: Icon }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => exportFullReport(key)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-amber-50 text-left"
+                    data-testid={`audience-export-${key}`}
+                  >
+                    <Icon className="w-3.5 h-3.5 text-neutral-500" />
+                    <span className="flex-1">{label}</span>
+                    <span className="text-[10px] text-neutral-400">full</span>
+                  </button>
+                ))}
+                {data?.total > 50000 && (
+                  <div className="px-3 py-1.5 text-[10px] text-amber-700 bg-amber-50 border-t border-amber-100">
+                    Large export — may take 10–60 seconds
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
           <button type="button" onClick={() => setSendOpen(true)} className="text-xs flex items-center gap-1 px-3 py-1.5 bg-neutral-900 text-white rounded hover:bg-neutral-800" data-testid="send-campaign-btn">
             <Send className="w-3.5 h-3.5" /> Send Campaign
           </button>

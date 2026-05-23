@@ -30,12 +30,15 @@ Filter tree shape (max 2 levels of nesting):
 """
 from __future__ import annotations
 
+import csv
+import io
 import re
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from auth import get_current_user, require_roles
@@ -250,6 +253,16 @@ class AudienceIn(BaseModel):
     page_size: int = 25
     sort_by: str = "lifetime_spend"  # or last_visit_at, visit_count, points_balance
     sort_dir: int = -1  # -1 desc, 1 asc
+
+
+class AudienceExportIn(BaseModel):
+    tree: Dict[str, Any]
+    window: Optional[Dict[str, str]] = None
+    sort_by: str = "lifetime_spend"
+    sort_dir: int = -1
+    format: str = "csv"  # csv | xlsx | pdf
+    segment_name: Optional[str] = None
+    max_rows: int = 200000  # hard cap
 
 
 class PreviewIn(BaseModel):
@@ -1072,6 +1085,271 @@ async def audience(body: AudienceIn, user: dict = Depends(get_current_user)):
         "pages": (total + page_size - 1) // page_size if page_size else 1,
         "rows": rows,
     }
+
+
+# ============================================================
+# Audience Export — full report in CSV / XLSX / PDF
+# ============================================================
+EXPORT_COLUMNS = [
+    ("mobile",                   "Mobile"),
+    ("name",                     "Name"),
+    ("email",                    "Email"),
+    ("city",                     "City"),
+    ("tier",                     "Tier"),
+    ("gender",                   "Gender"),
+    ("visit_count",              "Bills"),
+    ("lifetime_spend",           "Lifetime Spend"),
+    ("first_purchase_at",        "First Purchase"),
+    ("last_visit_at",            "Last Visit"),
+    ("points_balance",           "Points Balance"),
+    ("lifetime_points_earned",   "Lifetime Earned"),
+    ("lifetime_points_redeemed", "Lifetime Redeemed"),
+    ("churn_risk",               "Churn Risk"),
+    ("home_store_id",            "Home Store ID"),
+    ("birthday",                 "Birthday"),
+]
+
+EXPORT_PROJECTION = {"_id": 0, **{k: 1 for k, _ in EXPORT_COLUMNS}}
+
+
+def _fmt_export_cell(key: str, value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if key in {"first_purchase_at", "last_visit_at"}:
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        s = str(value)
+        return s[:10] if len(s) >= 10 else s
+    if key in {"lifetime_spend"}:
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+@router.post("/audience/export")
+async def audience_export(body: AudienceExportIn, user: dict = Depends(get_current_user)):
+    """Export the FULL audience (not just current page) as CSV, XLSX, or PDF.
+
+    - CSV streams row-by-row from MongoDB (constant memory).
+    - XLSX uses openpyxl write_only workbook (low memory for large sheets).
+    - PDF uses reportlab with a branded KAZO / Fundle header. For PDFs we cap
+      the table at the first 2000 rows for readability and append a footer
+      indicating how many rows were truncated.
+    """
+    fmt = (body.format or "csv").lower()
+    if fmt not in {"csv", "xlsx", "pdf"}:
+        raise HTTPException(400, "format must be csv, xlsx or pdf")
+
+    match = await compile_tree(body.tree, body.window)
+    allowed_sort = {"lifetime_spend", "last_visit_at", "visit_count",
+                    "points_balance", "first_purchase_at", "name"}
+    sort_by = body.sort_by if body.sort_by in allowed_sort else "lifetime_spend"
+    sort_dir = -1 if body.sort_dir == -1 else 1
+    max_rows = max(1, min(int(body.max_rows or 200000), 500000))
+
+    total_matched = await customers_col.count_documents(match)
+    seg_name = (body.segment_name or "audience").strip() or "audience"
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", seg_name)[:60] or "audience"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    cursor = (
+        customers_col.find(match, EXPORT_PROJECTION)
+        .sort(sort_by, sort_dir)
+        .limit(max_rows)
+    )
+
+    if fmt == "csv":
+        async def stream_csv():
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow([label for _, label in EXPORT_COLUMNS])
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+            async for doc in cursor:
+                writer.writerow([_fmt_export_cell(k, doc.get(k)) for k, _ in EXPORT_COLUMNS])
+                if buf.tell() > 32 * 1024:
+                    yield buf.getvalue()
+                    buf.seek(0)
+                    buf.truncate(0)
+            if buf.tell() > 0:
+                yield buf.getvalue()
+
+        filename = f"{safe_name}_{ts}.csv"
+        return StreamingResponse(
+            stream_csv(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    if fmt == "xlsx":
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Audience")
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill("solid", fgColor="3B1A2A")  # KAZO burgundy
+        # write_only doesn't support set_column widths easily; we set after
+        from openpyxl.cell import WriteOnlyCell
+        header_cells = []
+        for _, label in EXPORT_COLUMNS:
+            c = WriteOnlyCell(ws, value=label)
+            c.font = header_font
+            c.fill = header_fill
+            c.alignment = Alignment(horizontal="left", vertical="center")
+            header_cells.append(c)
+        ws.append(header_cells)
+        rows_written = 0
+        async for doc in cursor:
+            ws.append([_fmt_export_cell(k, doc.get(k)) for k, _ in EXPORT_COLUMNS])
+            rows_written += 1
+        # Column widths (write_only requires dimensions set explicitly)
+        widths = [14, 22, 26, 16, 10, 8, 8, 16, 14, 14, 12, 14, 14, 12, 24, 12]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.freeze_panes = "A2"
+
+        # Summary sheet
+        meta = wb.create_sheet("Summary")
+        meta.append(["KAZO · Fundle — Segment Audience Export"])
+        meta.append(["Segment", seg_name])
+        meta.append(["Generated", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")])
+        meta.append(["Generated by", user.get("email", "—")])
+        meta.append(["Total matched (DB)", total_matched])
+        meta.append(["Rows exported", rows_written])
+        if rows_written < total_matched:
+            meta.append(["Note", f"Truncated to first {rows_written} rows (cap {max_rows})."])
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        filename = f"{safe_name}_{ts}.xlsx"
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # PDF
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    )
+
+    PDF_TABLE_CAP = 2000  # readable cap; CSV/XLSX hold the full dump
+    pdf_cols = [
+        ("mobile", "Mobile", 22),
+        ("name", "Name", 38),
+        ("city", "City", 22),
+        ("tier", "Tier", 14),
+        ("visit_count", "Bills", 12),
+        ("lifetime_spend", "Spend", 22),
+        ("last_visit_at", "Last Visit", 22),
+        ("points_balance", "Points", 16),
+    ]
+
+    rows_collected: List[List[str]] = []
+    total_exported = 0
+    truncated_at = None
+    async for doc in cursor:
+        total_exported += 1
+        if len(rows_collected) < PDF_TABLE_CAP:
+            rows_collected.append([_fmt_export_cell(k, doc.get(k)) for k, _, _ in pdf_cols])
+        elif truncated_at is None:
+            truncated_at = PDF_TABLE_CAP
+
+    buf = io.BytesIO()
+    doc_pdf = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=14 * mm, rightMargin=14 * mm,
+        topMargin=14 * mm, bottomMargin=14 * mm,
+        title=f"KAZO Audience — {seg_name}",
+    )
+
+    styles = getSampleStyleSheet()
+    h_style = ParagraphStyle("h", parent=styles["Heading1"],
+                             fontName="Helvetica-Bold", fontSize=18,
+                             textColor=colors.HexColor("#3B1A2A"), spaceAfter=2)
+    sub_style = ParagraphStyle("sub", parent=styles["Normal"],
+                               fontName="Helvetica", fontSize=8,
+                               textColor=colors.HexColor("#6B7280"), spaceAfter=10)
+    meta_style = ParagraphStyle("meta", parent=styles["Normal"],
+                                fontName="Helvetica", fontSize=8.5,
+                                textColor=colors.HexColor("#1F2937"), spaceAfter=4)
+
+    story = []
+    story.append(Paragraph("KAZO · Audience Report", h_style))
+    story.append(Paragraph("Powered by Fundle · Real-time loyalty data", sub_style))
+    story.append(Paragraph(f"<b>Segment:</b> {seg_name}", meta_style))
+    story.append(Paragraph(
+        f"<b>Generated:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} &nbsp;·&nbsp; "
+        f"<b>By:</b> {user.get('email','—')}",
+        meta_style,
+    ))
+    story.append(Paragraph(
+        f"<b>Total matched customers:</b> {total_matched:,} &nbsp;·&nbsp; "
+        f"<b>Rows in this PDF:</b> {len(rows_collected):,} of {total_exported:,} exported",
+        meta_style,
+    ))
+    if truncated_at:
+        story.append(Paragraph(
+            f"<i>PDF table truncated to first {PDF_TABLE_CAP:,} rows for readability. "
+            f"Use CSV / XLSX for the full {total_exported:,}-row dataset.</i>",
+            sub_style,
+        ))
+    story.append(Spacer(1, 6))
+
+    header_row = [label for _, label, _ in pdf_cols]
+    table_data = [header_row] + rows_collected if rows_collected else [header_row, ["No customers matched the filter."] + [""] * (len(pdf_cols) - 1)]
+    col_widths = [w * mm for _, _, w in pdf_cols]
+    tbl = Table(table_data, repeatRows=1, colWidths=col_widths)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#3B1A2A")),
+        ("TEXTCOLOR",  (0, 0), (-1, 0), colors.whitesmoke),
+        ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE",   (0, 0), (-1, -1), 7.5),
+        ("ALIGN",      (4, 1), (4, -1), "RIGHT"),
+        ("ALIGN",      (5, 1), (5, -1), "RIGHT"),
+        ("ALIGN",      (7, 1), (7, -1), "RIGHT"),
+        ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAF7F4")]),
+        ("GRID",       (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING",   (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 3),
+    ]))
+    story.append(tbl)
+
+    def _footer(canvas, doc_):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#9CA3AF"))
+        canvas.drawString(
+            14 * mm, 8 * mm,
+            f"KAZO · Fundle · {seg_name} · Page {doc_.page}",
+        )
+        canvas.drawRightString(
+            doc_.pagesize[0] - 14 * mm, 8 * mm,
+            "Confidential — internal use only",
+        )
+        canvas.restoreState()
+
+    doc_pdf.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    buf.seek(0)
+    filename = f"{safe_name}_{ts}.pdf"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/")
