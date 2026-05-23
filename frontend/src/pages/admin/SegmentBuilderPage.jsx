@@ -1,13 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { Sparkles, Save, RefreshCw, Trash2, Loader2 } from "lucide-react";
-import { PageHeader, SectionHeading, KPICard } from "./_shared";
+import { PageHeader, SectionHeading } from "./_shared";
 import { FilterGroup, newRule } from "./_segment_group";
 import CohortLibrary from "./_cohort_library";
-
-const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
-const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+import AudienceTable from "./_audience_table";
 
 function compile(group) {
   const out = { op: group.op, rules: [] };
@@ -21,17 +19,29 @@ function compile(group) {
   return out;
 }
 
+function wrapTree(node) {
+  if (!node) return { kind: "group", op: "AND", rules: [newRule()] };
+  if (node.rules) {
+    return { kind: "group", op: node.op || "AND", rules: node.rules.map(wrapTree) };
+  }
+  return { kind: "rule", field: node.field, operator: node.operator, value: node.value };
+}
+
+function ensureGroupRoot(tree) {
+  let wrapped = wrapTree(tree);
+  if (wrapped.kind !== "group") wrapped = { kind: "group", op: "AND", rules: [wrapped] };
+  return wrapped;
+}
+
 export default function SegmentBuilderPage() {
   const [schema, setSchema] = useState(null);
   const [root, setRoot] = useState({ kind: "group", op: "AND", rules: [newRule()] });
-  const [preview, setPreview] = useState(null);
-  const [loadingPreview, setLoadingPreview] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState([]);
+  const [saving, setSaving] = useState(false);
   const [nameDialog, setNameDialog] = useState(false);
   const [segmentName, setSegmentName] = useState("");
   const [segmentDescription, setSegmentDescription] = useState("");
-  const debounceRef = useRef(null);
+  const [activeCohortName, setActiveCohortName] = useState("");
 
   useEffect(() => {
     api.get("/segments/filter-schema")
@@ -47,37 +57,15 @@ export default function SegmentBuilderPage() {
     } catch { /* ignore */ }
   };
 
-  const runPreview = async () => {
-    setLoadingPreview(true);
-    try {
-      const compiled = compile(root);
-      const r = await api.post("/segments/preview", { tree: compiled });
-      setPreview(r.data);
-    } catch (e) {
-      toast.error(e.response?.data?.detail || "Preview failed");
-    } finally {
-      setLoadingPreview(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!schema) return;
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(runPreview, 500);
-    return () => debounceRef.current && clearTimeout(debounceRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, schema]);
+  const compiledTree = useMemo(() => compile(root), [root]);
 
   const saveSegment = async () => {
     if (!segmentName.trim()) { toast.error("Name required"); return; }
     setSaving(true);
     try {
-      const compiled = compile(root);
-      await api.post("/segments/", { name: segmentName, description: segmentDescription, tree: compiled });
+      await api.post("/segments/", { name: segmentName, description: segmentDescription, tree: compiledTree });
       toast.success(`Segment "${segmentName}" saved`);
-      setNameDialog(false);
-      setSegmentName("");
-      setSegmentDescription("");
+      setNameDialog(false); setSegmentName(""); setSegmentDescription("");
       reloadSaved();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Save failed");
@@ -86,19 +74,16 @@ export default function SegmentBuilderPage() {
     }
   };
 
-  const loadSegment = (s) => {
-    const wrap = (node) => {
-      if (!node) return { kind: "group", op: "AND", rules: [newRule()] };
-      if (node.rules) {
-        return { kind: "group", op: node.op || "AND", rules: node.rules.map(wrap) };
-      }
-      return { kind: "rule", field: node.field, operator: node.operator, value: node.value };
-    };
-    let wrapped = wrap(s.tree);
-    if (wrapped.kind !== "group") {
-      wrapped = { kind: "group", op: "AND", rules: [wrapped] };
-    }
-    setRoot(wrapped);
+  const loadCohortIntoEditor = ({ name, tree }) => {
+    setRoot(ensureGroupRoot(tree));
+    setSegmentName(name);
+    setActiveCohortName(name);
+  };
+
+  const loadSavedSegment = (s) => {
+    setRoot(ensureGroupRoot(s.tree));
+    setSegmentName(s.name);
+    setActiveCohortName(s.name);
     toast.success(`Loaded "${s.name}"`);
   };
 
@@ -121,108 +106,64 @@ export default function SegmentBuilderPage() {
         title="Segment Builder"
         subtitle="CAMPAIGN MANAGER · COHORTS · AND/OR LOGIC"
         actions={
-          <>
-            <button onClick={runPreview} className="k-btn-outline flex items-center gap-2 text-xs" data-testid="recalc">
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingPreview ? "animate-spin" : ""}`} /> Recalc
-            </button>
-            <button onClick={() => setNameDialog(true)} className="k-btn flex items-center gap-2 text-xs" data-testid="save-segment">
-              <Save className="w-3.5 h-3.5" /> Save segment
-            </button>
-          </>
+          <button onClick={() => setNameDialog(true)} className="k-btn flex items-center gap-2 text-xs" data-testid="save-segment">
+            <Save className="w-3.5 h-3.5" /> Save segment
+          </button>
         }
       />
 
-      <div className="p-4 md:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
-        <div className="lg:col-span-1 space-y-4">
-          <div className="chart-card p-4" data-accent="amber">
-            <SectionHeading eyebrow="COHORT LIBRARY" title="Pre-built segments" accent="amber" />
-            <div className="mt-3">
-              <CohortLibrary
-                onLoad={({ name, tree }) => {
-                  const wrap = (node) => {
-                    if (!node) return { kind: "group", op: "AND", rules: [newRule()] };
-                    if (node.rules) {
-                      return { kind: "group", op: node.op || "AND", rules: node.rules.map(wrap) };
-                    }
-                    return { kind: "rule", field: node.field, operator: node.operator, value: node.value };
-                  };
-                  // Ensure root is always a group, wrap bare rule in AND-group
-                  let wrapped = wrap(tree);
-                  if (wrapped.kind !== "group") {
-                    wrapped = { kind: "group", op: "AND", rules: [wrapped] };
-                  }
-                  setRoot(wrapped);
-                  setSegmentName(name);
-                }}
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="lg:col-span-2 space-y-4">
-          <div className="chart-card p-5" data-accent="indigo">
-            <SectionHeading eyebrow="FILTERS" title="Build your audience" accent="indigo" />
-            <div className="mt-4">
-              <FilterGroup group={root} schema={schema} onChange={setRoot} />
+      <div className="p-4 md:p-8 space-y-6">
+        {/* Top row — library + editor side by side */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-1">
+            <div className="chart-card p-4" data-accent="amber">
+              <SectionHeading eyebrow="COHORT LIBRARY" title="Pre-built segments" accent="amber" />
+              <div className="mt-3">
+                <CohortLibrary onLoad={loadCohortIntoEditor} />
+              </div>
             </div>
           </div>
 
-          <div className="chart-card p-5" data-accent="slate">
-            <SectionHeading eyebrow="SAVED SEGMENTS" title="Reusable cohorts" accent="slate" />
-            {saved.length === 0 && <div className="text-xs text-neutral-500 mt-3">No saved segments yet</div>}
-            <div className="mt-3 space-y-2">
-              {saved.map((s) => (
-                <div key={s.id} className="flex items-center justify-between p-3 border border-neutral-200 rounded-md hover:border-neutral-900 transition" data-testid={`saved-${s.id}`}>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">{s.name}</div>
-                    {s.description && <div className="text-xs text-neutral-500 truncate">{s.description}</div>}
-                    <div className="text-[11px] text-neutral-400 mt-1">
-                      {fmtNum(s.matched_total)} matched · {fmtNum(s.reach && s.reach.whatsapp)} WA · {fmtNum(s.reach && s.reach.sms)} SMS · {s.created_by_name || s.created_by}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 ml-3 shrink-0">
-                    <button type="button" onClick={() => loadSegment(s)} className="text-xs px-2 py-1 border border-neutral-300 rounded hover:bg-neutral-50" data-testid={`load-${s.id}`}>Load</button>
-                    <button type="button" onClick={() => deleteSegment(s)} className="text-xs px-2 py-1 text-rose-600 hover:bg-rose-50 rounded" data-testid={`delete-${s.id}`}>
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
+          <div className="lg:col-span-2 space-y-4">
+            <div className="chart-card p-5" data-accent="indigo">
+              <SectionHeading eyebrow={activeCohortName ? `EDITING · ${activeCohortName}` : "FILTERS"} title="Build your audience" accent="indigo" />
+              <div className="mt-4">
+                <FilterGroup group={root} schema={schema} onChange={setRoot} />
+              </div>
             </div>
-          </div>
-        </div>
 
-        <div className="space-y-4">
-          <div className="chart-card p-5 lg:sticky lg:top-4" data-accent="burgundy">
-            <SectionHeading eyebrow="LIVE PREVIEW" title="Audience snapshot" accent="burgundy" />
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              <KPICard label="Matched" value={fmtNum(preview && preview.matched_total)} accent="burgundy" testid="kpi-matched" />
-              <KPICard label="WhatsApp" value={fmtNum(preview && preview.reach && preview.reach.whatsapp)} accent="teal" testid="kpi-wa" />
-              <KPICard label="SMS" value={fmtNum(preview && preview.reach && preview.reach.sms)} accent="indigo" testid="kpi-sms" />
-              <KPICard label="Email" value={fmtNum(preview && preview.reach && preview.reach.email)} accent="slate" testid="kpi-email" />
-            </div>
-            {preview && preview.reach && preview.reach.opted_out > 0 && (
-              <div className="text-xs text-amber-700 mt-3">⚠ {fmtNum(preview.reach.opted_out)} opted out — excluded from sends</div>
-            )}
-
-            {preview && preview.sample && preview.sample.length > 0 && (
-              <div className="mt-5">
-                <div className="text-[10px] uppercase tracking-widest text-neutral-500 mb-2">SAMPLE MATCHES</div>
-                <div className="space-y-1">
-                  {preview.sample.map((c) => (
-                    <div key={c.id} className="text-xs flex items-center justify-between p-1.5 hover:bg-neutral-50 rounded">
-                      <div>
-                        <div className="font-medium truncate">{c.name || c.mobile}</div>
-                        <div className="text-neutral-500">{c.tier} · {c.visit_count}v · {fmtINR(c.lifetime_spend)}</div>
+            <div className="chart-card p-5" data-accent="slate">
+              <SectionHeading eyebrow="SAVED SEGMENTS" title="Reusable cohorts" accent="slate" />
+              {saved.length === 0 && <div className="text-xs text-neutral-500 mt-3">No saved segments yet</div>}
+              <div className="mt-3 space-y-2">
+                {saved.map((s) => (
+                  <div key={s.id} className="flex items-center justify-between p-3 border border-neutral-200 rounded-md hover:border-neutral-900 transition" data-testid={`saved-${s.id}`}>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{s.name}</div>
+                      {s.description && <div className="text-xs text-neutral-500 truncate">{s.description}</div>}
+                      <div className="text-[11px] text-neutral-400 mt-1">
+                        {(s.matched_total ?? 0).toLocaleString("en-IN")} matched · {(s.reach && s.reach.whatsapp || 0).toLocaleString("en-IN")} WA · {s.created_by_name || s.created_by}
                       </div>
                     </div>
-                  ))}
-                </div>
+                    <div className="flex items-center gap-1 ml-3 shrink-0">
+                      <button type="button" onClick={() => loadSavedSegment(s)} className="text-xs px-2 py-1 border border-neutral-300 rounded hover:bg-neutral-50" data-testid={`load-${s.id}`}>Load</button>
+                      <button type="button" onClick={() => deleteSegment(s)} className="text-xs px-2 py-1 text-rose-600 hover:bg-rose-50 rounded" data-testid={`delete-${s.id}`}>
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
-            )}
-            <div className="text-[10px] text-neutral-400 mt-3 italic">Preview updates 500ms after the last edit. Click <strong>Save segment</strong> to persist.</div>
+            </div>
           </div>
         </div>
+
+        {/* Audience table — full width below */}
+        <AudienceTable
+          tree={compiledTree}
+          segmentNameHint={segmentName || activeCohortName}
+          onSegmentSaved={reloadSaved}
+        />
       </div>
 
       {nameDialog && (

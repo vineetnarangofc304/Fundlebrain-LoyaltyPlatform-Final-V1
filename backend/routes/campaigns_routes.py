@@ -53,7 +53,7 @@ async def preview_audience(campaign_id: str, user: dict = Depends(get_current_us
     c = await campaigns_col.find_one({"id": campaign_id}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Campaign not found")
-    fil = _audience_filter(c)
+    fil = await _audience_filter_async(c)
     total = await customers_col.count_documents(fil)
     sample = await customers_col.find(fil, {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1}).limit(20).to_list(20)
     return {"total_audience": total, "sample": sample}
@@ -61,6 +61,10 @@ async def preview_audience(campaign_id: str, user: dict = Depends(get_current_us
 
 def _audience_filter(c: dict) -> dict:
     fil = {}
+    # NEW: segment-builder audience — compile the saved segment's filter tree
+    if c.get("audience_type") == "segment" and (c.get("audience_filter") or {}).get("segment_id"):
+        # Compiled-tree lookup happens at launch via async helper below
+        return {}
     af = c.get("audience_filter") or {}
     if c.get("audience_type") == "tier" and af.get("tier"):
         fil["tier"] = af["tier"]
@@ -79,6 +83,20 @@ def _audience_filter(c: dict) -> dict:
     return fil
 
 
+async def _audience_filter_async(c: dict) -> dict:
+    """Resolves audience filter — including segment-builder segments which
+    require compiling a tree via segments_routes.compile_tree."""
+    if c.get("audience_type") == "segment":
+        seg_id = (c.get("audience_filter") or {}).get("segment_id")
+        if seg_id:
+            from database import db as _db
+            from routes.segments_routes import compile_tree
+            seg = await _db["segments"].find_one({"id": seg_id}, {"_id": 0})
+            if seg:
+                return await compile_tree(seg["tree"])
+    return _audience_filter(c)
+
+
 @router.post("/{campaign_id}/launch")
 async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
     c = await campaigns_col.find_one({"id": campaign_id}, {"_id": 0})
@@ -86,7 +104,7 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
         raise HTTPException(404, "Campaign not found")
     if c["status"] not in ("draft", "scheduled"):
         raise HTTPException(400, f"Campaign already {c['status']}")
-    fil = _audience_filter(c)
+    fil = await _audience_filter_async(c)
     audience_size = await customers_col.count_documents(fil)
     # Simulate sending metrics (in real system this connects to WhatsApp/SMS gateway)
     sent = audience_size

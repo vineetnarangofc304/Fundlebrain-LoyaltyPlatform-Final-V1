@@ -243,6 +243,15 @@ class FilterGroup(BaseModel):
     rules: List[Any] = Field(default_factory=list)  # Rule or FilterGroup
 
 
+class AudienceIn(BaseModel):
+    tree: Dict[str, Any]
+    window: Optional[Dict[str, str]] = None
+    page: int = 1
+    page_size: int = 25
+    sort_by: str = "lifetime_spend"  # or last_visit_at, visit_count, points_balance
+    sort_dir: int = -1  # -1 desc, 1 asc
+
+
 class PreviewIn(BaseModel):
     tree: Dict[str, Any]
     # Optional global windows applied to "windowed_count" fields
@@ -1026,6 +1035,43 @@ async def _compute_preview(tree: Dict[str, Any], window: Optional[Dict[str, str]
 async def preview(body: PreviewIn, user: dict = Depends(get_current_user)):
     """Live preview — count + reach breakdown + 5 sample customers."""
     return await _compute_preview(body.tree, body.window)
+
+
+@router.post("/audience")
+async def audience(body: AudienceIn, user: dict = Depends(get_current_user)):
+    """Rich paginated audience list for the cohort/filter editor.
+
+    Returns full customer rows: mobile, name, city, tier, visit_count,
+    lifetime_spend, last_visit_at, points_balance, home_store_id, etc.
+    """
+    match = await compile_tree(body.tree, body.window)
+    page = max(1, body.page)
+    page_size = max(1, min(body.page_size, 200))
+    skip = (page - 1) * page_size
+
+    total = await customers_col.count_documents(match)
+
+    allowed_sort = {"lifetime_spend", "last_visit_at", "visit_count",
+                     "points_balance", "first_purchase_at", "name"}
+    sort_by = body.sort_by if body.sort_by in allowed_sort else "lifetime_spend"
+    sort_dir = -1 if body.sort_dir == -1 else 1
+
+    rows = await customers_col.find(
+        match,
+        {"_id": 0, "id": 1, "mobile": 1, "name": 1, "city": 1, "tier": 1,
+         "visit_count": 1, "lifetime_spend": 1, "last_visit_at": 1,
+         "first_purchase_at": 1, "points_balance": 1, "lifetime_points_earned": 1,
+         "lifetime_points_redeemed": 1, "home_store_id": 1, "churn_risk": 1,
+         "email": 1, "gender": 1, "birthday": 1}
+    ).sort(sort_by, sort_dir).skip(skip).limit(page_size).to_list(page_size)
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": (total + page_size - 1) // page_size if page_size else 1,
+        "rows": rows,
+    }
 
 
 @router.post("/")

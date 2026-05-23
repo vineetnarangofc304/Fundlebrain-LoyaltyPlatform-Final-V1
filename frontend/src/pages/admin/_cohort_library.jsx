@@ -18,11 +18,15 @@ export default function CohortLibrary({ onLoad }) {
   const loadCatalog = async () => {
     setLoading(true);
     try {
-      // Fast path: no counts. Counts are loaded lazily per category on expand.
       const r = await api.get("/segments/cohort-library/");
       setData(r.data);
-      // All categories start COLLAPSED — user picks what to open.
       setOpenCats({});
+      // Fire off batched count loads for ALL categories so each tile shows
+      // its count even when collapsed. Per category timeout & failure is
+      // handled gracefully by the backend (-1 = unknown).
+      for (const cat of r.data.categories) {
+        fetchCountsFor(cat);
+      }
     } catch (e) {
       toast.error(e.response?.data?.detail || "Failed to load cohort library");
     } finally {
@@ -83,6 +87,11 @@ export default function CohortLibrary({ onLoad }) {
         {data.categories.map((cat) => {
           const open = !!openCats[cat.name];
           const status = catCountStatus[cat.name];
+          // Sum of counts for this category — display next to title
+          const catTotal = cat.cohorts.reduce((s, c) => {
+            const n = counts[c.id];
+            return n > 0 ? s + n : s;
+          }, 0);
           return (
             <div key={cat.name} className="border border-neutral-200 rounded">
               <button
@@ -91,40 +100,45 @@ export default function CohortLibrary({ onLoad }) {
                 className="w-full flex items-center justify-between px-3 py-2 hover:bg-neutral-50"
                 data-testid={`cohort-cat-${cat.name.replace(/\s+/g, "-").toLowerCase()}`}
               >
-                <div className="text-left">
+                <div className="text-left flex-1 min-w-0">
                   <div className="text-[11px] uppercase tracking-widest text-neutral-700">{cat.name}</div>
-                  <div className="text-[10px] text-neutral-400">{cat.cohorts.length} cohorts{status === "loading" ? " · counting…" : ""}</div>
+                  <div className="text-[10px] text-neutral-400">
+                    {cat.cohorts.length} cohorts{status === "loading" ? " · counting…" : ""}
+                  </div>
                 </div>
+                {catTotal > 0 && (
+                  <div className="text-[10px] text-amber-700 font-medium mr-2 whitespace-nowrap" data-testid={`cat-total-${cat.name.replace(/\s+/g, "-").toLowerCase()}`}>
+                    Σ {fmtNum(catTotal)}
+                  </div>
+                )}
                 {open ? <ChevronDown className="w-3.5 h-3.5 text-neutral-400" /> : <ChevronRight className="w-3.5 h-3.5 text-neutral-400" />}
               </button>
               {open && (
                 <div className="border-t border-neutral-100 p-2 space-y-1">
                   {cat.cohorts.map((c) => {
                     const matched = counts[c.id];
+                    const has = matched != null && matched >= 0;
                     return (
                       <div
                         key={c.id}
-                        className="flex items-start justify-between gap-2 p-2 rounded hover:bg-neutral-50"
+                        onClick={() => loadCohort(c)}
+                        className="flex items-start gap-2 p-2 rounded hover:bg-amber-50 cursor-pointer border border-transparent hover:border-amber-300 transition"
                         data-testid={`cohort-${c.id}`}
                       >
                         <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium truncate">{c.name}</div>
-                          <div className="text-[11px] text-neutral-500 line-clamp-2">{c.description}</div>
-                          <div className="text-[10px] text-neutral-400 mt-0.5">
-                            {status === "loading" && matched === undefined
-                              ? <Loader2 className="w-3 h-3 animate-spin inline" />
-                              : `${fmtNum(matched)} matched`}
+                          <div className="text-sm font-medium truncate flex items-center gap-2">
+                            {c.name}
+                            {busyId === c.id && <Loader2 className="w-3 h-3 animate-spin text-amber-600" />}
                           </div>
+                          <div className="text-[11px] text-neutral-500 line-clamp-2">{c.description}</div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => loadCohort(c)}
-                          disabled={busyId === c.id}
-                          className="text-[11px] px-2 py-1 border border-neutral-300 rounded hover:bg-neutral-900 hover:text-white transition disabled:opacity-50 shrink-0"
-                          data-testid={`load-cohort-${c.id}`}
-                        >
-                          {busyId === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "Use"}
-                        </button>
+                        {/* PROMINENT count badge on the right */}
+                        <div className="text-right shrink-0 pl-2">
+                          <div className={`font-display text-lg leading-none ${has && matched > 0 ? "text-neutral-900" : "text-neutral-300"}`}>
+                            {has ? fmtNum(matched) : <Loader2 className="w-4 h-4 animate-spin inline text-neutral-300" />}
+                          </div>
+                          <div className="text-[9px] uppercase tracking-widest text-neutral-400 mt-0.5">matched</div>
+                        </div>
                       </div>
                     );
                   })}

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
 import { toast } from "sonner";
 import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
-import { Plus, Play } from "lucide-react";
+import { Plus, Play, Sparkles } from "lucide-react";
 
 const CHANNELS = ["whatsapp", "sms", "email", "push", "in_app"];
 
@@ -11,6 +12,7 @@ export default function CampaignManager() {
   const [items, setItems] = useState([]);
   const [show, setShow] = useState(false);
   const [coupons, setCoupons] = useState([]);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [form, setForm] = useState({
     name: "", description: "", channels: ["whatsapp"], audience_type: "all",
     audience_filter: {}, message_template: "", coupon_code: "", status: "draft",
@@ -22,6 +24,24 @@ export default function CampaignManager() {
     setCoupons(co.data);
   };
   useEffect(() => { load(); }, []);
+
+  // Prefill from Segment Builder
+  useEffect(() => {
+    const segmentId = searchParams.get("segment_id");
+    const segmentName = searchParams.get("segment_name");
+    if (segmentId) {
+      setForm((f) => ({
+        ...f,
+        name: segmentName ? `Campaign · ${segmentName}` : f.name,
+        audience_type: "segment",
+        audience_filter: { segment_id: segmentId, segment_name: segmentName },
+      }));
+      setShow(true);
+      // Clear the params from URL so reload doesn't re-fire
+      setSearchParams({}, { replace: true });
+      toast.info(`Campaign prefilled with segment "${segmentName || segmentId}"`);
+    }
+  }, [searchParams, setSearchParams]);
 
   const toggleChannel = (ch) => {
     setForm((f) => ({ ...f, channels: f.channels.includes(ch) ? f.channels.filter(x => x !== ch) : [...f.channels, ch] }));
@@ -95,10 +115,17 @@ export default function CampaignManager() {
               <div className="grid grid-cols-2 gap-3">
                 <select className="k-input" value={form.audience_type} onChange={(e) => setForm({ ...form, audience_type: e.target.value, audience_filter: {} })} data-testid="audience-type-select">
                   <option value="all">Entire base</option>
+                  <option value="segment">From Segment Builder</option>
                   <option value="tier">By tier</option>
                   <option value="city">By city</option>
                   <option value="cohort">By cohort</option>
                 </select>
+                {form.audience_type === "segment" && (
+                  <div className="k-input flex items-center gap-2 bg-amber-50 border-amber-300">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                    <span className="text-xs font-medium">{form.audience_filter?.segment_name || form.audience_filter?.segment_id || "No segment selected"}</span>
+                  </div>
+                )}
                 {form.audience_type === "tier" && (
                   <select className="k-input" value={form.audience_filter?.tier || ""} onChange={(e) => setForm({ ...form, audience_filter: { tier: e.target.value } })}>
                     <option value="">Select tier</option>
