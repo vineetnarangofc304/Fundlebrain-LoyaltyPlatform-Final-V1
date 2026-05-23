@@ -34,6 +34,7 @@ export default function TransactionDataReport() {
 
   const load = async (override = filters) => {
     setLoading(true);
+    setData(null);
     try {
       const r = await api.post("/raw-reports/transaction-data", override);
       setData(r.data);
@@ -95,6 +96,7 @@ export default function TransactionDataReport() {
         rows={data?.rows || []}
         totals={data ? { group_key: "TOTAL", ...data.totals } : null}
         onCellClick={(c, r) => setDrill({ group_key: r.group_key, metric: c.key })}
+        loading={loading}
       />
 
       <NarrativeCard report="transaction-data" group_by={filters.group_by}

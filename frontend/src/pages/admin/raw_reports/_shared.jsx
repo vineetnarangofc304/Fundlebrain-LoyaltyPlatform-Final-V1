@@ -302,7 +302,7 @@ export function ExportMenu({ report, group_by, columns, rows, totals }) {
  * Sortable / searchable / paginated table
  * EVERY numeric cell is drill-down clickable when onCellClick is set.
  * ============================================================ */
-export function ReportTable({ columns, rows, totals, onCellClick, defaultSort, multiHeader }) {
+export function ReportTable({ columns, rows, totals, onCellClick, defaultSort, multiHeader, loading }) {
   const [sort, setSort] = useState(defaultSort || { key: null, dir: -1 });
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -339,8 +339,12 @@ export function ReportTable({ columns, rows, totals, onCellClick, defaultSort, m
   return (
     <div className="bg-white border border-neutral-200 rounded-lg overflow-hidden" data-testid="report-table">
       <div className="px-4 py-2.5 border-b border-neutral-100 flex items-center justify-between gap-2 flex-wrap">
-        <div className="text-xs text-neutral-500">
-          {fmtNum(sorted.length)} rows {search && `(filtered from ${fmtNum(rows.length)})`}
+        <div className="text-xs text-neutral-500 flex items-center gap-2">
+          {loading ? (
+            <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading data…</>
+          ) : (
+            <>{fmtNum(sorted.length)} rows {search && `(filtered from ${fmtNum(rows.length)})`}</>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <div className="relative">
@@ -386,6 +390,18 @@ export function ReportTable({ columns, rows, totals, onCellClick, defaultSort, m
             )}
           </thead>
           <tbody>
+            {loading && pageRows.length === 0 && (
+              // Skeleton rows so user sees the table "reacting" to filter changes
+              [0, 1, 2, 3, 4].map((i) => (
+                <tr key={`sk-${i}`} className="border-t border-neutral-100" data-testid={`skeleton-row-${i}`}>
+                  {columns.map((c) => (
+                    <td key={c.key} className="px-3 py-2.5">
+                      <div className="h-3 bg-neutral-100 rounded animate-pulse" style={{ width: c.align === "right" ? "60%" : "80%", marginLeft: c.align === "right" ? "auto" : 0 }} />
+                    </td>
+                  ))}
+                </tr>
+              ))
+            )}
             {pageRows.map((r, i) => (
               <tr key={i} className="border-t border-neutral-100 hover:bg-amber-50/30" data-testid={`row-${i}`}>
                 {columns.map((c) => {
@@ -414,7 +430,7 @@ export function ReportTable({ columns, rows, totals, onCellClick, defaultSort, m
                 })}
               </tr>
             ))}
-            {pageRows.length === 0 && (
+            {!loading && pageRows.length === 0 && (
               <tr><td colSpan={columns.length} className="text-center py-8 text-neutral-400 italic">No data</td></tr>
             )}
             {totals && pageRows.length > 0 && (

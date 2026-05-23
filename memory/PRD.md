@@ -31,6 +31,58 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 14.1 (May 2026) — ✅ Raw Reports v2 · Column Picker · Auto-Refetch · Loading Skeletons · Month Bug Fix
+
+User feedback after v1: *"drill downs necessary in all these report.. also should provide all relevant columns so that user can add delete columns not single column reports.. month etc filters not working.. it only shows store data.. AI insight could come post data coming on screen as it starts getting AI insight and takes time while data also does not load."*
+
+**4 bugs/UX gaps fixed in one batch (testing agent: backend 22/22 pass)**:
+
+#### 1) ✅ Month / Tier / State / Zone grouping now actually works
+- **Root cause**: `bill_date` and `first_purchase_at` are stored as ISO strings (from CSV ingest) but the previous code used `{"$dateToString": {"date": "$bill_date"}}` — which throws `"can't convert from BSON type string to Date"` and returns empty rows, silently falling back to a stale "location" view for the user.
+- **Fix**: introduced `_MONTH_KEY_TXN` and `_MONTH_KEY_CUST_FIRST` expressions that branch on `$type` — `$substr` for strings, `$dateToString` for native dates. Same `$or` clause applied to date-range matches so a string-stored bill_date still satisfies `$gte / $lte` filtering.
+- **Verified**: testing agent confirmed `customer_data?group_by=month` returns YYYY-MM buckets distinct from `?group_by=location` rows.
+
+#### 2) ✅ Every report now has ALL relevant columns + a Columns picker
+
+Backend enriched per report:
+- **Customer Data**: 14 columns — total_customers · total_bills · repeat_customers · one_timer_customers · repeat_pct · total_purchase · avg_lifetime_spend · avg_bills_per_customer · total_earn_points · total_lifetime_spend · total_lifetime_points_earned · total_points_balance · avg_visit_count
+- **Transaction Data**: 10 columns — adds total_gross_purchase · total_discount · discount_pct · avg_bill_value (AOV) · avg_customer_spend
+- **Earn-Redeem**: 9 columns — adds gross_points_earned · redemption_rate_pct
+- **Customers by Visit**: 5 columns — adds total_purchase · avg_customer_spend per visit-bucket
+- **Repeat Purchases**: 14 columns kept (already exhaustive)
+
+Frontend `ColumnPicker` component (`_shared.jsx`):
+- Floating dropdown menu triggered by `[data-testid="column-picker-btn"]` ("Columns (7/14)" label)
+- Per-column checkbox toggle with `Check` icon
+- `requiredKeys` lock essential cols (group_key, sno) so they can't be hidden
+- Each toggle is `[data-testid="col-toggle-{key}"]`
+- Repeat Purchases dynamically rebuilds its 3-tier multi-header from whichever Purchase/Repeat-Total/Current/Earlier columns are currently visible — toggle a whole segment off and the header collapses cleanly
+
+#### 3) ✅ Drill-down available on every numeric cell across all 5 reports
+- `ReportTable` now auto-renders ANY numeric cell as a drill-down button (underlined dotted, KAZO burgundy) when `onCellClick` prop is supplied — no per-column wiring needed
+- `DrillModal` opens with the same `/raw-reports/drill` endpoint passing `{report, group_by, group_key, metric, visits, filters}` so the underlying customer list reflects the exact cell context (e.g. clicking "Repeat Customers" for a specific store shows ONLY repeat customers there)
+- Each modal row click opens the existing **Customer 360 drawer** — same drill-down experience as in Segment Builder
+
+#### 4) ✅ AI Insights no longer block data render
+- `NarrativeCard` moved to **bottom of the page** (after table, after totals)
+- `useEffect` debounced 1000ms so the report data renders FIRST, then the LLM call kicks in
+- Replaced "Analyzing your data…" centered placeholder with a small inline "Fundle Brain is reading your data…" pill
+- Loading is silently swallowed on error — narrative is non-critical, never blocks the rest of the page
+
+#### 5) ✅ Auto-refetch on report-type pill / extra-filter changes
+- `FilterBar` now accepts a 2nd arg to `onChange(newFilters, autoRefetch=true)` — pill buttons pass `true`, date inputs pass `false`
+- Each report wires this to a 250ms debounced `load(overrideFilters)` call
+- `Customers by Visit` extends the auto-refetch to Tier + Location dropdowns
+
+#### 6) ✅ Loading skeletons fix the "month filter not working" perception
+- `ReportTable` accepts `loading` prop; when `loading && rows.length === 0` it renders 5 animated skeleton rows with pulsing bars matching column widths
+- Each report's `load()` now does `setData(null)` BEFORE fetching → user sees the skeleton instead of stale data while the new request flies
+- Header shows "Loading data…" with spinner instead of "0 rows"
+
+**Testing**: `/app/test_reports/iteration_12.json` — backend 22/22 pass (all 5 group_by options verified distinct; drill-modal for all 5 reports verified; exports for all 3 formats verified). Frontend tested via screenshot — Month pill + 5 skeleton rows + Columns (7/14) picker all visible.
+
+**User next steps**: Redeploy → Data › Raw Data Reports → pick a Group radio (Month/Tier/etc.) → data swaps instantly with skeleton flash; click any numeric cell → drill modal; click Columns dropdown → add/hide fields. Share more report specs to extend the section.
+
 ### Iteration 14 (May 2026) — ✅ Raw Data Reports (5 high-density operational reports)
 
 User: *"need some raw data reports in a new section.. with all filters all sorting,, graphs and drill downs.. nicely AI curated Raw data reports.....see attached screenshots as samples"*

@@ -38,6 +38,8 @@ export default function CustomerDataReport() {
 
   const load = async (override = filters) => {
     setLoading(true);
+    // Clear data so user sees an explicit loading state — fixes "month filter not working" perception
+    setData(null);
     try {
       const r = await api.post("/raw-reports/customer-data", override);
       setData(r.data);
@@ -101,6 +103,7 @@ export default function CustomerDataReport() {
         rows={data?.rows || []}
         totals={data ? { group_key: "TOTAL", ...data.totals } : null}
         onCellClick={(c, r) => setDrill({ group_key: r.group_key, metric: c.key })}
+        loading={loading}
       />
 
       <NarrativeCard report="customer-data" group_by={filters.group_by}

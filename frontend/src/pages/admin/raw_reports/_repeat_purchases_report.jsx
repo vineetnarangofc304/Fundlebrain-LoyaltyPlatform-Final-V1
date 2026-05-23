@@ -42,6 +42,7 @@ export default function RepeatPurchasesReport() {
 
   const load = async (override = filters) => {
     setLoading(true);
+    setData(null);
     try {
       const r = await api.post("/raw-reports/repeat-purchases", override);
       setData(r.data);
@@ -152,6 +153,7 @@ export default function RepeatPurchasesReport() {
         totals={data ? { sno: "", group_key: "TOTAL", ...data.totals } : null}
         multiHeader={multiHeader}
         onCellClick={(c, r) => setDrill({ group_key: r.group_key, metric: c.key })}
+        loading={loading}
       />
 
       <NarrativeCard report="repeat-purchases" group_by={filters.group_by}

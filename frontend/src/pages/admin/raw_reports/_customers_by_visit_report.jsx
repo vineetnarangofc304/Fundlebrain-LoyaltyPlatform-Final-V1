@@ -40,6 +40,7 @@ export default function CustomersByVisitReport() {
 
   const load = async (override = filters) => {
     setLoading(true);
+    setData(null);
     try {
       const r = await api.post("/raw-reports/customers-by-visit", override);
       setData(r.data);
@@ -113,6 +114,7 @@ export default function CustomersByVisitReport() {
         totals={data ? { sno: "TOTAL", visits: data.totals.visits, total_customers: data.totals.total_customers,
                           total_purchase: data.totals.total_purchase, avg_customer_spend: data.totals.avg_customer_spend } : null}
         onCellClick={(c, r) => setDrill({ group_key: `${r.visits} visits`, visits: r.visits, metric: c.key })}
+        loading={loading}
       />
 
       <NarrativeCard report="customers-by-visit" group_by="visits"
