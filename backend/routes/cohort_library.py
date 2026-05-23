@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
 
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from auth import get_current_user
 from database import customers_col, transactions_col
@@ -516,15 +518,19 @@ _C("Risk & Retention", "vip_at_risk",
 # ============================================================
 # Endpoints
 # ============================================================
+class CountsIn(BaseModel):
+    cohort_ids: List[str]
+
+
 @router.get("/")
 async def list_cohorts(
-    include_counts: bool = Query(False, description="If true, runs each cohort to compute its matched_total. Slower."),
+    include_counts: bool = Query(False, description="Slow on large datasets — prefer lazy + /counts batch endpoint"),
     user: dict = Depends(get_current_user),
 ):
-    """List the cohort catalog.
+    """List the cohort catalog (metadata).
 
-    Set ?include_counts=true to attach a `matched_total` to each cohort
-    (runs N count queries; useful for the catalog tile view).
+    By default returns catalog metadata WITHOUT counts (instant).
+    Use POST /counts in batches to fetch counts for visible cohorts.
     """
     ctx = await build_context()
 
@@ -533,13 +539,18 @@ async def list_cohorts(
 
     if include_counts:
         from routes.segments_routes import compile_tree  # lazy import to avoid cycle
-        for c in CATALOG:
+        async def _count_one(c: Dict[str, Any]) -> tuple:
             try:
                 tree = c["build"](ctx)
-                match = await compile_tree(tree)
-                counts[c["id"]] = await customers_col.count_documents(match)
+                match = await asyncio.wait_for(compile_tree(tree), timeout=5.0)
+                n = await asyncio.wait_for(
+                    customers_col.count_documents(match), timeout=5.0
+                )
+                return c["id"], n
             except Exception:
-                counts[c["id"]] = -1
+                return c["id"], -1
+        results = await asyncio.gather(*[_count_one(c) for c in CATALOG])
+        counts = dict(results)
 
     for c in CATALOG:
         item = {
@@ -552,7 +563,6 @@ async def list_cohorts(
             item["matched_total"] = counts.get(c["id"], -1)
         out.append(item)
 
-    # Group by category for the UI
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for item in out:
         grouped.setdefault(item["category"], []).append(item)
@@ -560,6 +570,43 @@ async def list_cohorts(
     return {"context": ctx, "categories": [
         {"name": cat, "cohorts": items} for cat, items in grouped.items()
     ]}
+
+
+@router.post("/counts")
+async def batch_counts(
+    body: CountsIn,
+    user: dict = Depends(get_current_user),
+):
+    """Return matched_total for a batch of cohort_ids. Runs in parallel with
+    a per-cohort timeout so one slow query never blocks the whole batch.
+
+    Use this from the frontend when a category is expanded — request counts
+    only for those visible cohort tiles.
+    """
+    if not body.cohort_ids:
+        return {"counts": {}}
+
+    ctx = await build_context()
+    from routes.segments_routes import compile_tree  # lazy import
+
+    catalog_index = {c["id"]: c for c in CATALOG}
+
+    async def _count_one(cid: str) -> tuple:
+        c = catalog_index.get(cid)
+        if not c:
+            return cid, -1
+        try:
+            tree = c["build"](ctx)
+            match = await asyncio.wait_for(compile_tree(tree), timeout=8.0)
+            n = await asyncio.wait_for(
+                customers_col.count_documents(match), timeout=8.0
+            )
+            return cid, n
+        except Exception:
+            return cid, -1
+
+    pairs = await asyncio.gather(*[_count_one(cid) for cid in body.cohort_ids])
+    return {"counts": {cid: n for cid, n in pairs}}
 
 
 @router.get("/{cohort_id}")
