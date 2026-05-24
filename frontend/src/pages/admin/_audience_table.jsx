@@ -2,18 +2,50 @@ import { useEffect, useState, useRef } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
-import { Loader2, Send, Download, ChevronLeft, ChevronRight, Users, ArrowDownAZ, FileSpreadsheet, FileText, FileType2, ChevronDown } from "lucide-react";
+import { Loader2, Send, Download, ChevronLeft, ChevronRight, Users, ArrowDownAZ, FileSpreadsheet, FileText, FileType2, ChevronDown, Columns3, Check } from "lucide-react";
 import CustomerDetailDrawer from "./_customer_drawer";
 
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
 const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const fmtDate = (s) => !s ? "—" : new Date(s).toLocaleDateString("en-IN", { year: "numeric", month: "short", day: "2-digit" });
+const fmtTier = (v) => v ? <span className="inline-block px-1.5 py-0.5 bg-neutral-100 rounded text-[10px] uppercase">{v}</span> : "—";
 
 const EXPORT_FORMATS = [
   { key: "csv",  label: "CSV (.csv)",   icon: FileText,        mime: "text/csv" },
   { key: "xlsx", label: "Excel (.xlsx)", icon: FileSpreadsheet, mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
   { key: "pdf",  label: "PDF (.pdf)",   icon: FileType2,       mime: "application/pdf" },
 ];
+
+/* ============================================================
+ * Column catalog — every field /api/segments/audience can return.
+ * Each column: key, label, sortKey (server-side sort), align, format, required (locked on).
+ * ============================================================ */
+const ALL_COLUMNS = [
+  { key: "mobile",                    label: "Mobile",              align: "left",  sortKey: null,              required: true,
+    render: (v) => <span className="font-mono text-indigo-700 underline-offset-2 hover:underline">{v || "—"}</span> },
+  { key: "name",                      label: "Name",                align: "left",  sortKey: "name",            required: true,
+    render: (v, r) => <span className="truncate max-w-[180px] inline-block" title={r.name}>{v || <span className="text-neutral-400">—</span>}</span> },
+  { key: "email",                     label: "Email",               align: "left",  sortKey: null,              format: (v) => v || "—" },
+  { key: "city",                      label: "City",                align: "left",  sortKey: null,              format: (v) => v || "—" },
+  { key: "state",                     label: "State",               align: "left",  sortKey: null,              format: (v) => v || "—" },
+  { key: "tier",                      label: "Tier",                align: "left",  sortKey: null,              render: (v) => fmtTier(v) },
+  { key: "gender",                    label: "Gender",              align: "left",  sortKey: null,              format: (v) => v || "—" },
+  { key: "visit_count",               label: "Bills",               align: "right", sortKey: "visit_count",     format: fmtNum },
+  { key: "lifetime_spend",            label: "Lifetime Spend",      align: "right", sortKey: "lifetime_spend",  format: fmtINR },
+  { key: "first_purchase_at",         label: "First Purchase",      align: "left",  sortKey: "first_purchase_at", format: fmtDate },
+  { key: "last_visit_at",             label: "Last Visit",          align: "left",  sortKey: "last_visit_at",   format: fmtDate },
+  { key: "points_balance",            label: "Points Balance",      align: "right", sortKey: "points_balance",  format: fmtNum },
+  { key: "lifetime_points_earned",    label: "Lifetime Earned",     align: "right", sortKey: null,              format: fmtNum },
+  { key: "lifetime_points_redeemed",  label: "Lifetime Redeemed",   align: "right", sortKey: null,              format: fmtNum },
+  { key: "churn_risk",                label: "Churn Risk",          align: "left",  sortKey: null,              format: (v) => v || "—" },
+  { key: "home_store_id",             label: "Home Store",          align: "left",  sortKey: null,              format: (v) => v || "—" },
+  { key: "birthday",                  label: "Birthday",            align: "left",  sortKey: null,              format: fmtDate },
+];
+
+const DEFAULT_VISIBLE = ["mobile", "name", "city", "tier", "visit_count", "lifetime_spend", "last_visit_at", "points_balance"];
+const REQUIRED_KEYS = ALL_COLUMNS.filter((c) => c.required).map((c) => c.key);
+
+const STORAGE_KEY = "kazo_audience_visible_cols";
 
 export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved }) {
   const [page, setPage] = useState(1);
@@ -25,21 +57,49 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
   const [drawerMobile, setDrawerMobile] = useState(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [exporting, setExporting] = useState(null);  // 'csv' | 'xlsx' | 'pdf' | null
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const [visibleKeys, setVisibleKeys] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      if (Array.isArray(stored) && stored.length > 0) {
+        // Always make sure required keys are present
+        const merged = Array.from(new Set([...REQUIRED_KEYS, ...stored]));
+        return merged;
+      }
+    } catch (e) { /* ignore */ }
+    return DEFAULT_VISIBLE;
+  });
   const debounceRef = useRef(null);
   const exportMenuRef = useRef(null);
+  const colMenuRef = useRef(null);
   const navigate = useNavigate();
 
-  // Close export menu on outside click
+  // Persist column choices
   useEffect(() => {
-    if (!exportMenuOpen) return;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(visibleKeys)); } catch (e) { /* ignore */ }
+  }, [visibleKeys]);
+
+  // Close menus on outside click
+  useEffect(() => {
+    if (!exportMenuOpen && !colMenuOpen) return;
     const handler = (e) => {
-      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
+      if (exportMenuOpen && exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
         setExportMenuOpen(false);
+      }
+      if (colMenuOpen && colMenuRef.current && !colMenuRef.current.contains(e.target)) {
+        setColMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [exportMenuOpen]);
+  }, [exportMenuOpen, colMenuOpen]);
+
+  const toggleColumn = (key) => {
+    if (REQUIRED_KEYS.includes(key)) return;
+    setVisibleKeys((cur) => cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]);
+  };
+
+  const visibleColumns = ALL_COLUMNS.filter((c) => visibleKeys.includes(c.key));
 
   // Count of non-empty leaves
   const hasFilter = (() => {
@@ -164,6 +224,42 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
           <div className="font-display text-2xl">{fmtNum(total)} <span className="text-sm font-normal text-neutral-500">matched customers</span></div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative" ref={colMenuRef}>
+            <button
+              type="button"
+              onClick={() => setColMenuOpen((o) => !o)}
+              className="text-xs flex items-center gap-1 px-3 py-1.5 border border-neutral-300 rounded hover:bg-neutral-50"
+              data-testid="audience-columns"
+            >
+              <Columns3 className="w-3.5 h-3.5" /> Columns ({visibleKeys.length}/{ALL_COLUMNS.length}) <ChevronDown className="w-3 h-3" />
+            </button>
+            {colMenuOpen && (
+              <div className="absolute right-0 mt-1 w-64 bg-white border border-neutral-200 rounded-md shadow-lg z-30 max-h-80 overflow-y-auto" data-testid="audience-columns-menu">
+                <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-neutral-400 border-b border-neutral-100 bg-neutral-50 sticky top-0">
+                  Show / hide columns
+                </div>
+                {ALL_COLUMNS.map((c) => {
+                  const isVisible = visibleKeys.includes(c.key);
+                  const isLocked = REQUIRED_KEYS.includes(c.key);
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      onClick={() => toggleColumn(c.key)}
+                      className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-amber-50 ${isLocked ? "opacity-60 cursor-not-allowed" : ""}`}
+                      data-testid={`audience-col-toggle-${c.key}`}
+                    >
+                      <div className={`w-3.5 h-3.5 border rounded flex items-center justify-center ${isVisible ? "bg-emerald-600 border-emerald-600" : "border-neutral-300 bg-white"}`}>
+                        {isVisible && <Check className="w-2.5 h-2.5 text-white" />}
+                      </div>
+                      <span className="flex-1">{c.label}</span>
+                      {isLocked && <span className="text-[9px] text-neutral-400">locked</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <div className="relative" ref={exportMenuRef}>
             <button
               type="button"
@@ -223,14 +319,15 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-neutral-200 text-left text-[10px] uppercase tracking-widest text-neutral-500">
-              <th className="px-2 py-2">Mobile</th>
-              <th className="px-2 py-2 cursor-pointer hover:text-neutral-800" onClick={() => toggleSort("name")}>Name <SortIcon col="name" /></th>
-              <th className="px-2 py-2">City</th>
-              <th className="px-2 py-2">Tier</th>
-              <th className="px-2 py-2 text-right cursor-pointer hover:text-neutral-800" onClick={() => toggleSort("visit_count")}>Bills <SortIcon col="visit_count" /></th>
-              <th className="px-2 py-2 text-right cursor-pointer hover:text-neutral-800" onClick={() => toggleSort("lifetime_spend")}>Lifetime Spend <SortIcon col="lifetime_spend" /></th>
-              <th className="px-2 py-2 cursor-pointer hover:text-neutral-800" onClick={() => toggleSort("last_visit_at")}>Last Visit <SortIcon col="last_visit_at" /></th>
-              <th className="px-2 py-2 text-right cursor-pointer hover:text-neutral-800" onClick={() => toggleSort("points_balance")}>Points <SortIcon col="points_balance" /></th>
+              {visibleColumns.map((c) => (
+                <th
+                  key={c.key}
+                  className={`px-2 py-2 ${c.align === "right" ? "text-right" : ""} ${c.sortKey ? "cursor-pointer hover:text-neutral-800" : ""}`}
+                  onClick={() => c.sortKey && toggleSort(c.sortKey)}
+                >
+                  {c.label} {c.sortKey && <SortIcon col={c.sortKey} />}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -241,18 +338,19 @@ export default function AudienceTable({ tree, segmentNameHint, onSegmentSaved })
                 onClick={() => r.mobile && setDrawerMobile(r.mobile)}
                 data-testid={`audience-row-${r.mobile}`}
               >
-                <td className="px-2 py-2 font-mono text-indigo-700 underline-offset-2 hover:underline">{r.mobile || "—"}</td>
-                <td className="px-2 py-2 truncate max-w-[180px]" title={r.name}>{r.name || <span className="text-neutral-400">—</span>}</td>
-                <td className="px-2 py-2 text-neutral-600">{r.city || "—"}</td>
-                <td className="px-2 py-2"><span className="inline-block px-1.5 py-0.5 bg-neutral-100 rounded text-[10px] uppercase">{r.tier || "—"}</span></td>
-                <td className="px-2 py-2 text-right">{fmtNum(r.visit_count)}</td>
-                <td className="px-2 py-2 text-right font-medium">{fmtINR(r.lifetime_spend)}</td>
-                <td className="px-2 py-2 text-neutral-600">{fmtDate(r.last_visit_at)}</td>
-                <td className="px-2 py-2 text-right">{fmtNum(r.points_balance)}</td>
+                {visibleColumns.map((c) => {
+                  const val = r[c.key];
+                  const content = c.render ? c.render(val, r) : (c.format ? c.format(val) : (val ?? "—"));
+                  return (
+                    <td key={c.key} className={`px-2 py-2 ${c.align === "right" ? "text-right" : ""} ${c.key === "lifetime_spend" ? "font-medium" : ""} ${["city", "last_visit_at", "first_purchase_at", "birthday", "home_store_id"].includes(c.key) ? "text-neutral-600" : ""}`}>
+                      {content}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
             {(!data || data.rows.length === 0) && !loading && (
-              <tr><td colSpan={8} className="px-2 py-10 text-center text-neutral-400">No customers match this filter.</td></tr>
+              <tr><td colSpan={visibleColumns.length} className="px-2 py-10 text-center text-neutral-400">No customers match this filter.</td></tr>
             )}
           </tbody>
         </table>
