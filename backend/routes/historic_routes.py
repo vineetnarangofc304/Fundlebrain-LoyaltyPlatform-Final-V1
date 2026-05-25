@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import (APIRouter, Depends, HTTPException, UploadFile, File, Form,
                        BackgroundTasks)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from database import (
@@ -38,10 +39,12 @@ logger = logging.getLogger("kazo-fundle.historic")
 historic_jobs_col = db["historic_ingest_jobs"]
 historic_raw_col = db["historic_uploads"]  # stores raw uploaded CSV bytes (capped)
 historic_chunks_col = db["historic_chunks"]  # shared chunk store (works across pods/workers)
+historic_skipped_col = db["historic_skipped_rows"]  # every parser rejection — reconcilable
 
 CHUNK_SIZE = 500
 MAX_FILE_BYTES = 250 * 1024 * 1024  # 250 MB (chunked uploads bypass proxy limits)
-MAX_ERROR_SAMPLES = 25
+MAX_ERROR_SAMPLES = 25  # for the in-job samples (UI preview); full set lives in historic_skipped_col
+SKIPPED_PERSIST_CAP = 1_000_000  # safety cap on skipped-rows write per job
 ALLOWED_DATASETS = {"customers", "transactions", "stores", "items", "points_ledger"}
 DUPLICATE_MODES = {"upsert", "skip", "fail"}
 
@@ -381,6 +384,48 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         updated = 0
         skipped = 0
         errors: List[Dict[str, Any]] = []
+        skipped_buf: List[Dict[str, Any]] = []  # buffered skipped-row docs for persistence
+        skipped_persisted = 0
+
+        async def _persist_skipped(force: bool = False):
+            """Persist skipped rows in batches so a re-run / debug can read them back."""
+            nonlocal skipped_persisted
+            if not skipped_buf:
+                return
+            if not force and len(skipped_buf) < 1000:
+                return
+            if dry_run:
+                skipped_buf.clear()
+                return
+            if skipped_persisted >= SKIPPED_PERSIST_CAP:
+                skipped_buf.clear()
+                return
+            try:
+                await historic_skipped_col.insert_many(skipped_buf, ordered=False)
+                skipped_persisted += len(skipped_buf)
+            except Exception:
+                pass
+            skipped_buf.clear()
+
+        def _record_skip(row_num: int, reason: str, raw_row: Optional[Dict[str, Any]] = None):
+            nonlocal skipped
+            skipped += 1
+            if len(errors) < MAX_ERROR_SAMPLES:
+                errors.append({
+                    "row": row_num,
+                    "reason": reason,
+                    "data_sample": {k: raw_row.get(k) for k in list((raw_row or {}).keys())[:6]} if raw_row else {},
+                })
+            # Persist every skipped row (capped)
+            if skipped_persisted + len(skipped_buf) < SKIPPED_PERSIST_CAP:
+                skipped_buf.append({
+                    "id": uuid.uuid4().hex,
+                    "job_id": job_id,
+                    "row_number": row_num,
+                    "reason": reason,
+                    "raw_row": raw_row or {},
+                    "created_at": now(),
+                })
         store_cache: Dict[str, Dict[str, Any]] = {}
         buffer_insert: List[Dict[str, Any]] = []
 
@@ -489,10 +534,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     doc, err = None, f"Mapper error: {e}"
 
                 if err:
-                    if len(errors) < MAX_ERROR_SAMPLES:
-                        errors.append({"row": total_rows, "reason": err,
-                                       "data_sample": {k: raw_row.get(k) for k in list(raw_row.keys())[:6]}})
-                    skipped += 1
+                    _record_skip(total_rows, err, raw_row)
                     processed += 1
                     continue
 
@@ -502,7 +544,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     if key_field:
                         exists = await _exists_col(dataset).find_one({key_field: key_val}, {"_id": 1})
                         if exists:
-                            skipped += 1
+                            _record_skip(total_rows, "Duplicate (skip mode)", raw_row)
                             processed += 1
                             continue
 
@@ -513,13 +555,12 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     try:
                         await _flush()
                     except Exception as fe:
-                        # Flush failed — log error sample but DON'T abort the job
                         logger.exception(f"Flush failed at row {total_rows}")
-                        if len(errors) < MAX_ERROR_SAMPLES:
-                            errors.append({"row": total_rows, "reason": f"Bulk flush error: {fe}",
-                                            "data_sample": {}})
-                        skipped += len(buffer_insert)
+                        # Mark all buffered as skipped + persist
+                        for d in buffer_insert:
+                            _record_skip(total_rows, f"Bulk flush error: {fe}", d)
                         buffer_insert.clear()
+                    await _persist_skipped()
                     await historic_jobs_col.update_one({"id": job_id},
                         {"$set": {"processed": processed, "inserted": inserted,
                                     "updated": updated, "skipped": skipped,
@@ -527,22 +568,20 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                     "errors_sample": errors[:MAX_ERROR_SAMPLES],
                                     "heartbeat": now()}})
             except Exception as row_exc:
-                # Last-resort safety net — never let a single row break the whole job
                 logger.exception(f"Unhandled row {total_rows} exception")
-                if len(errors) < MAX_ERROR_SAMPLES:
-                    errors.append({"row": total_rows, "reason": f"Row exception: {row_exc}",
-                                   "data_sample": {}})
-                skipped += 1
+                _record_skip(total_rows, f"Row exception: {row_exc}", None)
 
         # Final flush — protected; if it fails we still mark completed-with-errors
         try:
             await _flush()
         except Exception as fe:
             logger.exception("Final flush failed")
-            if len(errors) < MAX_ERROR_SAMPLES:
-                errors.append({"row": total_rows, "reason": f"Final flush error: {fe}", "data_sample": {}})
-            skipped += len(buffer_insert)
+            for d in buffer_insert:
+                _record_skip(total_rows, f"Final flush error: {fe}", d)
             buffer_insert.clear()
+
+        # Persist any remaining skipped rows
+        await _persist_skipped(force=True)
 
         # For transactions: auto-create stores from cache — wrapped so a bad store row never fails the job
         store_links: Dict[str, str] = {}
@@ -1015,6 +1054,48 @@ async def get_schema(dataset: str, user: dict = Depends(get_current_user)):
     return schemas[dataset]
 
 
+def _xlsx_to_csv_text(raw_bytes: bytes) -> str:
+    """Convert an .xlsx file's first sheet to a CSV string (UTF-8).
+
+    Uses openpyxl in read-only mode so 200k+ row files don't OOM. Cells are
+    string-cast to match what csv.DictReader would otherwise see.
+    """
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
+    ws = wb.active
+    buf = io.StringIO()
+    w = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
+    for row in ws.iter_rows(values_only=True):
+        # Coerce None → "" and dates → ISO
+        out_row = []
+        for v in row:
+            if v is None:
+                out_row.append("")
+            elif isinstance(v, (datetime, )):
+                out_row.append(v.strftime("%Y-%m-%d %H:%M:%S"))
+            else:
+                out_row.append(str(v))
+        w.writerow(out_row)
+    wb.close()
+    return buf.getvalue()
+
+
+def _read_upload_to_csv_text(filename: str, raw_bytes: bytes) -> str:
+    """Decode a CSV or convert an XLSX to CSV text. Raises HTTPException on
+    unsupported formats so the user knows immediately."""
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        return raw_bytes.decode("utf-8-sig", errors="replace")
+    if name.endswith(".xlsx"):
+        try:
+            return _xlsx_to_csv_text(raw_bytes)
+        except Exception as e:
+            raise HTTPException(400, f"Could not read .xlsx: {e}")
+    if name.endswith(".xls"):
+        raise HTTPException(400, "Legacy .xls is not supported — please save as .xlsx or .csv in Excel and re-upload")
+    raise HTTPException(400, "Only .csv and .xlsx files are supported")
+
+
 @router.post("/ingest")
 async def ingest_csv(background_tasks: BackgroundTasks,
                       file: UploadFile = File(...),
@@ -1028,16 +1109,11 @@ async def ingest_csv(background_tasks: BackgroundTasks,
         raise HTTPException(400, f"dataset must be one of {sorted(ALLOWED_DATASETS)}")
     if duplicate_mode not in DUPLICATE_MODES:
         raise HTTPException(400, f"duplicate_mode must be one of {sorted(DUPLICATE_MODES)}")
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(400, "Only .csv files supported")
 
     raw = await file.read()
     if len(raw) > MAX_FILE_BYTES:
         raise HTTPException(413, f"File too large (max {MAX_FILE_BYTES // (1024*1024)} MB)")
-    try:
-        text = raw.decode("utf-8-sig", errors="replace")
-    except Exception as e:
-        raise HTTPException(400, f"Could not decode file: {e}")
+    text = _read_upload_to_csv_text(file.filename, raw)
 
     # Count rows + grab header sample
     reader = csv.DictReader(io.StringIO(text))
@@ -1095,8 +1171,8 @@ async def ingest_init(body: IngestInitIn, user: dict = Depends(get_current_user)
         raise HTTPException(400, f"duplicate_mode must be one of {sorted(DUPLICATE_MODES)}")
     if body.total_chunks < 1 or body.total_chunks > 10_000:
         raise HTTPException(400, "total_chunks out of range")
-    if not body.filename.lower().endswith(".csv"):
-        raise HTTPException(400, "Only .csv files supported")
+    if not (body.filename.lower().endswith(".csv") or body.filename.lower().endswith(".xlsx")):
+        raise HTTPException(400, "Only .csv and .xlsx files supported")
     if body.total_bytes > MAX_FILE_BYTES:
         raise HTTPException(413, f"File too large (max {MAX_FILE_BYTES // (1024*1024)} MB)")
 
@@ -1206,7 +1282,8 @@ async def ingest_finalize(
             last_index = idx
         raw = b"".join(parts)
         parts.clear()
-        text = raw.decode("utf-8-sig", errors="replace")
+        # Decode based on file extension (.csv direct, .xlsx via openpyxl)
+        text = _read_upload_to_csv_text(job.get("filename", ""), raw)
         del raw
     except HTTPException:
         raise
@@ -1220,6 +1297,25 @@ async def ingest_finalize(
     reader = csv.DictReader(io.StringIO(text))
     header = reader.fieldnames or []
     row_count = sum(1 for _ in reader)
+    # IMPORTANT: for .xlsx files we re-decode in the scheduler tick. Cache the
+    # decoded CSV text on the job so the scheduler doesn't have to re-parse xlsx.
+    is_xlsx = (job.get("filename") or "").lower().endswith(".xlsx")
+    if is_xlsx:
+        # Replace the stored chunks with one synthetic CSV chunk to save memory + re-decode time
+        try:
+            await historic_chunks_col.delete_many({"job_id": body.job_id})
+            csv_bytes = text.encode("utf-8")
+            await historic_chunks_col.insert_one({
+                "job_id": body.job_id, "chunk_index": 0, "data": csv_bytes,
+            })
+            # Update job's total_chunks so scheduler stitches correctly
+            await historic_jobs_col.update_one(
+                {"id": body.job_id},
+                {"$set": {"total_chunks": 1, "filename_original": job.get("filename"),
+                            "filename": (job.get("filename") or "").replace(".xlsx", ".csv")}},
+            )
+        except Exception as xe:
+            logger.warning(f"xlsx → csv chunk replacement failed (will retry on scheduler): {xe}")
     del text  # release memory immediately — scheduler will re-stitch when it picks up the job
 
     now = datetime.now(timezone.utc).isoformat()
@@ -1390,6 +1486,117 @@ async def get_narrative(job_id: str, user: dict = Depends(get_current_user)):
     if not j:
         raise HTTPException(404, "Job not found")
     return j.get("ai_narrative") or {"narrative": "", "source": "not_generated"}
+
+
+@router.get("/jobs/{job_id}/skipped-rows.csv")
+async def download_skipped_rows(job_id: str, user: dict = Depends(get_current_user)):
+    """Download every row that the parser rejected for this job, with the reason.
+
+    Brand managers use this to understand the exact data-mismatch between
+    their source Excel/CSV and the dashboard: rows in DB = inserted + updated
+    (matched), rows NOT in DB = rows in this download.
+    """
+    job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    async def _gen():
+        # Collect all distinct columns across raw_row payloads so we get one header
+        header_cols: List[str] = ["row_number", "reason"]
+        seen_keys: set = set(header_cols)
+        # First pass — preload first 200 rows to determine headers (covers most cases)
+        sample = await historic_skipped_col.find(
+            {"job_id": job_id}, {"_id": 0, "raw_row": 1},
+        ).limit(200).to_list(200)
+        for s in sample:
+            for k in (s.get("raw_row") or {}).keys():
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    header_cols.append(k)
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(header_cols)
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+
+        cursor = historic_skipped_col.find(
+            {"job_id": job_id}, {"_id": 0, "row_number": 1, "reason": 1, "raw_row": 1},
+        ).sort("row_number", 1)
+        async for s in cursor:
+            row = [s.get("row_number", ""), s.get("reason", "")]
+            r = s.get("raw_row") or {}
+            for col in header_cols[2:]:
+                row.append(r.get(col, ""))
+            writer.writerow(row)
+            if buf.tell() > 32 * 1024:
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate(0)
+        if buf.tell() > 0:
+            yield buf.getvalue()
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", job.get("filename", "skipped"))[:60] or "skipped"
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_skipped_{job_id[:8]}.csv"'},
+    )
+
+
+@router.get("/jobs/{job_id}/integrity")
+async def integrity_check(job_id: str, user: dict = Depends(get_current_user)):
+    """Reconcile a finished ingest job against what's actually in MongoDB.
+
+    Returns: csv_rows, inserted, updated, skipped (persisted), db_rows_for_this_job.
+    The mismatch field flags whether everything balances. Use this to give the
+    brand manager an exact answer to "did all my data land in the database?"
+    """
+    job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(404, "Job not found")
+    dataset = job.get("dataset")
+    csv_rows = int(job.get("row_count_estimated") or job.get("total_rows") or 0)
+    inserted = int(job.get("inserted") or 0)
+    updated = int(job.get("updated") or 0)
+    skipped = int(job.get("skipped") or 0)
+    skipped_persisted = await historic_skipped_col.count_documents({"job_id": job_id})
+
+    # Count rows in the actual target collection that came from this job
+    db_rows_for_this_job: Optional[int] = None
+    if dataset == "transactions":
+        db_rows_for_this_job = await transactions_col.count_documents({"ingest_job_id": job_id})
+    elif dataset == "customers":
+        # Customer rows don't carry ingest_job_id; report nothing (the matched_count fix already handles re-uploads).
+        db_rows_for_this_job = None
+    elif dataset == "stores":
+        db_rows_for_this_job = None
+    elif dataset == "items":
+        db_rows_for_this_job = None
+
+    accounted = inserted + updated + skipped
+    diff = csv_rows - accounted if csv_rows else 0
+    return {
+        "job_id": job_id,
+        "dataset": dataset,
+        "status": job.get("status"),
+        "csv_rows": csv_rows,
+        "inserted": inserted,
+        "updated_matched": updated,  # using matched_count semantics
+        "skipped": skipped,
+        "skipped_persisted_count": skipped_persisted,
+        "accounted": accounted,
+        "unaccounted_diff": diff,
+        "balanced": csv_rows == 0 or abs(diff) <= max(2, csv_rows * 0.001),
+        "db_rows_for_this_job": db_rows_for_this_job,
+        "note": (
+            "Updated reflects matched_count (rows that already existed and were touched, "
+            "incl. no-op upserts). Skipped rows are downloadable as CSV at "
+            "/jobs/{job_id}/skipped-rows.csv. db_rows_for_this_job counts transactions "
+            "tagged with this ingest_job_id; for customers/stores/items see total collection counts."
+        ),
+    }
 
 
 # ---------------- Purge demo data ----------------

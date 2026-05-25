@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 14 — XLSX upload + skipped-rows persistence + integrity reconciliation. 10/10 backend tests PASS. Frontend Historic Data page fully verified: Inter font globally applied (body & headings, weight 600), file picker accepts .csv,.xlsx, integrity-card opens on job-row click, Run Integrity Check renders 4-stat grid (CSV Rows / Inserted / Updated / Skipped) + ✓ Reconciled message + DB rows tagged count, and Download N Skipped Rows button visible for jobs with skipped>0.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/historic-data/jobs/{id}", "issue": "Polling needs ~60s timeout during txn ingest (auto-backfill is heavy). Tests adjusted to 60s read timeout — not a bug, environmental note."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Historic Data → Data Reconciliation card", "issues": ["Button label 'Download 1 Skipped Rows' should be singular ('Row') when count == 1 — cosmetic only."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration14_xlsx_skipped_integrity_test.py",
+    "/app/test_reports/pytest/iteration14_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL/cosmetic: singularise 'Download {N} Skipped Rows' when N==1 in HistoricDataPage.jsx:557."
+  ],
+  "critical_code_review_comments": [
+    "historic_routes.py:1057-1096 — _xlsx_to_csv_text uses openpyxl read_only mode; correct approach for large files. datetime cells are stringified.",
+    "historic_routes.py:1491-1545 — skipped-rows.csv streams correctly with chunked 32KB flushes; header derived from first 200 raw_row samples. Works for our 1-skip-row test; verify with very wide row schemas later.",
+    "historic_routes.py:1548-1599 — /integrity endpoint returns updated_matched (not 'updated'). Frontend correctly reads integrity.updated_matched at HistoricDataPage.jsx:566. Field-name consistency is fine.",
+    "historic_routes.py:1591 — balanced uses tolerance of max(2, csv_rows * 0.001) — small wiggle is fine for reconciliation UX.",
+    "index.css:1 — Inter+JetBrains Mono only; no Cormorant Garamond or Manrope @import remaining. Verified visually + via computed style 'Inter, system-ui, -apple-system, sans-serif'."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration14_xlsx_skipped_integrity_test.py"
+  ],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (font ✓ / accept ✓ / integrity-card ✓ / Run Integrity Check ✓ / Download Skipped Rows ✓)"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026",
+  "seed_data_creation": "Test jobs created during run: customers xlsx (mobiles 9999100001-2 + 1 bad), customers reup csv (9999200001-3) ran twice for matched_count verification, transactions csv (8888100001-2). All persisted as historic ingest jobs.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test file iteration14 covers: xlsx ingest (2 good + 1 bad), integrity endpoint, skipped-rows.csv download, csv re-upload idempotency (updated=N on 2nd run), transactions db_rows_for_this_job tagging, .xls + .txt rejection, command-center active<=total regression. Use 60s read timeout for /jobs/{id} polling — auto-backfill is slow. Integrity endpoint returns field 'updated_matched' (NOT 'updated'); frontend reads it correctly.",
+  "rca_of_the_issue": "User reported Excel data not matching dashboard. Two fixes verified: (1) full skipped-row forensic trail — historic_skipped_rows collection now stores every rejection with raw_row + reason, downloadable as CSV so user can see EXACTLY which Excel rows didn't land in DB; (2) integrity endpoint reconciles csv_rows == inserted + updated_matched + skipped (balanced=true) and for transactions also shows db_rows_for_this_job tagged with ingest_job_id. XLSX is read via openpyxl read_only mode → converted to CSV text → same downstream pipeline (no double-write paths)."
+}

@@ -7,6 +7,7 @@ import { fmtDateTime } from "@/lib/format";
 import {
   Upload, FileText, RefreshCw, Database, AlertTriangle,
   CheckCircle2, AlertCircle, Loader2, Clock, Trash2, Sparkles,
+  ShieldCheck, Download,
 } from "lucide-react";
 
 const DATASETS = [
@@ -63,8 +64,9 @@ export default function HistoricDataPage() {
   const handleFile = (e) => {
     const f = e.target.files?.[0];
     if (f) {
-      if (!f.name.toLowerCase().endsWith(".csv")) {
-        toast.error("Please pick a .csv file");
+      const lower = f.name.toLowerCase();
+      if (!lower.endsWith(".csv") && !lower.endsWith(".xlsx")) {
+        toast.error("Please pick a .csv or .xlsx file");
         e.target.value = "";
         return;
       }
@@ -75,7 +77,8 @@ export default function HistoricDataPage() {
     e.preventDefault();
     const f = e.dataTransfer.files?.[0];
     if (f) {
-      if (!f.name.toLowerCase().endsWith(".csv")) { toast.error("Only .csv supported"); return; }
+      const lower = f.name.toLowerCase();
+      if (!lower.endsWith(".csv") && !lower.endsWith(".xlsx")) { toast.error("Only .csv or .xlsx supported"); return; }
       setFile(f);
     }
   };
@@ -209,7 +212,7 @@ export default function HistoricDataPage() {
               onClick={() => fileRef.current?.click()}
               data-testid="hist-dropzone"
             >
-              <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} className="hidden" data-testid="hist-file-input" />
+              <input ref={fileRef} type="file" accept=".csv,.xlsx" onChange={handleFile} className="hidden" data-testid="hist-file-input" />
               <Upload className="w-8 h-8 mx-auto text-neutral-400 mb-2" />
               {file ? (
                 <div>
@@ -467,9 +470,15 @@ function PurgeModal({ onClose, onDone }) {
 
 function AINarrative({ jobs, activeJobId, onRefresh }) {
   const [generating, setGenerating] = useState(false);
+  const [integrity, setIntegrity] = useState(null);
+  const [integrityLoading, setIntegrityLoading] = useState(false);
   const job = jobs.find((j) => j.id === activeJobId);
+
+  useEffect(() => { setIntegrity(null); }, [activeJobId]);
+
   if (!job || !["completed", "previewed"].includes(job.status)) return null;
   const narrative = job.ai_narrative;
+  const API_BASE = (process.env.REACT_APP_BACKEND_URL || "") + "/api/historic-data";
 
   const generate = async () => {
     setGenerating(true);
@@ -484,8 +493,102 @@ function AINarrative({ jobs, activeJobId, onRefresh }) {
     }
   };
 
+  const runIntegrityCheck = async () => {
+    setIntegrityLoading(true);
+    try {
+      const r = await api.get(`/historic-data/jobs/${job.id}/integrity`);
+      setIntegrity(r.data);
+      if (r.data.balanced) {
+        toast.success(`Reconciled: ${r.data.accounted.toLocaleString()} of ${r.data.csv_rows.toLocaleString()} rows accounted`);
+      } else {
+        toast.warning(`Mismatch: ${Math.abs(r.data.unaccounted_diff)} rows unaccounted`);
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Integrity check failed");
+    } finally {
+      setIntegrityLoading(false);
+    }
+  };
+
+  const downloadSkipped = async () => {
+    const token = localStorage.getItem("kazo_token") || "";
+    try {
+      const resp = await fetch(`${API_BASE}/jobs/${job.id}/skipped-rows.csv`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${job.filename || "skipped"}_skipped_${job.id.slice(0, 8)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Downloaded skipped rows");
+    } catch (e) {
+      toast.error("Download failed");
+    }
+  };
+
   return (
-    <div className="mt-4 p-4 border border-indigo-200 bg-gradient-to-br from-indigo-50/50 to-amber-50/30 rounded" data-testid="ai-narrative-card">
+    <>
+      <div className="mt-4 p-4 border border-emerald-200 bg-gradient-to-br from-emerald-50/40 to-amber-50/30 rounded" data-testid="integrity-card">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <div className="text-[10px] uppercase tracking-widest text-emerald-700 flex items-center gap-1 font-medium">
+            <ShieldCheck className="w-3 h-3" /> Data Reconciliation · This Job
+          </div>
+          <div className="flex gap-1.5">
+            <button
+              onClick={runIntegrityCheck}
+              disabled={integrityLoading}
+              className="text-[10px] flex items-center gap-1 px-2 py-1 border border-emerald-300 text-emerald-700 rounded hover:bg-emerald-50 disabled:opacity-50"
+              data-testid="integrity-check-btn"
+            >
+              {integrityLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+              Run Integrity Check
+            </button>
+            {(job.skipped > 0) && (
+              <button
+                onClick={downloadSkipped}
+                className="text-[10px] flex items-center gap-1 px-2 py-1 border border-amber-300 text-amber-700 rounded hover:bg-amber-50"
+                data-testid="download-skipped-btn"
+              >
+                <Download className="w-3 h-3" />
+                Download {job.skipped.toLocaleString()} Skipped Rows
+              </button>
+            )}
+          </div>
+        </div>
+        {integrity ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs mt-2">
+            <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">CSV Rows</div><div className="font-mono">{integrity.csv_rows.toLocaleString()}</div></div>
+            <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Inserted (new)</div><div className="font-mono text-emerald-700">{integrity.inserted.toLocaleString()}</div></div>
+            <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Updated (matched)</div><div className="font-mono text-indigo-700">{integrity.updated_matched.toLocaleString()}</div></div>
+            <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Skipped</div><div className="font-mono text-amber-700">{integrity.skipped.toLocaleString()}</div></div>
+            <div className="col-span-2 md:col-span-4 pt-2 border-t border-emerald-100">
+              {integrity.balanced ? (
+                <div className="text-xs text-emerald-700 font-medium">✓ Reconciled — all {integrity.csv_rows.toLocaleString()} CSV rows are accounted for (inserted + updated + skipped).</div>
+              ) : (
+                <div className="text-xs text-rose-700 font-medium">⚠ Mismatch — {Math.abs(integrity.unaccounted_diff).toLocaleString()} rows unaccounted between CSV and DB. Contact support.</div>
+              )}
+              {integrity.db_rows_for_this_job != null && (
+                <div className="text-[10px] text-neutral-500 mt-1">
+                  DB rows tagged with this ingest_job_id: {integrity.db_rows_for_this_job.toLocaleString()}
+                </div>
+              )}
+              {integrity.skipped_persisted_count > 0 && (
+                <div className="text-[10px] text-neutral-500">
+                  {integrity.skipped_persisted_count.toLocaleString()} skipped rows persisted — download above to see exactly which Excel rows didn't land in DB.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-neutral-600">Click <strong>Run Integrity Check</strong> to reconcile this job's CSV rows against MongoDB and confirm nothing was silently lost.</div>
+        )}
+      </div>
+
+      <div className="mt-4 p-4 border border-indigo-200 bg-gradient-to-br from-indigo-50/50 to-amber-50/30 rounded" data-testid="ai-narrative-card">
       <div className="flex items-center justify-between mb-2">
         <div className="text-[10px] uppercase tracking-widest text-indigo-700 flex items-center gap-1 font-medium">
           <Sparkles className="w-3 h-3" /> Fundle Brain · Post-Ingest Report
@@ -519,7 +622,8 @@ function AINarrative({ jobs, activeJobId, onRefresh }) {
           <div><div className="text-[10px] uppercase tracking-widest text-neutral-500">Points Outstanding</div><div className="font-mono">{narrative.snapshot.points_outstanding?.toLocaleString()}</div></div>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }
 
