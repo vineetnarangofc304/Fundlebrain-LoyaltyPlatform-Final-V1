@@ -403,7 +403,10 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                       upsert=True) for d in buffer_insert]
                     res = await customers_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
-                    updated += res.modified_count
+                    # matched_count = rows that matched the filter (incl. no-op upserts where data
+                    # didn't change). MongoDB's modified_count is misleading because it returns 0
+                    # for upserts with identical values — making re-uploads look like 'data is lost'.
+                    updated += res.matched_count
                     buffer_insert.clear()
             elif dataset == "transactions":
                 if buffer_insert:
@@ -421,7 +424,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                             upsert=True))
                     res = await transactions_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
-                    updated += res.modified_count
+                    updated += res.matched_count
                     buffer_insert.clear()
             elif dataset == "stores":
                 if buffer_insert:
@@ -434,7 +437,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                       upsert=True) for d in buffer_insert]
                     res = await stores_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
-                    updated += res.modified_count
+                    updated += res.matched_count
                     buffer_insert.clear()
             elif dataset == "items":
                 items_col = db["items"]
@@ -448,7 +451,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                       upsert=True) for d in buffer_insert]
                     res = await items_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
-                    updated += res.modified_count
+                    updated += res.matched_count
                     buffer_insert.clear()
             elif dataset == "points_ledger":
                 if buffer_insert:
@@ -470,7 +473,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                             upsert=True))
                     res = await points_ledger_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
-                    updated += res.modified_count
+                    updated += res.matched_count
                     buffer_insert.clear()
 
         # Loop with PER-ROW try/except wrapper so one bad row never aborts the entire job
@@ -621,6 +624,87 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         }
         await historic_jobs_col.update_one({"id": job_id}, {"$set": final})
         logger.info(f"Historic ingest job {job_id} done: {final}")
+
+        # =====================================================
+        # AUTO-BACKFILL — for transactions/points_ledger, ensure every
+        # customer_mobile has a matching customer row + R1/R2/R3 fields
+        # populated. This guarantees Active <= Total on every dashboard.
+        # =====================================================
+        if not dry_run and dataset in {"transactions", "points_ledger"}:
+            try:
+                from pymongo import UpdateOne
+                # Find mobiles in this job's data that lack a customers row
+                mobiles_in_job = await transactions_col.distinct(
+                    "customer_mobile",
+                    {"ingest_job_id": job_id, "customer_mobile": {"$nin": [None, ""]}},
+                ) if dataset == "transactions" else []
+                if mobiles_in_job:
+                    existing = await customers_col.distinct(
+                        "mobile", {"mobile": {"$in": mobiles_in_job}}
+                    )
+                    missing = list(set(mobiles_in_job) - set(existing))
+                    if missing:
+                        # Auto-create stub customer rows so they show up in Total
+                        ops = [UpdateOne(
+                            {"mobile": m},
+                            {"$setOnInsert": {
+                                "id": uuid.uuid4().hex,
+                                "mobile": m,
+                                "tier": "bronze",
+                                "points_balance": 0,
+                                "visit_count": 0,
+                                "lifetime_spend": 0.0,
+                                "lifetime_points_earned": 0.0,
+                                "lifetime_points_redeemed": 0.0,
+                                "created_at": now(),
+                                "source": "auto_from_transactions",
+                            }},
+                            upsert=True,
+                        ) for m in missing]
+                        bres = await customers_col.bulk_write(ops, ordered=False)
+                        await historic_jobs_col.update_one(
+                            {"id": job_id},
+                            {"$set": {"customers_auto_created": bres.upserted_count}},
+                        )
+                        logger.info(f"Auto-created {bres.upserted_count} customer stubs for job {job_id}")
+                # Recompute R1/R2/R3 aggregates for THIS job's mobiles (much cheaper than full backfill)
+                affected = mobiles_in_job
+                if affected:
+                    pipe = [
+                        {"$match": {"customer_mobile": {"$in": affected}}},
+                        {"$sort": {"bill_date": 1}},
+                        {"$group": {
+                            "_id": "$customer_mobile",
+                            "first_purchase_at": {"$first": "$bill_date"},
+                            "first_store_id": {"$first": "$store_id"},
+                            "last_visit_at": {"$last": "$bill_date"},
+                            "uniq_bills": {"$addToSet": {"s": "$store_id", "b": "$bill_number", "d": "$bill_date"}},
+                            "spend": {"$sum": "$net_amount"},
+                            "earn":  {"$sum": "$points_earned"},
+                        }},
+                    ]
+                    cust_ops = []
+                    async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
+                        cust_ops.append(UpdateOne(
+                            {"mobile": r["_id"]},
+                            {"$set": {
+                                "first_purchase_at": r["first_purchase_at"],
+                                "last_visit_at": r["last_visit_at"],
+                                "home_store_id": r.get("first_store_id"),
+                                "visit_count": len(r.get("uniq_bills", [])),
+                                "lifetime_spend": round(float(r.get("spend") or 0), 2),
+                                "lifetime_points_earned": round(float(r.get("earn") or 0), 2),
+                            }},
+                            upsert=False,
+                        ))
+                        if len(cust_ops) >= 500:
+                            await customers_col.bulk_write(cust_ops, ordered=False)
+                            cust_ops.clear()
+                    if cust_ops:
+                        await customers_col.bulk_write(cust_ops, ordered=False)
+                logger.info(f"Auto-backfill complete for job {job_id} ({len(affected)} mobiles refreshed)")
+            except Exception as bx:
+                logger.warning(f"Auto-backfill failed for job {job_id}: {bx}")
 
         # =====================================================
         # POST-INGEST AI NARRATIVE — best-effort, never breaks the job
@@ -1481,7 +1565,7 @@ async def backfill_loyalty_model(
             try:
                 res = await customers_col.bulk_write(ops, ordered=False)
                 upserted += res.upserted_count
-                updated += res.modified_count
+                updated += res.matched_count
             except Exception as e:
                 logger.warning(f"backfill bulk partial: {e}")
             ops.clear()
@@ -1489,7 +1573,7 @@ async def backfill_loyalty_model(
         try:
             res = await customers_col.bulk_write(ops, ordered=False)
             upserted += res.upserted_count
-            updated += res.modified_count
+            updated += res.matched_count
         except Exception as e:
             logger.warning(f"backfill bulk final partial: {e}")
     report["customers_upserted"] = upserted

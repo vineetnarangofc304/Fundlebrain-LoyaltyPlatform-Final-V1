@@ -1400,9 +1400,18 @@ async def executive_summary(period_days: int = 30, user: dict = Depends(get_curr
     sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
 
     # Active customers + total (R4 + R5: loyalty members by mobile)
+    # CRITICAL: active must be a SUBSET of total. We count distinct mobiles
+    # from transactions in the window, then constrain to those that also
+    # exist in the customers master. This guarantees active <= total.
     active_mobiles = await transactions_col.distinct("customer_mobile",
                                                       loyalty_match({"bill_date": {"$gte": start}}))
-    active = len([m for m in active_mobiles if m])
+    active_mobiles = [m for m in active_mobiles if m]
+    if active_mobiles:
+        active = await customers_col.count_documents(
+            {"mobile": {"$in": active_mobiles}}
+        )
+    else:
+        active = 0
     total_customers = await customers_col.count_documents({"mobile": {"$nin": [None, ""]}})
 
     # Top 5 stores

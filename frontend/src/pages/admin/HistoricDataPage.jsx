@@ -327,10 +327,11 @@ export default function HistoricDataPage() {
               <thead>
                 <tr>
                   <th>Dataset</th><th>Filename</th><th>Status</th><th>Mode</th>
-                  <th className="text-right">Rows</th>
-                  <th className="text-right">Inserted</th>
-                  <th className="text-right">Updated</th>
-                  <th className="text-right">Skipped</th>
+                  <th className="text-right">CSV Rows</th>
+                  <th className="text-right" title="Newly added rows in this run">New</th>
+                  <th className="text-right" title="Existing rows touched (matched in DB)">Touched</th>
+                  <th className="text-right" title="Rows the parser rejected — invalid mobile, missing required field, etc.">Skipped</th>
+                  <th className="text-right" title="Sum of New + Touched + Skipped — should equal CSV Rows">Reconciled</th>
                   <th>Queued</th>
                 </tr>
               </thead>
@@ -339,6 +340,12 @@ export default function HistoricDataPage() {
                   const st = STATUS_STYLES[j.status] || STATUS_STYLES.queued;
                   const Icon = st.icon;
                   const isActive = activeJobId === j.id;
+                  const inserted = j.inserted || 0;
+                  const updated = j.updated || 0;
+                  const skipped = j.skipped || 0;
+                  const csvRows = j.row_count_estimated || j.total_rows || 0;
+                  const reconciled = inserted + updated + skipped;
+                  const isBalanced = csvRows > 0 ? Math.abs(reconciled - csvRows) <= Math.max(2, csvRows * 0.001) : true;
                   return (
                     <tr
                       key={j.id}
@@ -357,10 +364,14 @@ export default function HistoricDataPage() {
                         {j.dry_run ? <span className="pill" style={{ background: "#FAE8FF", color: "#86198F", border: "1px solid #F5D0FE" }}>dry-run</span> : <span className="pill" style={{ background: "#ECFDF5", color: "#047857", border: "1px solid #A7F3D0" }}>live</span>}
                         <span className="ml-1 text-neutral-500 text-[10px]">{j.duplicate_mode}</span>
                       </td>
-                      <td className="text-right tabular-nums">{j.processed?.toLocaleString() ?? 0} / {j.row_count_estimated?.toLocaleString() ?? "?"}</td>
-                      <td className="text-right tabular-nums text-emerald-700 font-medium">{j.inserted?.toLocaleString() ?? 0}</td>
-                      <td className="text-right tabular-nums text-indigo-700">{j.updated?.toLocaleString() ?? 0}</td>
-                      <td className="text-right tabular-nums text-amber-700">{j.skipped?.toLocaleString() ?? 0}</td>
+                      <td className="text-right tabular-nums font-medium">{csvRows.toLocaleString()}</td>
+                      <td className="text-right tabular-nums text-emerald-700 font-medium">{inserted.toLocaleString()}</td>
+                      <td className="text-right tabular-nums text-indigo-700">{updated.toLocaleString()}</td>
+                      <td className="text-right tabular-nums text-amber-700">{skipped.toLocaleString()}</td>
+                      <td className={`text-right tabular-nums font-medium ${isBalanced ? "text-emerald-700" : "text-rose-700"}`} title={isBalanced ? "Reconciled ✓" : `Mismatch: ${csvRows - reconciled} rows unaccounted`}>
+                        {reconciled.toLocaleString()}
+                        {!isBalanced && <span className="ml-1">⚠</span>}
+                      </td>
                       <td className="text-xs text-neutral-500">{fmtDateTime(j.queued_at)}</td>
                     </tr>
                   );

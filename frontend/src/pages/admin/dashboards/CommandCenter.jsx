@@ -13,7 +13,7 @@ import { useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar } from "recharts";
 import api from "@/lib/api";
-import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
+import { fmtINR, fmtINRFull, fmtNum, fmtPct, fmtCompactNum } from "@/lib/format";
 import { PageHeader, KPICard } from "../_shared";
 import { RefreshCw, AlertTriangle, AlertCircle, ChevronRight } from "lucide-react";
 import DrillDownModal from "../DrillDownModal";
@@ -305,6 +305,7 @@ export default function CommandCenter() {
           <KPICard
             label="Net Sales"
             value={fmtINR(k.net_sales)}
+            fullValue={fmtINRFull(k.net_sales)}
             delta={k.net_sales_delta_pct}
             hint={`vs prev ${period}`}
             onClick={openSalesDrill}
@@ -314,6 +315,7 @@ export default function CommandCenter() {
           <KPICard
             label="AOV"
             value={fmtINR(k.aov)}
+            fullValue={fmtINRFull(k.aov)}
             hint="₹ per txn"
             onClick={openSalesDrill}
             accent="indigo"
@@ -321,8 +323,9 @@ export default function CommandCenter() {
           />
           <KPICard
             label="Active Customers"
-            value={fmtNum(k.active_customers)}
-            hint={`of ${fmtNum(k.total_customers)}`}
+            value={fmtCompactNum(k.active_customers)}
+            fullValue={fmtNum(k.active_customers)}
+            hint={`of ${fmtCompactNum(k.total_customers)}`}
             onClick={openActiveCustomers}
             accent="teal"
             testid="cc-kpi-active"
@@ -356,7 +359,8 @@ export default function CommandCenter() {
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <KPICard
             label="Transactions"
-            value={fmtNum(k.transactions)}
+            value={fmtCompactNum(k.transactions)}
+            fullValue={fmtNum(k.transactions)}
             delta={k.transactions_delta_pct}
             onClick={openSalesDrill}
             accent="burgundy"
@@ -372,7 +376,8 @@ export default function CommandCenter() {
           />
           <KPICard
             label="Outstanding Points"
-            value={fmtNum(k.outstanding_points)}
+            value={fmtCompactNum(k.outstanding_points)}
+            fullValue={fmtNum(k.outstanding_points)}
             onClick={() => navigate("/admin/dashboards/loyalty")}
             accent="amber"
             testid="cc-kpi-out-points"
@@ -380,6 +385,7 @@ export default function CommandCenter() {
           <KPICard
             label="Liability"
             value={fmtINR(k.outstanding_liability_inr)}
+            fullValue={fmtINRFull(k.outstanding_liability_inr)}
             hint="@ ₹0.25/pt"
             onClick={() => navigate("/admin/dashboards/loyalty")}
             accent="amber"
@@ -394,7 +400,8 @@ export default function CommandCenter() {
           />
           <KPICard
             label="Total Customers"
-            value={fmtNum(k.total_customers)}
+            value={fmtCompactNum(k.total_customers)}
+            fullValue={fmtNum(k.total_customers)}
             onClick={() => navigate("/admin/customers")}
             accent="teal"
             testid="cc-kpi-total-customers"

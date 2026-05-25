@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" skipped="0" tests="11" time="66.357" timestamp="2026-05-25T20:03:39.884078+00:00" hostname="agent-env-7ac52215-7f1a-46c4-bd6f-8a7a25b5dccb"><testcase classname="backend.tests.iteration13_critical_bugs_test.TestActiveLeqTotal" name="test_active_leq_total[30d]" time="0.762" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestActiveLeqTotal" name="test_active_leq_total[90d]" time="0.173" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestActiveLeqTotal" name="test_active_leq_total[1y]" time="0.150" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestActiveLeqTotal" name="test_active_leq_total[all]" time="0.113" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestFilters" name="test_filter_options_returns_cities" time="0.111" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestFilters" name="test_city_filter_narrows" time="0.367" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestFilters" name="test_city_filter_no_data_returns_zero" time="0.120" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestFilters" name="test_store_filter_narrows" time="0.447" /><testcase classname="backend.tests.iteration13_critical_bugs_test.TestCSVReupload" name="test_first_upload_then_reupload_updates_match_rowcount" time="15.179"><failure message="requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)">/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:534: in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/urllib3/connection.py:571: in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/http/client.py:1415: in getresponse
+    response.begin()
+/usr/local/lib/python3.11/http/client.py:330: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/http/client.py:291: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/socket.py:718: in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/ssl.py:1314: in recv_into
+    return self.read(nbytes, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/ssl.py:1166: in read
+    return self._sslobj.read(len, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TimeoutError: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+/root/.venv/lib/python3.11/site-packages/requests/adapters.py:696: in send
+    resp = conn.urlopen(
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:842: in urlopen
+    retries = retries.increment(
+/root/.venv/lib/python3.11/site-packages/urllib3/util/retry.py:498: in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/urllib3/util/util.py:39: in reraise
+    raise value
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:788: in urlopen
+    response = self._make_request(
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:536: in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:367: in _raise_timeout
+    raise ReadTimeoutError(
+E   urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)
+
+During handling of the above exception, another exception occurred:
+backend/tests/iteration13_critical_bugs_test.py:147: in test_first_upload_then_reupload_updates_match_rowcount
+    r1 = self._wait_complete(auth_headers, job1)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend/tests/iteration13_critical_bugs_test.py:135: in _wait_complete
+    r = requests.get(f"{BASE_URL}/api/historic-data/jobs/{job_id}",
+/root/.venv/lib/python3.11/site-packages/requests/api.py:87: in get
+    return request("get", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/api.py:71: in request
+    return session.request(method=method, url=url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/sessions.py:651: in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/sessions.py:784: in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/adapters.py:742: in send
+    raise ReadTimeout(e, request=request)
+E   requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)</failure></testcase><testcase classname="backend.tests.iteration13_critical_bugs_test.TestAutoBackfill" name="test_txn_ingest_auto_creates_customer_stubs" time="18.274"><failure message="requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)">/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:534: in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/urllib3/connection.py:571: in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/http/client.py:1415: in getresponse
+    response.begin()
+/usr/local/lib/python3.11/http/client.py:330: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/http/client.py:291: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/socket.py:718: in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/ssl.py:1314: in recv_into
+    return self.read(nbytes, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/ssl.py:1166: in read
+    return self._sslobj.read(len, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TimeoutError: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+/root/.venv/lib/python3.11/site-packages/requests/adapters.py:696: in send
+    resp = conn.urlopen(
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:842: in urlopen
+    retries = retries.increment(
+/root/.venv/lib/python3.11/site-packages/urllib3/util/retry.py:498: in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/urllib3/util/util.py:39: in reraise
+    raise value
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:788: in urlopen
+    response = self._make_request(
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:536: in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+/root/.venv/lib/python3.11/site-packages/urllib3/connectionpool.py:367: in _raise_timeout
+    raise ReadTimeoutError(
+E   urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)
+
+During handling of the above exception, another exception occurred:
+backend/tests/iteration13_critical_bugs_test.py:190: in test_txn_ingest_auto_creates_customer_stubs
+    jr = requests.get(f"{BASE_URL}/api/historic-data/jobs/{job_id}",
+/root/.venv/lib/python3.11/site-packages/requests/api.py:87: in get
+    return request("get", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/api.py:71: in request
+    return session.request(method=method, url=url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/sessions.py:651: in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/sessions.py:784: in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/requests/adapters.py:742: in send
+    raise ReadTimeout(e, request=request)
+E   requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='pos-ewards-api.preview.emergentagent.com', port=443): Read timed out. (read timeout=15)</failure></testcase><testcase classname="backend.tests.iteration13_critical_bugs_test.TestRegressionRawReports" name="test_raw_reports_customer_data_group_by_month" time="30.247"><failure message="AssertionError: Unexpected: 405 {&quot;detail&quot;:&quot;Method Not Allowed&quot;}&#10;assert 405 in (200, 400, 422)&#10; +  where 405 = &lt;Response [405]&gt;.status_code">backend/tests/iteration13_critical_bugs_test.py:214: in test_raw_reports_customer_data_group_by_month
+    assert r.status_code in (200, 400, 422), f"Unexpected: {r.status_code} {r.text[:200]}"
+E   AssertionError: Unexpected: 405 {"detail":"Method Not Allowed"}
+E   assert 405 in (200, 400, 422)
+E    +  where 405 = &lt;Response [405]&gt;.status_code</failure></testcase></testsuite></testsuites>

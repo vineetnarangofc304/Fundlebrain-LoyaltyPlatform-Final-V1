@@ -317,13 +317,20 @@ async def top_skus(period: str = "30d", limit: int = 10, user: dict = Depends(ge
 
 @router.get("/filter-options")
 async def filter_options(user: dict = Depends(get_current_user)):
-    """Return distinct cities and active stores for the global filters."""
-    cities = await stores_col.distinct("city", {"is_active": True})
+    """Return distinct cities and active stores for the global filters.
+
+    Cities come from BOTH the stores master AND the transactions city field
+    so brands whose POS tags a bill with a city that has no explicit store
+    master row (e.g. ecommerce / new branch) can still filter by that city.
+    """
+    store_cities = await stores_col.distinct("city", {"is_active": True})
+    txn_cities = await transactions_col.distinct("city", {"city": {"$nin": [None, ""]}})
+    all_cities = sorted(set([c for c in (store_cities + txn_cities) if c]))
     stores = await stores_col.find(
         {"is_active": True},
         {"_id": 0, "id": 1, "code": 1, "name": 1, "city": 1}
     ).sort("name", 1).to_list(500)
-    return {"cities": sorted([c for c in cities if c]), "stores": stores}
+    return {"cities": all_cities, "stores": stores}
 
 
 @router.get("/command-center")
@@ -345,21 +352,34 @@ async def command_center(
     now = datetime.now(timezone.utc)
 
     # Resolve city -> store_ids
+    # We accept the city filter against EITHER stores.city OR transactions.city
+    # because some bills are tagged with a city that doesn't have an explicit
+    # store master row (e.g. ecommerce / pop-up / new branch not yet seeded).
     scoped_store_ids: Optional[List[str]] = None
+    scoped_city_value: Optional[str] = None
     if store_id:
         scoped_store_ids = [store_id]
     elif city:
+        scoped_city_value = city
         rows = await stores_col.find({"city": city, "is_active": True}, {"_id": 0, "id": 1}).to_list(500)
-        scoped_store_ids = [r["id"] for r in rows] or ["__none__"]  # ensure no-match yields no rows
+        scoped_store_ids = [r["id"] for r in rows]
+        # If no store rows match this city, we'll fall back to txn.city in _txn_match below.
 
     # Customer cohort filter — for store/city scope, restrict to LOYALTY customers
     # whose transactions hit at least one of those stores. R4: mobile is the identity.
     scoped_customer_mobiles: Optional[List[str]] = None
-    if scoped_store_ids:
-        mobs = await transactions_col.distinct(
-            "customer_mobile",
-            {"store_id": {"$in": scoped_store_ids}, "customer_mobile": {"$nin": [None, ""]}},
-        )
+    if scoped_store_ids or scoped_city_value:
+        txn_scope_match: Dict[str, Any] = {"customer_mobile": {"$nin": [None, ""]}}
+        if scoped_store_ids and scoped_city_value:
+            txn_scope_match["$or"] = [
+                {"store_id": {"$in": scoped_store_ids}},
+                {"city": scoped_city_value},
+            ]
+        elif scoped_store_ids:
+            txn_scope_match["store_id"] = {"$in": scoped_store_ids}
+        else:
+            txn_scope_match["city"] = scoped_city_value
+        mobs = await transactions_col.distinct("customer_mobile", txn_scope_match)
         scoped_customer_mobiles = [m for m in mobs if m]
 
     def _txn_match(time_field: str, gte, lt=None) -> dict:
@@ -370,8 +390,13 @@ async def command_center(
             m[time_field]["$lt"] = lt
         else:
             m[time_field]["$lte"] = end.isoformat()
-        if scoped_store_ids:
+        # City + store filter — match either explicit store_id list OR txn.city
+        if scoped_store_ids and scoped_city_value:
+            m["$or"] = [{"store_id": {"$in": scoped_store_ids}}, {"city": scoped_city_value}]
+        elif scoped_store_ids:
             m["store_id"] = {"$in": scoped_store_ids}
+        elif scoped_city_value:
+            m["city"] = scoped_city_value
         return m
 
     def _cust_match(extra: Optional[dict] = None) -> dict:
@@ -415,9 +440,18 @@ async def command_center(
 
     # --- Active customers in window (transacted in the window AND in scope) ---
     active_match = _txn_match("bill_date", start.isoformat())
-    # R4 already enforced via LOYALTY_TX_MATCH (customer_mobile non-empty)
+    # R4: mobile is identity. R5 loyalty filter is already in LOYALTY_TX_MATCH.
     active_mobiles = await transactions_col.distinct("customer_mobile", active_match)
-    active = len([m for m in active_mobiles if m])
+    active_mobiles = [m for m in active_mobiles if m]
+    # CRITICAL: active must be a SUBSET of total. If a transaction has a mobile
+    # but no matching row in the customers master (orphan txn from CSV ingest),
+    # we exclude it from "active" to keep the math sane (active <= total always).
+    # The auto-backfill job will create the missing customer rows on next run.
+    if active_mobiles:
+        cust_match_for_active = _cust_match({"mobile": {"$in": active_mobiles}})
+        active = await customers_col.count_documents(cust_match_for_active)
+    else:
+        active = 0
     total_customers = await customers_col.count_documents(_cust_match())
 
     # --- Repeat rate window (customers with >=2 txns in window) ---
