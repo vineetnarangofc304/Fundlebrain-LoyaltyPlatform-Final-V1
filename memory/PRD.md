@@ -31,6 +31,69 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 15 (May 2026) — 🚨 PRODUCTION-URGENT BUG FIXES
+
+User reported on production (https://kazoloyalty.fundlebrain.ai):
+1. *"Active Customers 3,92,434 > Total Customers 1,98,695"* — mathematically impossible
+2. *"City & Store Filter not working"*
+3. *"Total Cust & Active customers not aligned"* + numbers like ₹2910616337.41 not formatted
+4. *"All numbers need to have Crore or Lakh rather than huge numbers"*
+5. *"the ingested data and updated data is NOT matching... URGENT"* — Inserted X but Updated < X
+
+**5 critical fixes shipped + testing agent verified (11/11 backend pass)**:
+
+#### 🔴 1) Active > Total mathematical impossibility — FIXED
+
+Root cause: `active_customers` was counted as `count(distinct customer_mobile in transactions in window)` but `total_customers` was `count(customers master rows)`. Production had transactions with mobiles that were never in the customers master (orphan txns from CSV ingest), so active inflated above total.
+
+Fix in `dashboard_routes.py:444` and `fundlebrain_routes.py:1410`:
+```python
+# Active is now intersected with the customers master
+active_mobiles = distinct("customer_mobile", txn_match)
+active = customers_col.count({"mobile": {"$in": active_mobiles}})  # ≤ total ALWAYS
+```
+
+Plus an **auto-backfill** at every transaction ingest (`historic_routes.py:520-600`) — automatically creates stub customer rows from txn mobiles + recomputes R1 (first_purchase_at), R2 (home_store_id), R3 (visit/spend/earn aggregates). Source flag `auto_from_transactions` so they're distinguishable from CSV-uploaded customers.
+
+#### 🔴 2) City & Store filters now actually work
+
+Root cause: filter only matched `stores.city`. Bills with city tagged on the transaction (e.g. e-commerce, new branch not yet seeded) silently fell through.
+
+Fix in `dashboard_routes.py:35-95`: `_txn_match()` now accepts `$or: [{store_id: $in scoped}, {city: scoped_city}]` so cities matching either path filter correctly. `filter-options` endpoint now returns cities from `union(stores.city, transactions.city)`.
+
+#### 🔴 3) "Ingested X but Updated < X" — CSV data integrity bug FIXED
+
+Root cause: MongoDB's `BulkWriteResult.modified_count` returns 0 for upserts where `$set` values are identical to what's already in DB. On re-uploads of the same CSV, hundreds of thousands of rows look like "lost data" but they're actually fine.
+
+Fix in `historic_routes.py:405-490` and `:1480-1505`:
+```python
+inserted += res.upserted_count
+updated += res.matched_count   # was: res.modified_count
+```
+
+Verified by testing agent: uploading the same CSV twice now reports `updated=3` on the second run (was `0`). The Historic Data UI now shows a new **"Reconciled" column** that = `New + Touched + Skipped` and flashes ⚠ if it doesn't equal `CSV Rows`.
+
+#### 🟡 4) Number formatting — Crore / Lakh / K everywhere
+
+New helpers in `format.js`:
+- `fmtCompactNum(n)` — `1,98,695` → `1.99L`, `12,68,538` → `12.69L`, `2,24,61,500` → `2.25Cr`
+- `fmtINRFull(n)` — full `₹2,91,06,16,337` for tooltips
+- Existing `fmtINR(n)` already does ₹ + Cr/L
+
+Applied to all 10 Command Center KPI tiles: Net Sales · AOV · Active · Transactions · Outstanding Points · Liability · Total Customers etc.
+
+KPICard component (`_shared.jsx:15`) now accepts `fullValue` prop → `title=...` tooltip on the entire tile and on the value line, so hovering reveals the exact unrounded number.
+
+#### 🟡 5) Alignment fix
+
+KPICard now uses `tabular-nums` (CSS feature) + `font-mono` + `truncate` so columns line up vertically across the grid. Responsive sizing: `text-2xl md:text-3xl` so big numbers fit on mobile.
+
+#### 🟢 6) Polish: bare `/admin/dashboards` route now redirects to Command Center (was 404'ing to public landing page).
+
+**Verified**: `/app/test_reports/iteration_13.json` — 11/11 backend pass. Screenshot confirms `Active=18 ≤ Total=46`, all tiles compact-formatted, AI narrative regenerated with correct numbers.
+
+**User next steps**: Redeploy production to push these critical fixes. After redeploy, the prod Active/Total math will be correct AND any new CSV ingest will auto-backfill missing customer rows so the count stays consistent forever.
+
 ### Iteration 14.1 (May 2026) — ✅ Raw Reports v2 · Column Picker · Auto-Refetch · Loading Skeletons · Month Bug Fix
 
 User feedback after v1: *"drill downs necessary in all these report.. also should provide all relevant columns so that user can add delete columns not single column reports.. month etc filters not working.. it only shows store data.. AI insight could come post data coming on screen as it starts getting AI insight and takes time while data also does not load."*
