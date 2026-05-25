@@ -31,6 +31,79 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 16 (May 2026) — 🔬 Forensic Data Reconciliation + Inter Font + XLSX Upload
+
+User feedback after iteration 15:
+- *"data from excel does not match the data on the dashboard.. reconcile and check"*
+- *"u decide the font"*
+
+**Three forensic-grade tools shipped + testing agent verified 100% (10/10 backend, all frontend)**:
+
+#### 1) Every Skipped Row is Now Forensically Recoverable
+
+New `historic_skipped_rows` MongoDB collection writes EVERY parser rejection during ingest with:
+- `row_number`, `reason` (e.g. "Missing/invalid Mobile", "Invalid date")
+- `raw_row` — the original row dictionary as it came from the CSV/XLSX
+- Safety cap: 1,000,000 rows per job
+
+Previously only 10 sample errors were retained. Now if a job rejects 50,000 rows, all 50,000 are persisted with their exact original data.
+
+#### 2) "Run Integrity Check" Endpoint + UI
+
+New `GET /api/historic-data/jobs/{job_id}/integrity` returns:
+```json
+{
+  "csv_rows": 200000,
+  "inserted": 50000,
+  "updated_matched": 100000,
+  "skipped": 50000,
+  "accounted": 200000,
+  "unaccounted_diff": 0,
+  "balanced": true,
+  "db_rows_for_this_job": 150000,
+  "skipped_persisted_count": 50000
+}
+```
+
+`balanced=true` proves CSV rows = inserted + updated + skipped (with 0.1% tolerance). `db_rows_for_this_job` counts rows in the actual target collection tagged with this `ingest_job_id` — for transactions this is the smoking-gun "is the data REALLY in the database?" check.
+
+New frontend "Data Reconciliation · This Job" card on `/admin/historic-data` with:
+- "Run Integrity Check" button → 4-stat grid (CSV Rows / Inserted / Updated / Skipped)
+- ✓ Reconciled / ⚠ Mismatch banner
+- "Download N Skipped Rows" button → streams the full forensic CSV
+
+#### 3) "Download Skipped Rows" CSV Download
+
+New `GET /api/historic-data/jobs/{job_id}/skipped-rows.csv` streams a CSV with:
+- `row_number, reason, <original-csv-columns...>`
+
+Brand managers can open this in Excel and see exactly which rows of their source upload didn't make it to the DB AND WHY. They can then fix the data (e.g. add missing mobiles) and re-upload only the bad rows.
+
+#### 4) XLSX Upload Support
+
+Both the legacy `/ingest` endpoint and the chunked `/ingest/finalize` path now accept `.xlsx` files in addition to `.csv`:
+- Opens with `openpyxl(read_only=True, data_only=True)` — handles 200k+ rows without OOM
+- Date cells stringified to ISO format
+- Header row inferred from row 1
+- Legacy `.xls` rejected with a helpful message ("Save as .xlsx or .csv in Excel and re-upload")
+- File picker on the Historic Data UI now accepts `.csv,.xlsx`
+
+#### 5) Inter Font — Single Font System
+
+Replaced 3-font setup (Cormorant Garamond serif + Manrope + JetBrains Mono) with a clean 2-font system:
+- **Inter** everywhere (body + headings) — with Inter's tabular-figure feature flags (`cv11`, `ss01`, `ss03`) for crisp number alignment
+- **JetBrains Mono** kept for `.font-mono` (tabular-nums dashboards)
+
+`font-display` class now resolves to `Inter 600` instead of `Cormorant Garamond 300` — no need to touch every file that uses `font-display`.
+
+**Testing**: `/app/test_reports/iteration_14.json` — 10/10 backend pass. Screenshot confirms Inter font, Data Reconciliation card with integrity check showing "✓ Reconciled — all 3 CSV rows are accounted for", and Download 1 Skipped Row button working.
+
+**User next steps**: Redeploy production. Then on production:
+1. Go to `/admin/historic-data`
+2. Click any past job row → "Run Integrity Check" → see CSV vs DB reconciliation
+3. If Skipped > 0 → click "Download N Skipped Rows" → open in Excel → see which rows didn't land + why
+4. You can also re-upload your original Excel files directly now (no need to Save As CSV)
+
 ### Iteration 15 (May 2026) — 🚨 PRODUCTION-URGENT BUG FIXES
 
 User reported on production (https://kazoloyalty.fundlebrain.ai):

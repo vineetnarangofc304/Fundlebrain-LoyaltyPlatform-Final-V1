@@ -554,7 +554,7 @@ function AINarrative({ jobs, activeJobId, onRefresh }) {
                 data-testid="download-skipped-btn"
               >
                 <Download className="w-3 h-3" />
-                Download {job.skipped.toLocaleString()} Skipped Rows
+                Download {job.skipped.toLocaleString()} Skipped Row{job.skipped === 1 ? "" : "s"}
               </button>
             )}
           </div>
