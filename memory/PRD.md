@@ -31,6 +31,25 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 17.1 (May 2026) — 🎨 Brand Colours Now Single-File Too
+
+User: *"Ok lets do"* (in response to the optional follow-up offered in iteration 17 to fold the colour palette into `brand.config.js`).
+
+#### What changed
+- Added a `colors` object to `frontend/src/brand.config.js` with `black / cream / burgundy / burgundyDeep / champagne / champagneLight` plus inline comments showing example Red Chief values
+- Added a tiny `useEffect` in `App.js` that injects those 6 values as CSS variables (`--kazo-black`, `--kazo-burgundy`, etc.) on `document.documentElement` at mount
+- Updated `/app/BRANDING.md` Step 2 to recommend editing `brand.config.js` instead of `index.css`
+
+#### Why this matters
+Previously to rebrand colours you had to edit `index.css` (a 321-line file with the CSS variables at the top). Now editing the `colors` object in `brand.config.js` is sufficient — values propagate to every `.kazo-text-burgundy`, `.kazo-bg-black`, etc. class via the runtime CSS-variable injection.
+
+`index.css` still has the original hex values as the initial-paint fallback before React mounts (prevents a flash of unstyled colour); they're harmlessly overridden a frame later by the BRAND-config injection.
+
+#### Verified
+- Public site renders identically — `getComputedStyle(:root).--kazo-burgundy = #571326`, same as before
+- Lint clean, frontend compiles cleanly
+- Single-file rebrand loop confirmed: edit `brand.config.js` → all strings + all colours update
+
 ### Iteration 17 (May 2026) — 🎨 Brand Template Abstraction (Multi-Brand Ready)
 
 User context: *"This is one project for KAZO. We want to do the exact functionality (with different POS APIs) for many more brands. How can I spin up a new Emergent project for, e.g., Red Chief?"*

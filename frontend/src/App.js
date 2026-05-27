@@ -1,6 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
+import { useEffect } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { BRAND } from "@/brand.config";
 import "@/App.css";
 
 // Public pages
@@ -77,6 +79,19 @@ function ProtectedRoute({ children, roles }) {
 }
 
 function App() {
+  // Inject brand colour palette as CSS variables once at mount.
+  // Changing values in brand.config.js will reflect everywhere using
+  // the existing --kazo-* CSS variables — no per-component edits.
+  useEffect(() => {
+    const r = document.documentElement.style;
+    r.setProperty("--kazo-black", BRAND.colors.black);
+    r.setProperty("--kazo-cream", BRAND.colors.cream);
+    r.setProperty("--kazo-burgundy", BRAND.colors.burgundy);
+    r.setProperty("--kazo-burgundy-deep", BRAND.colors.burgundyDeep);
+    r.setProperty("--kazo-champagne", BRAND.colors.champagne);
+    r.setProperty("--kazo-champagne-light", BRAND.colors.champagneLight);
+  }, []);
+
   return (
     <AuthProvider>
       <BrowserRouter>

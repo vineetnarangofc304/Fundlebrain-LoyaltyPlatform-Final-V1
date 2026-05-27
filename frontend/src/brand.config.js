@@ -75,6 +75,25 @@ export const BRAND = {
       "A unified suite for loyalty, CRM, analytics and campaigns — purpose-built for KAZO.",
     imageAlt: "KAZO",
   },
+
+  // -- Brand colour palette ------------------------------------------
+  // These hex values are injected as CSS variables at runtime
+  // (see App.js → useEffect). Variable NAMES stay `--kazo-*` because
+  // 50+ class names like `.kazo-text-burgundy` reference them — only
+  // the VALUES change per brand.
+  //
+  // For Red Chief you might use:
+  //   black: "#0A0A0A", cream: "#F8F4EE",
+  //   burgundy: "#B91C1C", burgundyDeep: "#7F1212",
+  //   champagne: "#1F2937", champagneLight: "#374151",
+  colors: {
+    black: "#0A0A0A",          // --kazo-black           (header / footer)
+    cream: "#F9F8F6",          // --kazo-cream           (page background)
+    burgundy: "#571326",       // --kazo-burgundy        (primary brand accent)
+    burgundyDeep: "#3B0D1B",   // --kazo-burgundy-deep   (hover state)
+    champagne: "#C7A76D",      // --kazo-champagne       (secondary accent / luxury hint)
+    champagneLight: "#E0CFA3", // --kazo-champagne-light (light backgrounds)
+  },
 };
 
 export default BRAND;

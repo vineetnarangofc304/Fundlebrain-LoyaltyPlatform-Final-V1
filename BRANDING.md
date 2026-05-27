@@ -30,29 +30,46 @@ Edit the `BRAND` object:
 - `homeCopy.*`, `footerTagline`, `loginCopy.*`
 - `welcomePointsValue` (default 100 — adjust per brand's promo strategy)
 
-### 2. Brand colours — `frontend/src/index.css`
-At the top of the file you'll see CSS variables like:
+### 2. Brand colours — `frontend/src/brand.config.js` (recommended) OR `index.css` (fallback)
 
-```css
-:root {
-  --kazo-black: #0A0A0A;
-  --kazo-cream: #F9F8F6;
-  --kazo-burgundy: #571326;
-  --kazo-burgundy-deep: #3B0D1B;
-  --kazo-champagne: #C7A76D;
-  --kazo-champagne-light: #E0CFA3;
+The 6 brand colours are now exposed as a `colors` object inside `brand.config.js`:
+
+```js
+colors: {
+  black: "#0A0A0A",
+  cream: "#F9F8F6",
+  burgundy: "#571326",       // primary brand accent
+  burgundyDeep: "#3B0D1B",
+  champagne: "#C7A76D",      // secondary accent
+  champagneLight: "#E0CFA3",
 }
 ```
 
-**Change only the HEX VALUES, not the variable names.** The variable
-names (`--kazo-burgundy`, etc.) are used as stable identifiers across
-50+ components — keep them and just swap colours. For Red Chief you
-might use:
+They are injected as `--kazo-*` CSS variables at app boot via a small
+`useEffect` in `App.js`. Edit values here and every class like
+`.kazo-text-burgundy`, `.kazo-bg-black`, etc. updates automatically.
 
-```css
---kazo-burgundy: #B91C1C;       /* Red Chief brand red */
---kazo-champagne: #1F2937;      /* Charcoal accent */
+**For Red Chief example:**
+
+```js
+colors: {
+  black: "#0A0A0A",
+  cream: "#F8F4EE",
+  burgundy: "#B91C1C",       // Red Chief brand red
+  burgundyDeep: "#7F1212",
+  champagne: "#1F2937",      // charcoal accent (replacing gold)
+  champagneLight: "#374151",
+}
 ```
+
+> Note: variable NAMES (`--kazo-burgundy`, etc.) stay the same — they
+> are stable selectors used across 50+ components. Only the values
+> change per brand.
+
+The literal hex values originally in `frontend/src/index.css` are still
+present as the fallback for the initial paint before React mounts
+(and they're overridden a moment later by the runtime injection from
+`brand.config.js`). You can leave `index.css` untouched.
 
 ### 3. HTML head — `frontend/public/index.html`
 This file is static / build-time and cannot read `brand.config.js`.
