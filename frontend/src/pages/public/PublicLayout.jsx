@@ -2,6 +2,7 @@ import { Link, NavLink, Outlet } from "react-router-dom";
 import { Instagram, Facebook, Youtube } from "lucide-react";
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
+import { BRAND } from "@/brand.config";
 
 const navItems = [
   { to: "/about-program", label: "About Program" },
@@ -17,8 +18,8 @@ export default function PublicLayout() {
   const [cms, setCms] = useState(null);
   useEffect(() => { api.get("/cms/content").then((r) => setCms(r.data)).catch(() => {}); }, []);
   const topbar = cms?.home?.topbar_text || "EXCLUSIVE LOYALTY PROGRAM · EARN ON EVERY PURCHASE · BIRTHDAY PRIVILEGES INSIDE";
-  const tagline = cms?.footer?.tagline || "The official loyalty programme for KAZO — where every purchase becomes a privilege. Designed for the modern Indian woman.";
-  const poweredBy = cms?.footer?.powered_by || "Powered by Fundle";
+  const tagline = cms?.footer?.tagline || BRAND.footerTagline;
+  const poweredBy = cms?.footer?.powered_by || BRAND.poweredBy;
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "var(--kazo-cream)" }}>
@@ -31,7 +32,7 @@ export default function PublicLayout() {
       <header className="border-b border-black/10 bg-[#F9F8F6] sticky top-0 z-40 backdrop-blur" data-testid="public-header">
         <div className="max-w-[1400px] mx-auto px-6 lg:px-12 py-5 flex items-center justify-between">
           <Link to="/" className="flex items-baseline gap-3" data-testid="public-logo-link">
-            <span className="font-display text-3xl tracking-tight" style={{ fontWeight: 600, letterSpacing: "-0.04em" }}>KAZO</span>
+            <span className="font-display text-3xl tracking-tight" style={{ fontWeight: 600, letterSpacing: "-0.04em" }}>{BRAND.name}</span>
             <span className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 hidden sm:inline">Rewards</span>
           </Link>
 
@@ -58,14 +59,14 @@ export default function PublicLayout() {
       <footer className="kazo-bg-black text-white mt-20">
         <div className="max-w-[1400px] mx-auto px-6 lg:px-12 py-16 grid grid-cols-2 lg:grid-cols-5 gap-10">
           <div className="col-span-2">
-            <div className="font-display text-3xl tracking-tight" style={{ fontWeight: 500 }}>KAZO</div>
+            <div className="font-display text-3xl tracking-tight" style={{ fontWeight: 500 }}>{BRAND.name}</div>
             <p className="mt-3 text-sm text-white/60 max-w-xs leading-relaxed">
               {tagline}
             </p>
             <div className="mt-6 flex gap-4">
-              <a href="https://instagram.com/kazo_brand" className="text-white/70 hover:text-white"><Instagram className="w-5 h-5" /></a>
-              <a href="https://facebook.com" className="text-white/70 hover:text-white"><Facebook className="w-5 h-5" /></a>
-              <a href="https://youtube.com" className="text-white/70 hover:text-white"><Youtube className="w-5 h-5" /></a>
+              <a href={BRAND.social.instagram} className="text-white/70 hover:text-white"><Instagram className="w-5 h-5" /></a>
+              <a href={BRAND.social.facebook} className="text-white/70 hover:text-white"><Facebook className="w-5 h-5" /></a>
+              <a href={BRAND.social.youtube} className="text-white/70 hover:text-white"><Youtube className="w-5 h-5" /></a>
             </div>
           </div>
           <div>
@@ -99,7 +100,7 @@ export default function PublicLayout() {
           </div>
         </div>
         <div className="border-t border-white/10 py-5 px-6 lg:px-12 max-w-[1400px] mx-auto flex flex-col md:flex-row items-center justify-between text-xs text-white/40 gap-2">
-          <div>© {new Date().getFullYear()} KAZO. All rights reserved.</div>
+          <div>© {new Date().getFullYear()} {BRAND.legalName}. All rights reserved.</div>
           <div className="tracking-[0.15em] uppercase">{poweredBy}</div>
         </div>
       </footer>

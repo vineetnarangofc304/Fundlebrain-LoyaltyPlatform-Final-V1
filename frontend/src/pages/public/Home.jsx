@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { ArrowUpRight, Sparkles, Crown, Gift, Star, ChevronDown } from "lucide-react";
 import api from "@/lib/api";
 import { toast } from "sonner";
+import { BRAND } from "@/brand.config";
 
 const heroImg = "https://images.unsplash.com/photo-1617551307578-7f5160d6615e?auto=format&fit=crop&w=1400&q=80";
 const fabric = "https://images.unsplash.com/photo-1583744946564-b52ac1c389c8?auto=format&fit=crop&w=1400&q=80";
@@ -23,10 +24,10 @@ export default function Home() {
   const [cms, setCms] = useState(null);
 
   useEffect(() => {
-    document.title = "KAZO Rewards — Powered by Fundle";
+    document.title = BRAND.meta.title;
     api.get("/cms/content").then((r) => setCms(r.data)).catch(() => {});
     const m = document.querySelector('meta[name="description"]');
-    const desc = "Join the official KAZO loyalty programme. Earn points on every purchase, unlock exclusive tier privileges, birthday bonuses, and access VIP collections across India. Powered by Fundle.";
+    const desc = BRAND.meta.description;
     if (m) m.setAttribute("content", desc);
     else {
       const meta = document.createElement("meta");
@@ -51,7 +52,7 @@ export default function Home() {
       if (r.data.already_registered) {
         toast.success(`Welcome back! You're a ${r.data.tier?.toUpperCase()} member with ${r.data.points} points.`);
       } else {
-        toast.success(`Welcome to KAZO Rewards! 100 bonus points credited.`);
+        toast.success(BRAND.welcomeToast);
       }
     } catch (err) {
       toast.error(err?.response?.data?.detail || "Registration failed");
@@ -66,14 +67,14 @@ export default function Home() {
       <section className="relative kazo-bg-black text-white overflow-hidden">
         <div className="grid lg:grid-cols-2 min-h-[80vh]">
           <div className="relative order-2 lg:order-1 px-6 lg:px-16 py-16 lg:py-24 flex flex-col justify-center">
-            <div className="text-[11px] uppercase tracking-[0.3em] text-white/50 mb-6 fade-up">{c.hero_eyebrow || "An Exclusive Programme · Powered by Fundle"}</div>
+            <div className="text-[11px] uppercase tracking-[0.3em] text-white/50 mb-6 fade-up">{c.hero_eyebrow || BRAND.homeCopy.heroEyebrow}</div>
             <h1 className="editorial-headline text-5xl md:text-6xl lg:text-7xl xl:text-8xl mb-6 fade-up" style={{ animationDelay: "0.1s" }}>
               {c.hero_headline_1 || "Where style"}<br />
               <em className="kazo-text-champagne font-light">{c.hero_headline_em || "earns"}</em> {c.hero_headline_2?.split(" ")[0] || "you"}<br />
               {c.hero_headline_2?.split(" ").slice(1).join(" ") || "more."}
             </h1>
             <p className="text-white/70 text-lg max-w-md mb-10 leading-relaxed fade-up" style={{ animationDelay: "0.2s" }}>
-              {c.hero_subtext || "The official KAZO loyalty programme. Every purchase reveals new privileges — from welcome bonuses and birthday gifts to private VIP previews."}
+              {c.hero_subtext || BRAND.homeCopy.heroSubtext}
             </p>
 
             <form onSubmit={submit} className="space-y-3 max-w-md fade-up" style={{ animationDelay: "0.3s" }}>
@@ -84,7 +85,7 @@ export default function Home() {
               <input style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.2)",color:"#fff"}} className="w-full px-3 py-2.5 text-sm placeholder:text-white/40 rounded-[2px] focus:outline-none focus:border-white/60" placeholder="Email (optional)" value={form.email} onChange={(e)=>setForm({...form,email:e.target.value})} data-testid="hero-input-email" />
               <input style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.2)",color:"#fff"}} className="w-full px-3 py-2.5 text-sm placeholder:text-white/40 rounded-[2px] focus:outline-none focus:border-white/60" placeholder="City" value={form.city} onChange={(e)=>setForm({...form,city:e.target.value})} data-testid="hero-input-city" />
               <button type="submit" disabled={submitting} className="k-btn kazo-bg-champagne text-black w-full justify-center font-semibold text-sm uppercase tracking-widest" data-testid="hero-submit-btn">
-                {submitting ? "Joining…" : "Join KAZO Rewards Free"} <ArrowUpRight className="w-4 h-4" />
+                {submitting ? "Joining…" : BRAND.ctaJoinFree} <ArrowUpRight className="w-4 h-4" />
               </button>
             </form>
             {result && (
@@ -103,7 +104,7 @@ export default function Home() {
           </div>
 
           <div className="relative order-1 lg:order-2 min-h-[50vh] lg:min-h-0 overflow-hidden">
-            <img src={c.hero_image_url || heroImg} alt="KAZO premium women's western fashion editorial" className="w-full h-full object-cover" />
+            <img src={c.hero_image_url || heroImg} alt={BRAND.homeCopy.heroImageAlt} className="w-full h-full object-cover" />
             <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
             <div className="absolute bottom-8 left-8 right-8 lg:hidden text-white">
               <div className="text-[11px] uppercase tracking-[0.3em] opacity-60">Spring · Summer 2026</div>
@@ -168,7 +169,7 @@ export default function Home() {
       <section className="kazo-bg-black text-white py-24">
         <div className="max-w-[1400px] mx-auto px-6 lg:px-12 grid lg:grid-cols-2 gap-16 items-center">
           <div className="relative aspect-[4/5] overflow-hidden">
-            <img src={editorial} alt="Model wearing KAZO collection" className="w-full h-full object-cover" />
+            <img src={editorial} alt={BRAND.homeCopy.editorialImageAlt} className="w-full h-full object-cover" />
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-[0.3em] kazo-text-champagne mb-4">VIP PREVIEW</div>
@@ -193,7 +194,7 @@ export default function Home() {
           </div>
           <div className="space-y-8">
             {[
-              { step: "01", title: "Join free", body: "Sign up at any KAZO store or online with your mobile number. Receive 100 welcome points instantly." },
+              { step: "01", title: "Join free", body: `Sign up at any ${BRAND.name} store or online with your mobile number. Receive ${BRAND.welcomePointsValue} welcome points instantly.` },
               { step: "02", title: "Earn effortlessly", body: "Quote your mobile at checkout. Points accrue automatically on every ₹1 spent." },
               { step: "03", title: "Redeem your way", body: "1 point = ₹0.25. Use them on your next purchase, in any store, online or off." },
             ].map((s) => (
@@ -211,7 +212,7 @@ export default function Home() {
 
       {/* FINAL CTA */}
       <section className="relative overflow-hidden" style={{ minHeight: 480 }}>
-        <img src={boutique} alt="KAZO boutique interior" className="absolute inset-0 w-full h-full object-cover" />
+        <img src={boutique} alt={BRAND.homeCopy.boutiqueImageAlt} className="absolute inset-0 w-full h-full object-cover" />
         <div className="absolute inset-0 bg-black/70" />
         <div className="relative max-w-3xl mx-auto px-6 py-24 text-center text-white">
           <div className="text-[11px] uppercase tracking-[0.3em] text-white/60 mb-6">JOIN TODAY</div>

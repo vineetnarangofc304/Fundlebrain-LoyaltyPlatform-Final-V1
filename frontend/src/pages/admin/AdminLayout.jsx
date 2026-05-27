@@ -7,6 +7,7 @@ import {
   Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter, Cake
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import { BRAND } from "@/brand.config";
 
 const SECTIONS = [
   {
@@ -150,9 +151,9 @@ export default function AdminLayout() {
       >
         <div className="p-5 border-b border-white/10 flex items-start justify-between">
           <div>
-            <div className="font-display text-2xl tracking-tight text-white">KAZO</div>
+            <div className="font-display text-2xl tracking-tight text-white">{BRAND.name}</div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-white/40 mt-1 flex items-center gap-1">
-              <Sparkles className="w-3 h-3" /> Powered by Fundle
+              <Sparkles className="w-3 h-3" /> {BRAND.poweredBy}
             </div>
           </div>
           {/* Close button — mobile only */}

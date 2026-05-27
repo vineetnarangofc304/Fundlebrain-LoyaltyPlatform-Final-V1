@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
 import { ArrowRight } from "lucide-react";
+import { BRAND } from "@/brand.config";
 
 export default function LoginShell({ title, subtitle, portal, allowedRoles, redirectTo, dataTestPrefix }) {
   const { login } = useAuth();
@@ -32,21 +33,21 @@ export default function LoginShell({ title, subtitle, portal, allowedRoles, redi
   return (
     <div className="min-h-screen grid lg:grid-cols-2">
       <div className="kazo-bg-black text-white relative overflow-hidden hidden lg:block">
-        <img src="https://images.unsplash.com/photo-1617551307578-7f5160d6615e?auto=format&fit=crop&w=1400&q=80" alt="KAZO" className="absolute inset-0 w-full h-full object-cover opacity-60" />
+        <img src="https://images.unsplash.com/photo-1617551307578-7f5160d6615e?auto=format&fit=crop&w=1400&q=80" alt={BRAND.loginCopy.imageAlt} className="absolute inset-0 w-full h-full object-cover opacity-60" />
         <div className="absolute inset-0 bg-gradient-to-br from-black via-black/70 to-transparent" />
         <div className="relative h-full flex flex-col p-12">
-          <Link to="/" className="font-display text-3xl tracking-tight" style={{ fontWeight: 600 }}>KAZO</Link>
+          <Link to="/" className="font-display text-3xl tracking-tight" style={{ fontWeight: 600 }}>{BRAND.name}</Link>
           <div className="mt-auto">
             <div className="text-[11px] uppercase tracking-[0.3em] kazo-text-champagne mb-4">{portal.toUpperCase()} PORTAL</div>
             <h2 className="editorial-headline text-5xl xl:text-6xl mb-4">Command<br /><em className="font-light kazo-text-champagne">your kingdom.</em></h2>
-            <p className="text-white/60 max-w-md leading-relaxed">A unified suite for loyalty, CRM, analytics and campaigns — purpose-built for KAZO.</p>
+            <p className="text-white/60 max-w-md leading-relaxed">{BRAND.loginCopy.descriptor}</p>
           </div>
-          <div className="text-[11px] uppercase tracking-[0.2em] text-white/40 mt-12">POWERED BY FUNDLE</div>
+          <div className="text-[11px] uppercase tracking-[0.2em] text-white/40 mt-12">{BRAND.poweredBy.toUpperCase()}</div>
         </div>
       </div>
       <div className="flex items-center justify-center p-8 bg-[#F9F8F6]">
         <div className="w-full max-w-md">
-          <Link to="/" className="font-display text-2xl mb-12 inline-block lg:hidden">KAZO</Link>
+          <Link to="/" className="font-display text-2xl mb-12 inline-block lg:hidden">{BRAND.name}</Link>
           <div className="text-[11px] uppercase tracking-[0.3em] kazo-text-burgundy mb-3">{title}</div>
           <h1 className="editorial-headline text-4xl mb-2">{subtitle}</h1>
           <p className="text-sm text-neutral-500 mb-10">Sign in with your credentials.</p>

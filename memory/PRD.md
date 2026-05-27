@@ -31,6 +31,37 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 17 (May 2026) — 🎨 Brand Template Abstraction (Multi-Brand Ready)
+
+User context: *"This is one project for KAZO. We want to do the exact functionality (with different POS APIs) for many more brands. How can I spin up a new Emergent project for, e.g., Red Chief?"*
+
+Recommended workflow: push this codebase to GitHub once, then start a new Emergent task per brand and pull from that repo.
+
+To make per-brand rebranding take **10 minutes instead of grep-replace-across-50-files**, every brand-visible display string is now centralized:
+
+#### New files
+- **`frontend/src/brand.config.js`** — single source of truth for all brand display strings: name, legal name, domain, social URLs, SEO meta, home hero copy, footer tagline, login portal copy, welcome toast, CTA labels, image alt text. Exports a single `BRAND` object.
+- **`/app/BRANDING.md`** — step-by-step rebranding checklist documenting the 9 things to change per brand (config file, CSS variables, HTML head meta, env vars, hero imagery, POS creds, Karix creds, custom domain) and what's intentionally brand-neutral (1500+ React/FastAPI files).
+
+#### Files updated to read from BRAND config
+- `pages/public/Home.jsx` — page title, meta description, hero eyebrow, hero subtext, CTA button, welcome toast, "Sign up at any KAZO" body, all image alt text
+- `pages/public/PublicLayout.jsx` — header logo, footer logo, social URLs (Instagram/FB/YouTube), footer tagline, copyright, "Powered by Fundle"
+- `pages/auth/LoginShell.jsx` — image alt, sidebar logo, mobile logo, "purpose-built for KAZO" descriptor, "POWERED BY FUNDLE" tagline
+- `pages/admin/AdminLayout.jsx` — sidebar "KAZO" header + "Powered by Fundle" subtitle
+
+#### Intentionally NOT abstracted (per pragmatic / minimal-refactor principle)
+- CSS class names (`kazo-text-burgundy`, `kazo-bg-black`, etc.) — kept as stable selectors. Rebranding changes only the CSS variable VALUES at the top of `index.css`, not 100+ class-name references across 50 files.
+- Backend internal strings (system prompts in `ai_routes.py`, ingest narrative templates, etc.) — backend already has `BRAND_NAME` in `.env`; deeper internal references are domain-neutral enough.
+- Test files / fixtures — one-time replacements when the new brand's test suite is built.
+
+**Verified**: Public site title still reads "KAZO Rewards — Powered by Fundle", login screen logo + "purpose-built for KAZO" descriptor + "POWERED BY FUNDLE" tagline all render identically — but now sourcing from `BRAND` config. JS lint clean. Frontend recompiled cleanly. Zero behaviour change for KAZO; full rebrandability for future brands.
+
+**For the next brand** (Red Chief, etc.):
+1. Push KAZO codebase to GitHub via "Save to GitHub" button
+2. Start new Emergent project → pull from that repo
+3. Follow `/app/BRANDING.md` checklist (≈10 minutes per brand)
+4. Each brand = own Emergent project = own MongoDB = own deployment URL
+
 ### Iteration 16 (May 2026) — 🔬 Forensic Data Reconciliation + Inter Font + XLSX Upload
 
 User feedback after iteration 15:
