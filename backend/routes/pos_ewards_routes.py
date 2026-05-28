@@ -55,6 +55,19 @@ pos_wallet_col = db["pos_wallet_requests"]
 
 OTP_TTL_SECONDS = 300  # 5 minutes
 TEST_MODE_RETURN_OTP = os.environ.get("POS_RETURN_OTP_IN_RESPONSE", "true").lower() == "true"
+
+# ---- Test-OTP bypass (for Postman / QA / integration testing) -------
+# When ALLOW_TEST_OTP is true, the universal TEST_OTP value bypasses the
+# random-OTP session lookup so POS integrators can exercise the full
+# customer-check + redemption flows from Postman without provisioning a
+# live SMS gateway. All other security checks (credentials, customer
+# exists, sufficient balance) still apply.
+#
+# To harden a real production environment, set ALLOW_TEST_OTP=false
+# in backend/.env and the bypass disappears.
+ALLOW_TEST_OTP = os.environ.get("ALLOW_TEST_OTP", "true").lower() == "true"
+TEST_OTP = os.environ.get("TEST_OTP", "123456")
+
 DEFAULT_MERCHANT_ID = "KAZO_FUNDLE"
 DEFAULT_CUSTOMER_KEY = "KAZO_MASTER_OUTLET"
 
@@ -437,22 +450,25 @@ async def pos_customer_otp_check(payload: Dict[str, Any], request: Request,
     session = await pos_otp_col.find_one({
         "mobile": mobile, "otp": otp, "purpose": "customer_check", "verified": False,
     }, {"_id": 0})
-    if not session:
+    test_bypass = ALLOW_TEST_OTP and otp == TEST_OTP
+    if not session and not test_bypass:
         resp = _err(400, "Invalid OTP")
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
                        error="invalid OTP", payload=payload, response=resp,
                        api_key_label=cred.get("label"))
         return resp
-    # Check expiry
-    if session.get("expires_at") and session["expires_at"] < _now_iso():
+    # Check expiry (test bypass skips expiry — there is no session)
+    if session and session.get("expires_at") and session["expires_at"] < _now_iso():
         resp = _err(400, "OTP expired")
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
                        error="OTP expired", payload=payload, response=resp,
                        api_key_label=cred.get("label"))
         return resp
-    await pos_otp_col.update_one({"otp_id": session["otp_id"]}, {"$set": {"verified": True, "verified_at": _now_iso()}})
+    if session:
+        await pos_otp_col.update_one({"otp_id": session["otp_id"]}, {"$set": {"verified": True, "verified_at": _now_iso()}})
+    audit_label = (cred.get("label") or "") + (" [TEST_OTP_BYPASS]" if test_bypass else "")
 
     # Return same shape as posCustomerCheck
     cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
@@ -489,7 +505,7 @@ async def pos_customer_otp_check(payload: Dict[str, Any], request: Request,
     })
     await _log_api(endpoint=endpoint, method="POST", status=200,
                    ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                   payload=payload, response=resp, api_key_label=cred.get("label"))
+                   payload=payload, response=resp, api_key_label=audit_label)
     return resp
 
 
@@ -731,53 +747,62 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         return resp
 
     if otp:
-        session = await pos_otp_col.find_one({
-            "mobile": mobile, "otp": otp, "purpose": "redeem_points", "verified": False,
-        }, {"_id": 0})
-        if not session:
-            resp = _err(400, "Invalid OTP.")
-            await _log_api(endpoint=endpoint, method="POST", status=400,
-                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number, error="invalid OTP",
-                           payload=payload, response=resp, api_key_label=cred.get("label"))
-            return resp
-        if session.get("expires_at", "") < _now_iso():
-            resp = _err(400, "OTP expired. Please request a new one.")
-            await _log_api(endpoint=endpoint, method="POST", status=400,
-                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number, error="OTP expired",
-                           payload=payload, response=resp, api_key_label=cred.get("label"))
-            return resp
+        test_bypass = ALLOW_TEST_OTP and otp == TEST_OTP
+        if test_bypass:
+            # Test-OTP bypass — skip the random-OTP session lookup, expiry
+            # and parameter-tampering defenses. We DO still enforce:
+            #   • valid x-api-key + merchant_id + customer_key (already done)
+            #   • customer exists (already done above)
+            #   • sufficient points balance (enforced below)
+            session = None
+        else:
+            session = await pos_otp_col.find_one({
+                "mobile": mobile, "otp": otp, "purpose": "redeem_points", "verified": False,
+            }, {"_id": 0})
+            if not session:
+                resp = _err(400, "Invalid OTP.")
+                await _log_api(endpoint=endpoint, method="POST", status=400,
+                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                               bill_number=bill_number, error="invalid OTP",
+                               payload=payload, response=resp, api_key_label=cred.get("label"))
+                return resp
+            if session.get("expires_at", "") < _now_iso():
+                resp = _err(400, "OTP expired. Please request a new one.")
+                await _log_api(endpoint=endpoint, method="POST", status=400,
+                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                               bill_number=bill_number, error="OTP expired",
+                               payload=payload, response=resp, api_key_label=cred.get("label"))
+                return resp
 
-        # SECURITY: parameter-tampering defense — points must equal the value the OTP was issued for
-        snapshot = session.get("payload_snapshot") or {}
-        original_points = _parse_int(snapshot.get("points"))
-        if original_points and original_points != points_requested:
-            resp = _err(400,
-                         f"Redemption amount mismatch — OTP was issued for {original_points} "
-                         f"points but the request is for {points_requested} points. "
-                         f"Please re-initiate the redemption with the correct amount.")
-            await _log_api(endpoint=endpoint, method="POST", status=400,
-                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number,
-                           error=f"points tamper: otp={original_points} req={points_requested}",
-                           payload=payload, response=resp, api_key_label=cred.get("label"))
-            return resp
+            # SECURITY: parameter-tampering defense — points must equal the value the OTP was issued for
+            snapshot = session.get("payload_snapshot") or {}
+            original_points = _parse_int(snapshot.get("points"))
+            if original_points and original_points != points_requested:
+                resp = _err(400,
+                             f"Redemption amount mismatch — OTP was issued for {original_points} "
+                             f"points but the request is for {points_requested} points. "
+                             f"Please re-initiate the redemption with the correct amount.")
+                await _log_api(endpoint=endpoint, method="POST", status=400,
+                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                               bill_number=bill_number,
+                               error=f"points tamper: otp={original_points} req={points_requested}",
+                               payload=payload, response=resp, api_key_label=cred.get("label"))
+                return resp
 
-        # Bill-number tampering defense (when both sides have a bill)
-        orig_bill = ((snapshot.get("transaction") or {}).get("number")
-                       or (snapshot.get("transaction") or {}).get("id") or "").strip()
-        if orig_bill and bill_number and orig_bill != bill_number:
-            resp = _err(400,
-                         "Bill number mismatch — OTP was issued for a different transaction.")
-            await _log_api(endpoint=endpoint, method="POST", status=400,
-                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number,
-                           error=f"bill tamper: otp={orig_bill} req={bill_number}",
-                           payload=payload, response=resp, api_key_label=cred.get("label"))
-            return resp
+            # Bill-number tampering defense (when both sides have a bill)
+            orig_bill = ((snapshot.get("transaction") or {}).get("number")
+                           or (snapshot.get("transaction") or {}).get("id") or "").strip()
+            if orig_bill and bill_number and orig_bill != bill_number:
+                resp = _err(400,
+                             "Bill number mismatch — OTP was issued for a different transaction.")
+                await _log_api(endpoint=endpoint, method="POST", status=400,
+                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                               bill_number=bill_number,
+                               error=f"bill tamper: otp={orig_bill} req={bill_number}",
+                               payload=payload, response=resp, api_key_label=cred.get("label"))
+                return resp
 
-        await pos_otp_col.update_one({"otp_id": session["otp_id"]}, {"$set": {"verified": True, "verified_at": _now_iso()}})
+            await pos_otp_col.update_one({"otp_id": session["otp_id"]}, {"$set": {"verified": True, "verified_at": _now_iso()}})
 
     if int(cust.get("points_balance") or 0) < points_requested:
         resp = _err(400, "Customer does not have Sufficient Balance to Redeem")

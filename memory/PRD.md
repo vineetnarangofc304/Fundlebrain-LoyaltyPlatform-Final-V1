@@ -31,6 +31,35 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 19 (May 2026) — 🔓 Universal Test OTP `123456` for Postman / QA
+
+User on production: *"mock OTP 123456 not working… while testing APIs from postman"*
+
+**Root cause**: No hardcoded test/bypass OTP existed. Every OTP was randomly generated and stored in `pos_otp_col`. From Postman the integrator couldn't know the real OTP (it would normally be SMS'd to the customer's phone), so they tried `123456` (the universal QA convention) and it failed with "Invalid OTP".
+
+**Fix** — `routes/pos_ewards_routes.py`:
+- Added env-gated test bypass:
+  - `ALLOW_TEST_OTP=true` (default — works out of the box for Postman / QA)
+  - `TEST_OTP=123456` (default — override via env if you want a different test value)
+- When `otp == TEST_OTP` AND `ALLOW_TEST_OTP=true`, the random-OTP session lookup is skipped for BOTH `/api/pos/posCustomerOTPCheck` and `/api/pos/posRedeemPointOtpCheck`. All other security checks remain intact:
+  - 3-factor credential validation (x-api-key + merchant_id + customer_key)
+  - Customer must exist in DB
+  - Sufficient points balance for redemption
+  - Empty OTP still rejected (the iteration 11.3 critical security fix is preserved)
+- Every test-OTP bypass is logged in `api_logs.api_key_label` as `kazo_default [TEST_OTP_BYPASS]` so audit teams can identify test traffic vs real customer traffic in the API Monitor
+
+**Hardening for production**: set `ALLOW_TEST_OTP=false` in `backend/.env` to disable the bypass entirely. With the flag off, `123456` becomes "Invalid OTP" like any other unknown value.
+
+**Verified end-to-end via curl** (Postman-equivalent):
+- `posCustomerOTPCheck` with `otp=123456` → 200 OK, full customer payload with rewards + redeemable points ✅
+- `posCustomerOTPCheck` with `otp=999999` → 400 "Invalid OTP" ✅
+- `posRedeemPointOtpCheck` with `otp=123456`, points=50 → 200 OK, points debited from balance ✅
+- `posRedeemPointOtpCheck` with empty `otp` → 400 "OTP is required" (security fix from iter 11.3 preserved) ✅
+- API Monitor shows `[TEST_OTP_BYPASS]` in the actor column for the 123456 calls ✅
+- Python lint clean
+
+**User next steps**: Redeploy production → POS team can now hit OTP-verify endpoints with `123456` directly from Postman / their POS dev environment, no SMS needed. Before going live with real KAZO customers, flip `ALLOW_TEST_OTP=false` in production env to harden.
+
 ### Iteration 18 (May 2026) — 🔌 Live API Monitor Now Logs ALL Internal Traffic
 
 User on production: *"API Live Monitor is not getting updated… it should show full log error or success whatever log shld come."*
