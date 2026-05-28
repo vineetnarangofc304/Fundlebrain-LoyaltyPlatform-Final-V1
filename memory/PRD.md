@@ -31,6 +31,35 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 18 (May 2026) — 🔌 Live API Monitor Now Logs ALL Internal Traffic
+
+User on production: *"API Live Monitor is not getting updated… it should show full log error or success whatever log shld come."*
+
+**Root cause**: `_log_api()` was wired into POS routes only (60+ call sites in `pos_ewards_routes.py`). Every other API call — auth, dashboards, segments, communications, historic ingest, raw reports, etc. — wrote **nothing** to `api_logs_col`. So if no POS traffic was flowing, the monitor appeared frozen.
+
+**Fix** — new `APILogMiddleware` in `server.py`:
+- Intercepts every `/api/*` request, captures full request body + response body + status + duration + actor (JWT-decoded email) + IP
+- Writes to `api_logs_col` with `source: "internal"` (POS calls keep their richer `source: "pos_ewards"` logging — middleware skips `/api/pos/*` to avoid double-logging)
+- Skipped also: `/api/api-monitor/*` (feedback loop), `/api/live-monitor/*` (3s polling), `/api/auth/me` (token ping), `/api/health`, OPTIONS preflight
+- Payloads capped at 50KB each (BSON-safe). Streaming responses (CSV/XLSX/PDF exports) are marked as streamed, not consumed
+- Log writes are `asyncio.create_task` fire-and-forget so logging never adds latency or can crash the request
+- Failures wrapped in try/except so a logging error never breaks the user's request
+
+**Backend** — `live_monitor_routes.py::list_api_logs` now also filters by `method` (GET/POST/PUT/PATCH/DELETE).
+
+**Frontend** — `APIMonitor.jsx`:
+- "Recent API Calls" table gains a **Method** column + an **Actor** column (shows JWT email for internal calls or POS `api_key_label` for POS calls)
+- 3 filter dropdowns added next to the existing source filter: **Method** (GET/POST/PUT/PATCH/DELETE), **Status** (200/400/401/403/404/500), and the existing **Source** now shows 3 options (All / Internal / POS-eWards)
+
+**Verified live**:
+- Hit `/api/dashboard/kpis`, `/api/customers`, `/api/this-endpoint-does-not-exist`, `/api/auth/login` — all 4 logged with correct method/status/duration/actor
+- Drill-down `/api/api-monitor/log/{id}` returns full `request_payload` + `response_payload` decoded as JSON
+- POS endpoint `/api/pos/posCustomerCheck` still logs via its existing `_log_api()` path with `customer_mobile=966681235` + `api_key_label=kazo_default` — NO double-logging from middleware
+- API Monitor UI confirmed: 200 log rows rendered, 19 distinct endpoints in "By Endpoint" aggregation, all filter dropdowns work
+- Python + JS lint clean
+
+**User next steps**: Redeploy production → log in → DASHBOARDS › Live Bill Monitor → no, wait, that's the bill stream. Go to **OPERATIONS › API Monitor** (or hit `/admin/api-monitor` directly). You'll now see every API call from every admin user + every POS call in one unified live stream with 5-second refresh, filterable by source/method/status.
+
 ### Iteration 17.1 (May 2026) — 🎨 Brand Colours Now Single-File Too
 
 User: *"Ok lets do"* (in response to the optional follow-up offered in iteration 17 to fold the colour palette into `brand.config.js`).

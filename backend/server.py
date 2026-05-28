@@ -1,12 +1,20 @@
 """KAZO Fundle Platform - Main FastAPI server."""
 from fastapi import FastAPI, APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import os
 import logging
 import time
+import json
+import uuid
+import asyncio
+from datetime import datetime, timezone
+from typing import Optional
 from pathlib import Path
+
+import jwt as _jwt
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -115,6 +123,202 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  API Logging Middleware
+#  ----------------------------------------------------------------------
+#  Captures every /api/* request (request + response payload, status,
+#  duration, actor) into the `api_logs` collection so the Live API
+#  Monitor shows full traffic — not just POS calls.
+#
+#  Skipped:
+#    /api/pos/*          — self-logs with richer fields (api_key_label,
+#                          customer_mobile, bill_number) via _log_api()
+#    /api/api-monitor/*  — would create a feedback loop (monitor polls
+#                          itself every 5s)
+#    /api/live-monitor/* — 3-second auto-refresh, would flood logs
+#    /api/auth/me        — token refresh ping
+#    /api/health, /api/  — health checks
+#    OPTIONS             — CORS preflight (no useful info)
+#
+#  Truncation: request and response payloads capped at 50KB each.
+#  Streaming responses (CSV/XLSX/PDF exports, octet-stream) are NOT
+#  consumed so downloads still stream correctly to the client.
+#
+#  Failures in logging itself NEVER affect the request — wrapped in
+#  asyncio.create_task + try/except so client always gets its response.
+# ──────────────────────────────────────────────────────────────────────
+_LOG_SKIP_PREFIXES = (
+    "/api/pos/",
+    "/api/api-monitor",
+    "/api/live-monitor",
+    "/api/auth/me",
+    "/api/health",
+)
+_LOG_MAX_BYTES = 50_000
+_LOG_STREAMING_HINTS = ("text/csv", "application/pdf", "spreadsheetml",
+                        "octet-stream", "application/zip")
+
+
+def _decode_actor_email(request: Request) -> Optional[str]:
+    """Best-effort decode of the JWT to get the actor's email. Never raises."""
+    token = request.cookies.get("kazo_token")
+    if not token:
+        auth_h = request.headers.get("authorization", "")
+        if auth_h.lower().startswith("bearer "):
+            token = auth_h[7:]
+    if not token:
+        return None
+    try:
+        payload = _jwt.decode(
+            token,
+            os.environ["JWT_SECRET"],
+            algorithms=[os.environ.get("JWT_ALGORITHM", "HS256")],
+        )
+        return payload.get("email") or payload.get("sub")
+    except Exception:
+        return None
+
+
+def _decode_body(raw: bytes):
+    """Try JSON first, then plain text. Returns truncation marker if too large."""
+    if not raw:
+        return None
+    if len(raw) > _LOG_MAX_BYTES:
+        return {"_truncated": True, "size_bytes": len(raw)}
+    try:
+        return json.loads(raw)
+    except Exception:
+        try:
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return {"_binary": True, "size_bytes": len(raw)}
+
+
+async def _persist_api_log(doc: dict):
+    """Fire-and-forget insert. Wrapped in try/except so logging failure
+    never crashes the request."""
+    try:
+        from database import api_logs_col
+        await api_logs_col.insert_one(doc)
+    except Exception as e:
+        logging.getLogger("kazo-fundle").debug(f"api_logs insert failed: {e}")
+
+
+class APILogMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        method = request.method
+
+        # Fast-path: skip non-API, OPTIONS, and noisy/self-logging routes
+        if (
+            method == "OPTIONS"
+            or not path.startswith("/api/")
+            or any(path.startswith(p) for p in _LOG_SKIP_PREFIXES)
+        ):
+            return await call_next(request)
+
+        # Capture request body (and re-inject so downstream can still read it)
+        raw_req = b""
+        try:
+            raw_req = await request.body()
+            if raw_req:
+                async def _receive():
+                    return {"type": "http.request", "body": raw_req, "more_body": False}
+                request._receive = _receive
+        except Exception:
+            raw_req = b""
+
+        start = time.perf_counter()
+        actor_email = _decode_actor_email(request)
+        actor_ip = request.client.host if request.client else None
+        error_reason: Optional[str] = None
+        response: Optional[Response] = None
+
+        try:
+            response = await call_next(request)
+        except Exception as e:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            error_reason = f"{type(e).__name__}: {str(e)[:300]}"
+            asyncio.create_task(_persist_api_log({
+                "id": uuid.uuid4().hex,
+                "endpoint": path,
+                "method": method,
+                "status_code": 500,
+                "response_time_ms": elapsed_ms,
+                "customer_mobile": None,
+                "bill_number": None,
+                "store_id": None,
+                "error_reason": error_reason,
+                "request_payload": _decode_body(raw_req),
+                "response_payload": None,
+                "api_key_label": actor_email,
+                "actor_ip": actor_ip,
+                "source": "internal",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }))
+            raise
+
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        # Capture response body — but skip streaming downloads to avoid
+        # blowing memory on large CSV/XLSX exports.
+        content_type = response.headers.get("content-type", "").lower()
+        is_streaming = any(h in content_type for h in _LOG_STREAMING_HINTS)
+
+        response_body_decoded = None
+        if is_streaming:
+            response_body_decoded = {
+                "_streamed": True,
+                "content_type": content_type,
+            }
+        else:
+            try:
+                chunks = []
+                async for chunk in response.body_iterator:
+                    chunks.append(chunk)
+                full = b"".join(chunks)
+                response_body_decoded = _decode_body(full)
+                # Re-emit response so the client still receives the body
+                response = Response(
+                    content=full,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    media_type=response.media_type,
+                )
+            except Exception as e:
+                error_reason = f"log_response_read_failed: {type(e).__name__}"
+
+        if response.status_code >= 400 and not error_reason:
+            # surface the response's `detail` field as the error_reason for grid display
+            if isinstance(response_body_decoded, dict):
+                d = response_body_decoded.get("detail")
+                if d:
+                    error_reason = str(d)[:300]
+
+        asyncio.create_task(_persist_api_log({
+            "id": uuid.uuid4().hex,
+            "endpoint": path,
+            "method": method,
+            "status_code": response.status_code,
+            "response_time_ms": elapsed_ms,
+            "customer_mobile": None,
+            "bill_number": None,
+            "store_id": None,
+            "error_reason": error_reason,
+            "request_payload": _decode_body(raw_req),
+            "response_payload": response_body_decoded,
+            "api_key_label": actor_email,
+            "actor_ip": actor_ip,
+            "source": "internal",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }))
+
+        return response
+
+
+app.add_middleware(APILogMiddleware)
 
 logging.basicConfig(
     level=logging.INFO,

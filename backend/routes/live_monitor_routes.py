@@ -313,6 +313,7 @@ async def list_api_logs(
     limit: int = Query(100, le=500),
     endpoint: Optional[str] = None,
     status_code: Optional[int] = None,
+    method: Optional[str] = None,
     customer_mobile: Optional[str] = None,
     bill_number: Optional[str] = None,
     source: Optional[str] = None,
@@ -326,6 +327,8 @@ async def list_api_logs(
         fil["endpoint"] = endpoint
     if status_code is not None:
         fil["status_code"] = status_code
+    if method:
+        fil["method"] = method.upper()
     if customer_mobile:
         fil["customer_mobile"] = customer_mobile
     if bill_number:

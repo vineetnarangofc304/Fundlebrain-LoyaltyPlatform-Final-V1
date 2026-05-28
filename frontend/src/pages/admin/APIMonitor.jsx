@@ -9,12 +9,14 @@ export default function APIMonitor() {
   const [health, setHealth] = useState(null);
   const [recent, setRecent] = useState([]);
   const [drill, setDrill] = useState(null);
-  const [filter, setFilter] = useState({ endpoint: "", source: "" });
+  const [filter, setFilter] = useState({ endpoint: "", source: "", method: "", status: "" });
 
   const load = async () => {
     const params = { limit: 200 };
     if (filter.endpoint) params.endpoint = filter.endpoint;
     if (filter.source) params.source = filter.source;
+    if (filter.method) params.method = filter.method;
+    if (filter.status) params.status_code = filter.status;
     const [h, r] = await Promise.all([
       api.get("/api-monitor/health"),
       api.get("/api-monitor/logs", { params }),
@@ -66,10 +68,28 @@ export default function APIMonitor() {
         <div className="bg-white border border-black/10 p-5">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500">RECENT API CALLS</div>
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-2 text-xs flex-wrap">
               <select className="k-input k-input-sm" value={filter.source} onChange={(e) => setFilter({ ...filter, source: e.target.value })} data-testid="apimon-source-filter">
                 <option value="">All sources</option>
+                <option value="internal">Internal (admin / dashboards)</option>
                 <option value="pos_ewards">POS (eWards spec)</option>
+              </select>
+              <select className="k-input k-input-sm" value={filter.method} onChange={(e) => setFilter({ ...filter, method: e.target.value })} data-testid="apimon-method-filter">
+                <option value="">All methods</option>
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+              <select className="k-input k-input-sm" value={filter.status} onChange={(e) => setFilter({ ...filter, status: e.target.value })} data-testid="apimon-status-filter">
+                <option value="">All status</option>
+                <option value="200">200 OK</option>
+                <option value="400">400</option>
+                <option value="401">401</option>
+                <option value="403">403</option>
+                <option value="404">404</option>
+                <option value="500">500</option>
               </select>
               {filter.endpoint && (
                 <span className="pill pill-info inline-flex items-center gap-1">
@@ -81,13 +101,14 @@ export default function APIMonitor() {
           </div>
           <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
             <table className="data-table">
-              <thead><tr><th>Timestamp</th><th>Endpoint</th><th>Mobile</th><th>Bill #</th><th className="text-right">Status</th><th className="text-right">ms</th><th>Error</th></tr></thead>
+              <thead><tr><th>Timestamp</th><th>Method</th><th>Endpoint</th><th>Actor</th><th>Bill #</th><th className="text-right">Status</th><th className="text-right">ms</th><th>Error</th></tr></thead>
               <tbody>
                 {recent.map((r) => (
                   <tr key={r.id} onClick={() => setDrill(r)} className="cursor-pointer hover:bg-neutral-50" data-testid={`apilog-row-${r.id}`}>
                     <td className="text-xs whitespace-nowrap">{fmtDateTime(r.timestamp)}</td>
+                    <td className="font-mono text-xs">{r.method || "—"}</td>
                     <td className="font-mono text-xs">{r.endpoint}</td>
-                    <td className="font-mono text-xs">{r.customer_mobile || "—"}</td>
+                    <td className="font-mono text-xs">{r.api_key_label || r.customer_mobile || "—"}</td>
                     <td className="font-mono text-xs">{r.bill_number || "—"}</td>
                     <td className="text-right"><span className={`pill ${r.status_code < 400 ? "pill-success" : "pill-danger"}`}>{r.status_code}</span></td>
                     <td className="text-right font-mono">{r.response_time_ms}</td>
