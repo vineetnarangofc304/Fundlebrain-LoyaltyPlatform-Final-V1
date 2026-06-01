@@ -1289,11 +1289,37 @@ async def return_order(payload: Dict[str, Any], request: Request,
                        bill_number=orig_bill, payload=payload, response=resp,
                        api_key_label=cred.get("label"))
         return resp
-    if original.get("customer_mobile") != mobile:
-        resp = _err(400, "Incorrect Mobile Number", {"order_id": 0})
+    if original.get("customer_mobile") is None or original.get("customer_mobile") == "":
+        # Anonymous walk-in bill (no customer was attached at sale time) — can't
+        # be returned via the loyalty flow because there are no points / loyalty
+        # spend to reverse against any customer.
+        resp = _err(400,
+                     "Original bill is an anonymous walk-in (no loyalty customer was "
+                     "attached at sale time). Return through the standard POS refund "
+                     "flow instead.",
+                     {"order_id": 0})
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                       bill_number=orig_bill, payload=payload, response=resp,
+                       bill_number=orig_bill, error="anonymous bill", payload=payload,
+                       response=resp, api_key_label=cred.get("label"))
+        return resp
+
+    stored_mobile = _norm_mobile(original.get("customer_mobile"))
+    if stored_mobile != mobile:
+        # Normalize-then-compare. If still mismatched, the bill genuinely belongs
+        # to a different customer. Echo the last 4 digits of the stored mobile so
+        # the POS team can self-diagnose (full mobile is masked for privacy).
+        stored_masked = ("******" + stored_mobile[-4:]) if stored_mobile else "<empty>"
+        resp = _err(400,
+                     f"Incorrect Mobile Number — this bill is registered to "
+                     f"{stored_masked}, not {('******' + mobile[-4:]) if mobile else '<empty>'}. "
+                     f"Please re-initiate the return with the correct customer mobile.",
+                     {"order_id": 0})
+        await _log_api(endpoint=endpoint, method="POST", status=400,
+                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                       bill_number=orig_bill,
+                       error=f"mobile mismatch: bill={stored_mobile} req={mobile}",
+                       payload=payload, response=resp,
                        api_key_label=cred.get("label"))
         return resp
 

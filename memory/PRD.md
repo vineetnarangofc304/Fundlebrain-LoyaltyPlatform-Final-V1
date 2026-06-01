@@ -31,6 +31,36 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 20 (Jun 2026) — 🔧 returnOrder Mobile Mismatch Fix (Production Bug)
+
+User on production reported (with full request + response payload in API Monitor):
+- POS sent `mobile: "9266681235"` to `/api/pos/returnOrder` for bill `INVK31232400005`
+- Server returned `400 "Incorrect Mobile Number"` even though the customer exists
+
+**Root cause**: Line 1292 did `original.get("customer_mobile") != mobile` — a **strict string equality**. Historic CSV ingest stored mobiles as `"+919266681235"` (with country code prefix), but POS-incoming mobiles are normalized via `_norm_mobile()` to a clean 10-digit `"9266681235"`. Strict comparison fails, even though both represent the same customer.
+
+Additionally, the same 400 error was emitted for THREE different failure modes — POS team had no way to tell them apart:
+- Anonymous walk-in bills (`customer_mobile=None`)
+- Genuinely wrong customer
+- Format mismatch (the actual bug)
+
+**Fix** — `routes/pos_ewards_routes.py::return_order`:
+1. **Normalize stored mobile via `_norm_mobile()` before comparing** — strips `+91`, spaces, non-digits — so historic-CSV `"+919266681235"` now matches POS-sent `"9266681235"`
+2. **Anonymous walk-in bills** (no `customer_mobile`) get their own clear error: *"Original bill is an anonymous walk-in (no loyalty customer was attached at sale time). Return through the standard POS refund flow instead."*
+3. **Genuinely wrong mobile** now returns a diagnostic with last-4 digits of both sides (privacy-preserved): *"this bill is registered to ******7777, not ******1235. Please re-initiate the return with the correct customer mobile."* — POS team can self-diagnose without phoning support
+4. **API Monitor audit log** captures the full diff: `error="mobile mismatch: bill=9888887777 req=9266681235"`
+
+**Verified end-to-end** (curl, 3 scenarios on preview with seeded bills):
+| Scenario | Before | After |
+|---|---|---|
+| Historic bill stored as `+919266681235`, POS sends `9266681235` | ❌ 400 "Incorrect Mobile Number" | ✅ 200 "Transaction details captured" |
+| Anonymous walk-in bill | ❌ same 400, confusing | ✅ Clear anonymous-walk-in message |
+| Wrong customer's bill | ❌ same 400, no hint | ✅ Diagnostic with last-4 of both |
+
+Python lint clean. Fix is purely defensive — no behaviour change for bills that already had a matching mobile.
+
+**User next steps**: Redeploy production → POS team's `returnOrder` calls will now succeed for the 200k historic bills regardless of how mobile was originally stored. The two new failure-mode messages let them self-diagnose any genuine mismatches.
+
 ### Iteration 19 (May 2026) — 🔓 Universal Test OTP `123456` for Postman / QA
 
 User on production: *"mock OTP 123456 not working… while testing APIs from postman"*
