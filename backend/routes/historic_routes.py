@@ -1668,6 +1668,92 @@ async def purge_demo(body: PurgeIn,
 
 
 # ============================================================
+# One-shot mobile normalization — sweeps customers.mobile +
+# transactions.customer_mobile + points_ledger.customer_mobile +
+# nps_responses.mobile + tickets.customer_mobile, applies the same
+# _norm_mobile() that POS / segment builder / dashboards use
+# (strips +91, country code, spaces, non-digits → clean 10 digit)
+# so historic CSV format and live POS format match across the board.
+# Fully idempotent — safe to re-run.
+# ============================================================
+@router.post("/normalize-mobiles")
+async def normalize_mobiles(
+    user: dict = Depends(require_roles("super_admin", "brand_admin")),
+    dry_run: bool = False,
+):
+    """Sweep every collection that stores a customer mobile and rewrite each
+    value through _norm_mobile() so historic-ingest formats (+91…, 91…, with
+    spaces) match the clean 10-digit form used by POS + segment builder +
+    dashboards. Idempotent.
+
+    Returns a per-collection report:
+      scanned · already_normalized · updated · null_or_empty
+    """
+    from pymongo import UpdateOne
+
+    report: Dict[str, Any] = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "dry_run": dry_run,
+        "collections": {},
+    }
+
+    # collection -> (mongo collection object, field name holding the mobile)
+    targets = [
+        ("customers", customers_col, "mobile"),
+        ("transactions", transactions_col, "customer_mobile"),
+        ("points_ledger", points_ledger_col, "customer_mobile"),
+        ("nps_responses", nps_col, "mobile"),
+        ("support_tickets", tickets_col, "customer_mobile"),
+    ]
+
+    for col_name, col, field in targets:
+        scanned = 0
+        already = 0
+        updated = 0
+        empty = 0
+        ops: List[Any] = []
+        cursor = col.find(
+            {field: {"$exists": True}},
+            {"_id": 1, field: 1},
+        )
+        async for doc in cursor:
+            scanned += 1
+            raw = doc.get(field)
+            if raw is None or raw == "":
+                empty += 1
+                continue
+            norm = _norm_mobile(raw)
+            if not norm:
+                empty += 1
+                continue
+            if str(raw) == norm:
+                already += 1
+                continue
+            updated += 1
+            ops.append(UpdateOne({"_id": doc["_id"]}, {"$set": {field: norm}}))
+            # flush in batches of 1000 to keep memory flat on big collections
+            if len(ops) >= 1000:
+                if not dry_run:
+                    await col.bulk_write(ops, ordered=False)
+                ops = []
+        if ops and not dry_run:
+            await col.bulk_write(ops, ordered=False)
+
+        report["collections"][col_name] = {
+            "field": field,
+            "scanned": scanned,
+            "already_normalized": already,
+            "updated": updated,
+            "null_or_empty": empty,
+        }
+
+    report["finished_at"] = datetime.now(timezone.utc).isoformat()
+    report["total_updated"] = sum(c["updated"] for c in report["collections"].values())
+    report["balanced"] = True
+    return report
+
+
+# ============================================================
 # Loyalty-model backfill — applies R1+R2+R3 + bill uniqueness index
 # to the ENTIRE existing transactions/customers dataset (one-shot).
 # Run once after upgrading the codebase.

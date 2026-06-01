@@ -31,6 +31,48 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 20.1 (Jun 2026) — 🔧 One-Shot Mobile Normalization Backfill
+
+User: *"Yes pls do"* (in response to the iteration-20 follow-up offering a one-shot endpoint to normalize the 200k historic mobiles).
+
+**New endpoint**: `POST /api/historic-data/normalize-mobiles`
+- Sweeps 5 collections that store a customer mobile: `customers.mobile`, `transactions.customer_mobile`, `points_ledger.customer_mobile`, `nps_responses.mobile`, `support_tickets.customer_mobile`
+- Applies the same `_norm_mobile()` already used by POS routes / segment builder / dashboards → strips `+91`, country-code, spaces, hyphens, non-digits → clean 10-digit
+- Streams cursor with bulk_write batches of 1000 — memory-flat on 200k+ rows
+- `?dry_run=true` query param: preview counts without committing any writes
+- Auth: super_admin / brand_admin only
+- Fully idempotent: rows already in 10-digit form are skipped via `already_normalized` counter
+
+**Per-collection report**:
+```json
+{
+  "transactions": { "scanned": 200000, "already_normalized": 195000,
+                    "updated": 4500, "null_or_empty": 500 }
+}
+```
+
+**Verified** end-to-end on preview with seeded messy data:
+| Format | Normalized to |
+|---|---|
+| `+919999000001` | `9999000001` ✅ |
+| `91 9999 000002` (spaces) | `9999000002` ✅ |
+| `91-9999-000005` (hyphens) | `9999000005` ✅ |
+| `9999000003` (already clean) | unchanged → `already_normalized` ✅ |
+| `None` | skipped → `null_or_empty` ✅ |
+| Second run on same data | `total_updated: 0` ✅ idempotent |
+
+Python lint clean. Total runtime on 123 rows in preview: <100ms. Production with 200k transactions should complete in seconds, not minutes.
+
+**User next steps**: Redeploy production → call once via curl:
+```bash
+curl -X POST https://kazoloyalty.fundlebrain.ai/api/historic-data/normalize-mobiles?dry_run=true \
+  -H "Authorization: Bearer <super_admin_token>"
+```
+Review the dry-run report, then drop `?dry_run=true` to commit. After this:
+- `returnOrder` mobile-match rate will hit ~100% on historic bills
+- Customer 360 lookups by mobile will work regardless of how mobile was entered
+- Segment Builder mobile filters will not miss customers due to format drift
+
 ### Iteration 20 (Jun 2026) — 🔧 returnOrder Mobile Mismatch Fix (Production Bug)
 
 User on production reported (with full request + response payload in API Monitor):
