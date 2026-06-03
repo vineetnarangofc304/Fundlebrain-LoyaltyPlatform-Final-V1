@@ -12,7 +12,7 @@ export function PageHeader({ title, subtitle, actions }) {
   );
 }
 
-export function KPICard({ label, value, delta, hint, onClick, mono = true, testid, accent, fullValue }) {
+export function KPICard({ label, value, delta, hint, info, onClick, mono = true, testid, accent, fullValue }) {
   const deltaColor = delta == null ? "" : delta >= 0 ? "text-emerald-700" : "text-rose-700";
   return (
     <div
@@ -20,9 +20,19 @@ export function KPICard({ label, value, delta, hint, onClick, mono = true, testi
       data-accent={accent}
       onClick={onClick}
       data-testid={testid}
-      title={fullValue != null ? String(fullValue) : undefined}
+      title={info || (fullValue != null ? String(fullValue) : undefined)}
     >
-      <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500 mb-2 font-medium truncate">{label}</div>
+      <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500 mb-2 font-medium truncate flex items-center gap-1">
+        <span className="truncate">{label}</span>
+        {info && (
+          <span
+            className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-neutral-300 text-[9px] text-neutral-500 cursor-help shrink-0"
+            title={info}
+            aria-label={info}
+            onClick={(e) => e.stopPropagation()}
+          >?</span>
+        )}
+      </div>
       <div className={`text-2xl md:text-3xl ${mono ? "font-mono" : "font-display"} text-neutral-900 leading-tight tabular-nums truncate`} title={fullValue != null ? String(fullValue) : undefined}>{value}</div>
       <div className="mt-1 flex items-center gap-2 text-xs">
         {delta != null && (

@@ -77,23 +77,24 @@ export default function CouponEngine() {
         <div className="bg-white border border-black/10 overflow-x-auto">
           <table className="data-table">
             <thead>
-              <tr><th>Code</th><th>Name</th><th>Type</th><th>Value</th><th>Min Bill</th><th>Valid To</th><th className="text-right">Used / Issued</th><th>Status</th><th></th></tr>
+              <tr><th>Code</th><th>Name</th><th>Type</th><th>Value</th><th>Min Bill</th><th>Issued On</th><th>Valid To</th><th className="text-right">Used / Issued</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
               {coupons.map((c) => (
                 <tr key={c.id} data-testid={`coupon-row-${c.code}`}>
-                  <td className="font-mono font-semibold">{c.code}</td>
+                  <td><span className="font-mono font-semibold inline-block px-2 py-0.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-sm" data-testid={`coupon-code-${c.code}`}>{c.code}</span></td>
                   <td>{c.name}</td>
                   <td><span className="pill pill-neutral">{c.coupon_type}</span></td>
                   <td className="font-mono">{c.coupon_type === "percentage" ? `${c.discount_value}%` : `₹${c.discount_value}`}</td>
                   <td className="font-mono">₹{c.min_bill_amount || 0}</td>
+                  <td className="text-xs text-neutral-600">{c.created_at ? fmtDate(c.created_at) : "—"}</td>
                   <td className="text-xs">{fmtDate(c.valid_to)}</td>
                   <td className="text-right font-mono">{fmtNum(c.times_used)} / {fmtNum(c.times_issued)}</td>
                   <td><StatusPill status={c.is_active ? "active" : "inactive"} /></td>
                   <td><button className="k-btn k-btn-ghost k-btn-sm" onClick={() => openEdit(c)} data-testid={`edit-coupon-${c.code}`}>Edit</button></td>
                 </tr>
               ))}
-              {coupons.length === 0 && <tr><td colSpan={9} className="text-center py-10 text-neutral-500">No coupons yet</td></tr>}
+              {coupons.length === 0 && <tr><td colSpan={10} className="text-center py-10 text-neutral-500">No coupons yet</td></tr>}
             </tbody>
           </table>
         </div>

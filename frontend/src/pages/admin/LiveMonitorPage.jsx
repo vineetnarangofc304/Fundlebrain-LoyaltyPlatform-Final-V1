@@ -95,13 +95,14 @@ export default function LiveMonitorPage() {
       <div className="p-8 space-y-6">
         {/* KPI strip */}
         {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3" data-testid="lm-kpis">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3" data-testid="lm-kpis">
             <KPI label="Bills" value={(stats.bills_total || 0).toLocaleString()} icon={Receipt} color={PALETTE.burgundy} />
-            <KPI label="With Mobile" value={(stats.bills_with_mobile || 0).toLocaleString()} icon={Phone} color={PALETTE.emerald} />
+            <KPI label="Loyalty Bills" value={(stats.bills_with_mobile || 0).toLocaleString()} icon={Phone} color={PALETTE.emerald} testid="lm-kpi-loyalty-bills" />
             <KPI label="Lost Opp." value={(stats.bills_without_mobile || 0).toLocaleString()}
                   icon={PhoneOff} color={PALETTE.rose} testid="lm-kpi-lost" />
             <KPI label="Attach %" value={`${(stats.mobile_attach_rate_pct || 0).toFixed(1)}%`} icon={CheckCircle2} color={PALETTE.indigo} />
-            <KPI label="Revenue" value={fmtCurrency(stats.revenue_total)} icon={ShoppingBag} color={PALETTE.teal} />
+            <KPI label="Total Purchase" value={fmtCurrency(stats.revenue_total)} icon={ShoppingBag} color={PALETTE.teal} testid="lm-kpi-total-rev" />
+            <KPI label="Loyalty Purchase" value={fmtCurrency(stats.revenue_with_mobile)} icon={Award} color={PALETTE.emerald} testid="lm-kpi-loyalty-rev" />
             <KPI label="Pts Earned" value={(stats.points_earned || 0).toLocaleString()} icon={Coins} color={PALETTE.amber} />
             <KPI label="Returns" value={(stats.returns || 0).toLocaleString()} icon={TrendingDown} color={PALETTE.rose} />
           </div>
@@ -178,8 +179,10 @@ export default function LiveMonitorPage() {
                   <th className="w-2"></th>
                   <th>Bill Date · Time</th>
                   <th>Store</th>
+                  <th>Loc Code</th>
                   <th>Bill #</th>
                   <th>Customer</th>
+                  <th>Type</th>
                   <th>Mobile</th>
                   <th className="text-right">Amount</th>
                   <th className="text-right">Earn</th>
@@ -189,7 +192,7 @@ export default function LiveMonitorPage() {
               </thead>
               <tbody>
                 {rows.length === 0 ? (
-                  <tr><td colSpan={10} className="py-10 text-center text-neutral-500 text-sm">Waiting for live bills…</td></tr>
+                  <tr><td colSpan={12} className="py-10 text-center text-neutral-500 text-sm">Waiting for live bills…</td></tr>
                 ) : rows.map((r) => (
                   <tr key={r.id} onClick={() => setDrillRow(r)} className="cursor-pointer hover:bg-neutral-50"
                        style={{ borderLeft: `4px solid ${r.has_mobile ? PALETTE.emerald : PALETTE.rose}` }}
@@ -204,6 +207,7 @@ export default function LiveMonitorPage() {
                       <div className="font-medium truncate max-w-[200px]" title={r.store_name}>{r.store_name || "—"}</div>
                       {r.city && <div className="text-[10px] text-neutral-500">{r.city}{r.zone ? ` · ${r.zone}` : ""}</div>}
                     </td>
+                    <td className="font-mono text-[11px] text-neutral-700">{r.store_code || "—"}</td>
                     <td className="font-mono text-[11px]">{r.bill_number}</td>
                     <td className="text-[12px]">
                       {r.customer_name ? (
@@ -214,6 +218,11 @@ export default function LiveMonitorPage() {
                         <span className="text-[10px] text-rose-700 font-medium uppercase tracking-widest">LOST OPP.</span>
                       )}
                       {r.tier && <div className="text-[10px] text-neutral-500 uppercase tracking-widest">{r.tier}</div>}
+                    </td>
+                    <td className="text-[10px] uppercase tracking-widest">
+                      {r.has_mobile
+                        ? <span className="pill pill-success">Loyalty</span>
+                        : <span className="pill pill-danger">Walk-in</span>}
                     </td>
                     <td className="font-mono text-[12px]">
                       {r.customer_mobile ? (

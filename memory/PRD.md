@@ -31,7 +31,53 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
-### Iteration 20.1 (Jun 2026) — 🔧 One-Shot Mobile Normalization Backfill
+### Iteration 21 (Jun 2026) — 📋 Dashboard Refresh Wave 1 — Tooltips, Repeat Count, Live Monitor Columns, Coupon Engine Issued-On
+
+User uploaded a 39-item list (Kazo_dashboard_changes.docx) of changes across 13 tabs. **Wave 1 ships the highest-visibility items in one batch** (more waves to follow).
+
+**Backend** (`routes/dashboard_routes.py::command_center`):
+- Added `repeat_customers` (raw count of customers with ≥2 txns in window) and `items_sold` (total line items in window) to the kpis response. The data was already computed but never exposed.
+
+**Frontend `_shared.jsx`** — extended `KPICard` with optional `info` prop. Renders a small `?` icon next to the label; hovering shows a tooltip with the metric's definition. Backwards-compatible — every existing KPICard call still works.
+
+**Command Center** (`CommandCenter.jsx`):
+- **Repeat Rate KPI** now displays `count (pct%)` — e.g. `2 (9.1%)` instead of just `9.1%` (user's #1 complaint about Command Center)
+- **UPT KPI** now shows `items_sold / transactions` as hint (e.g. `5 items / 41 txns`) — debugs why UPT looks low when it's a data-coverage issue
+- **Outstanding Points** info tooltip: full definition of points sitting on customer wallets unredeemed
+- **Liability** info tooltip: explains the ₹0.25/pt burn-ratio math
+- **Open Complaints** info tooltip: explains "open + in_progress" tickets
+- **Repeat Rate / UPT** info tooltips: clear formula + caveat
+
+**Live Bill Monitor** (`LiveMonitorPage.jsx`):
+- Renamed "With Mobile" → "Loyalty Bills" + added "Loyalty Purchase" (₹) KPI (already in API as `revenue_with_mobile`, just wasn't displayed)
+- Renamed "Revenue" → "Total Purchase" for clarity
+- KPI strip grew from 7 to 8 cards
+- Bills table gains 2 new columns: **Loc Code** (`store_code`) and **Type** (Loyalty pill / Walk-in pill — derived from `has_mobile`)
+
+**Coupon Engine** (`CouponEngine.jsx`):
+- **Code** column now visually prominent (amber pill styling) so the dummy code is clearly readable
+- New **Issued On** column showing `created_at` date
+
+**Verified** end-to-end via curl + screenshot — all data populates correctly, lint passes (4 JSX + 1 PY), zero regressions.
+
+### Remaining items from the docx — what's still pending (for next waves)
+| Tab | Outstanding work |
+|---|---|
+| Command Center | Date Range filter (already there as `period` dropdown, may need verification on prod) |
+| Live Bill Monitor | Repeat Bills KPI (count of bills from repeat customers — needs backend) · explicit Date range picker for historical bills |
+| Sales Dashboard | Date range filter verification |
+| Customer Analytics | One-timer vs Repeat bifurcation · `health_distribution` is `null` — needs backend computation |
+| Loyalty Dashboard | Add explicit tier-wise sales column (currently shows count + avg_spend + points; needs total_spend) · Date range |
+| Store Performance | Confirmed renders fine on preview — production "not loading" was likely pre-deploy stale |
+| RFM & Churn | Backend math is correct; "At Risk / Lost = 0" is genuine preview-data concentration. Will populate on prod with 200k varied customers · Raw CSV export broken — investigate |
+| Cohorts & Segments | `recency_distribution` is `null` — backend computation needed · Raw CSV export |
+| Points Economics | Top 10 earning/burning stores (new component) · Outstanding tooltip · Date range · Raw CSV export |
+| Executive Summary | Confirmed renders fine on preview — production "not loading" was likely pre-deploy stale |
+| Segment Builder | Pick-and-drop investigation · Raw data · Date range |
+| Coupon Engine | Customer mobile per-issuance (requires new tracking table) · Date range |
+| Raw Customer Data | Full column set audit (Location, Loc Code, Mobile, Name, Bills, Purchase, Visits, Last Purchase, Earn, Burn, Email, Bday, Anniversary) · Investigate not-populating bug |
+
+**User next step**: Redeploy production → screenshot the Command Center + Live Monitor + Coupon Engine to verify wave 1 changes land. Then we pick the next wave of items to tackle.
 
 User: *"Yes pls do"* (in response to the iteration-20 follow-up offering a one-shot endpoint to normalize the 200k historic mobiles).
 

@@ -332,8 +332,9 @@ export default function CommandCenter() {
           />
           <KPICard
             label="Repeat Rate"
-            value={fmtPct(k.repeat_rate_pct)}
-            hint={`≥2 txns in ${period}`}
+            value={`${fmtNum(k.repeat_customers)} (${fmtPct(k.repeat_rate_pct)})`}
+            hint={`customers with ≥2 txns in ${period}`}
+            info="Repeat Rate = customers who placed 2 or more orders in the selected period, shown as count and as a % of all loyalty customers who transacted in the window."
             onClick={() => navigate("/admin/dashboards/customers")}
             accent="emerald"
             testid="cc-kpi-repeat-rate"
@@ -369,7 +370,8 @@ export default function CommandCenter() {
           <KPICard
             label="UPT"
             value={k.upt?.toFixed(2)}
-            hint="units per txn"
+            hint={`${fmtNum(k.items_sold)} items / ${fmtNum(k.transactions)} txns`}
+            info="UPT (Units Per Transaction) — average number of line items per bill. Higher UPT signals stronger cross-sell and attach. Counts the items array on each transaction; bills ingested before items-tracking will under-report."
             onClick={openSalesDrill}
             accent="indigo"
             testid="cc-kpi-upt"
@@ -378,6 +380,7 @@ export default function CommandCenter() {
             label="Outstanding Points"
             value={fmtCompactNum(k.outstanding_points)}
             fullValue={fmtNum(k.outstanding_points)}
+            info="OUTSTANDING POINTS — total loyalty points sitting on customer wallets that have not yet been redeemed. The cumulative sum of points_balance across all customers. Think of it as the size of your loyalty liability in point form."
             onClick={() => navigate("/admin/dashboards/loyalty")}
             accent="amber"
             testid="cc-kpi-out-points"
@@ -387,6 +390,7 @@ export default function CommandCenter() {
             value={fmtINR(k.outstanding_liability_inr)}
             fullValue={fmtINRFull(k.outstanding_liability_inr)}
             hint="@ ₹0.25/pt"
+            info="LIABILITY — the rupee value of all outstanding loyalty points if every customer redeemed today. Calculated as Outstanding Points × ₹0.25 (the configured burn ratio). This is the worst-case payout obligation on your books."
             onClick={() => navigate("/admin/dashboards/loyalty")}
             accent="amber"
             testid="cc-kpi-liability"
@@ -394,6 +398,7 @@ export default function CommandCenter() {
           <KPICard
             label="Open Complaints"
             value={fmtNum(k.open_complaints)}
+            info="OPEN COMPLAINTS — support tickets currently in 'open' or 'in_progress' status (not yet resolved or closed). Spike here typically reflects a service quality issue, fulfilment SLA breach, or a stuck redemption. Drill in to triage."
             onClick={openOpenComplaints}
             accent="rose"
             testid="cc-kpi-complaints"
