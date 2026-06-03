@@ -126,7 +126,7 @@ async def live_transactions(
 
 @router.get("/stats")
 async def live_stats(
-    minutes: int = Query(60, ge=1, le=1440),
+    minutes: int = Query(60, ge=1, le=525600),  # up to 365 days (1 year)
     user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
                                          "marketing_manager", "regional_manager",
                                          "analytics_viewer", "readonly_executive")),
@@ -167,6 +167,21 @@ async def live_stats(
     rev_with = float(base.get("revenue_with_mobile") or 0)
     attach_rate = (with_mob / bills * 100) if bills else 0.0
 
+    # Repeat bills — bills whose customer_mobile appears 2+ times in the window
+    repeat_pipe = [
+        {"$match": {"bill_date": {"$gte": cutoff},
+                     "customer_mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$customer_mobile", "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gte": 2}}},
+        {"$group": {"_id": None,
+                     "repeat_customers": {"$sum": 1},
+                     "repeat_bills": {"$sum": "$n"}}},
+    ]
+    rr = await transactions_col.aggregate(repeat_pipe).to_list(1)
+    rr_doc = rr[0] if rr else {}
+    repeat_bills = int(rr_doc.get("repeat_bills") or 0)
+    repeat_customers = int(rr_doc.get("repeat_customers") or 0)
+
     # Per-store top performers
     pipe_store = [
         {"$match": {"bill_date": {"$gte": cutoff}}},
@@ -194,6 +209,8 @@ async def live_stats(
         "bills_total": bills,
         "bills_with_mobile": with_mob,
         "bills_without_mobile": lost,
+        "repeat_bills": repeat_bills,
+        "repeat_customers": repeat_customers,
         "mobile_attach_rate_pct": round(attach_rate, 2),
         "revenue_total": round(revenue, 2),
         "revenue_with_mobile": round(rev_with, 2),

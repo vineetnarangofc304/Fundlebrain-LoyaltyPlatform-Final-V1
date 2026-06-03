@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from database import (
     customers_col, transactions_col, points_ledger_col, coupons_col,
     coupon_redemptions_col, tickets_col, nps_col, campaigns_col,
+    stores_col,
 )
 from auth import get_current_user, log_audit
 from models import CustomerCreate, Customer
@@ -34,6 +35,20 @@ async def list_customers(
         fil["churn_risk"] = churn_risk
     total = await customers_col.count_documents(fil)
     customers = await customers_col.find(fil, {"_id": 0}).sort("lifetime_spend", -1).skip(skip).limit(limit).to_list(limit)
+
+    # Enrich each customer with home_store_code + home_store_name from store master,
+    # so the Raw Customer Data table can show the "Location code" column (docx #39).
+    store_ids = list({c.get("home_store_id") for c in customers if c.get("home_store_id")})
+    store_map: dict = {}
+    if store_ids:
+        async for s in stores_col.find({"id": {"$in": store_ids}}, {"_id": 0, "id": 1, "name": 1, "code": 1}):
+            store_map[s["id"]] = s
+    for c in customers:
+        sid = c.get("home_store_id")
+        s = store_map.get(sid) if sid else None
+        c["home_store_code"] = (s or {}).get("code") or "—"
+        c["home_store_name"] = (s or {}).get("name") or "—"
+
     return {"total": total, "items": customers}
 
 

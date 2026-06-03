@@ -631,11 +631,20 @@ async def store_performance_v2(
 # RFM & Churn — 5×5 heatmap + 11 named segments + churn buckets
 # ============================================================
 @router.get("/rfm")
-async def rfm_dashboard(user: dict = Depends(get_current_user)):
+async def rfm_dashboard(
+    period_days: int = Query(0, ge=0, le=3650),
+    user: dict = Depends(get_current_user),
+):
     now = datetime.now(timezone.utc)
+    # period_days=0 → all time. Otherwise restrict to customers whose last_visit
+    # is within the window. This trims the cohort to the recently-active universe.
+    base_query: Dict[str, Any] = {}
+    if period_days > 0:
+        cutoff = (now - timedelta(days=period_days)).isoformat()
+        base_query["last_visit_at"] = {"$gte": cutoff}
 
     customers = await customers_col.find(
-        {}, {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1,
+        base_query, {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1,
               "last_visit_at": 1, "visit_count": 1, "lifetime_spend": 1, "churn_risk": 1}
     ).to_list(100000)
 
@@ -761,9 +770,16 @@ SPEND_BANDS = [
 
 
 @router.get("/cohorts-segmentation")
-async def cohorts_segmentation(user: dict = Depends(get_current_user)):
+async def cohorts_segmentation(
+    period_days: int = Query(0, ge=0, le=3650),
+    user: dict = Depends(get_current_user),
+):
     """Live cohorts + segmentation: one-timers, frequency bands, ATV, retention triangle."""
     now = datetime.now(timezone.utc)
+    cohort_query: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
+    if period_days > 0:
+        cutoff = (now - timedelta(days=period_days)).isoformat()
+        cohort_query["last_visit_at"] = {"$gte": cutoff}
 
     # ---- One pass over transactions: per-customer aggregates (R4: by mobile; R5: loyalty only) ----
     cust_pipe = [
@@ -782,7 +798,7 @@ async def cohorts_segmentation(user: dict = Depends(get_current_user)):
 
     # Pull customer master for tier/city (loyalty members only) — key by mobile (R4)
     masters = await customers_col.find(
-        {"mobile": {"$nin": [None, ""]}},
+        cohort_query,
         {"_id": 0, "id": 1, "mobile": 1, "tier": 1, "city": 1,
          "first_purchase_at": 1, "name": 1, "home_store_id": 1}
     ).to_list(200000)
@@ -960,18 +976,22 @@ async def cohorts_segmentation(user: dict = Depends(get_current_user)):
 
     # ---- One-timer focus: revenue at risk + recency ----
     one_timer_bucket = freq_buckets["one_timer"]
-    # Recency distribution for one-timers
+    # Recency distribution for one-timers — read directly from customers master so it
+    # works even when transaction-side enrichment hasn't populated for every cust.
     one_timer_rec = {"0-30d": 0, "31-90d": 0, "91-180d": 0, "180d+": 0}
-    for cust in masters:
-        cid = cust["id"]
-        tx = cust_map.get(cid)
-        if not tx or tx["visits"] != 1:
+    onetimer_cursor = customers_col.find(
+        {**cohort_query, "visit_count": 1, "last_visit_at": {"$ne": None}},
+        {"_id": 0, "last_visit_at": 1},
+    )
+    async for cust in onetimer_cursor:
+        lv = cust.get("last_visit_at")
+        if not lv:
             continue
         try:
-            last_dt = datetime.fromisoformat(tx["last"].replace("Z", "+00:00"))
+            last_dt = datetime.fromisoformat(lv.replace("Z", "+00:00"))
             days = (now - last_dt).days
         except Exception:
-            days = 9999
+            continue
         if days <= 30:
             one_timer_rec["0-30d"] += 1
         elif days <= 90:
@@ -1113,6 +1133,53 @@ async def points_economics(period_days: int = 90, user: dict = Depends(get_curre
     breakage_points = int(brk.get("points", 0) or 0)
     breakage_inr = round(breakage_points * burn_ratio, 2)
 
+    # ---- Top 10 earning + burning stores in window (R6 — points_earned/redeemed
+    # are directly on transactions, so we aggregate from there) ----
+    stores_earn_pipe = [
+        {"$match": {"bill_date": {"$gte": start},
+                     "points_earned": {"$gt": 0},
+                     "store_id": {"$ne": None}}},
+        {"$group": {"_id": "$store_id",
+                     "points_earned": {"$sum": "$points_earned"},
+                     "bills": {"$sum": 1},
+                     "net_amount": {"$sum": "$net_amount"}}},
+        {"$sort": {"points_earned": -1}},
+        {"$limit": 10},
+    ]
+    stores_burn_pipe = [
+        {"$match": {"bill_date": {"$gte": start},
+                     "points_redeemed": {"$gt": 0},
+                     "store_id": {"$ne": None}}},
+        {"$group": {"_id": "$store_id",
+                     "points_redeemed": {"$sum": "$points_redeemed"},
+                     "bills": {"$sum": 1},
+                     "net_amount": {"$sum": "$net_amount"}}},
+        {"$sort": {"points_redeemed": -1}},
+        {"$limit": 10},
+    ]
+    se_rows = await transactions_col.aggregate(stores_earn_pipe).to_list(10)
+    sb_rows = await transactions_col.aggregate(stores_burn_pipe).to_list(10)
+    store_ids = list({r["_id"] for r in (se_rows + sb_rows) if r.get("_id")})
+    store_master = {s["id"]: s async for s in stores_col.find(
+        {"id": {"$in": store_ids}}, {"_id": 0, "id": 1, "name": 1, "code": 1, "city": 1})}
+    def _hydrate(rows, key):
+        out = []
+        for r in rows:
+            s = store_master.get(r["_id"]) or {}
+            out.append({
+                "store_id": r["_id"],
+                "store_name": s.get("name") or "Unknown",
+                "store_code": s.get("code") or "—",
+                "city": s.get("city") or "—",
+                "points": int(r.get(key, 0) or 0),
+                "bills": int(r.get("bills", 0) or 0),
+                "inr_value": round(int(r.get(key, 0) or 0) * burn_ratio, 2),
+                "net_amount": round(float(r.get("net_amount", 0) or 0), 2),
+            })
+        return out
+    top_stores_earning = _hydrate(se_rows, "points_earned")
+    top_stores_burning = _hydrate(sb_rows, "points_redeemed")
+
     return {
         "period_days": period_days,
         "generated_at": now.isoformat(),
@@ -1140,6 +1207,8 @@ async def points_economics(period_days: int = 90, user: dict = Depends(get_curre
         },
         "monthly_flow": monthly_flow,
         "top_redeemers": top_redeemers,
+        "top_stores_earning": top_stores_earning,
+        "top_stores_burning": top_stores_burning,
     }
 
 

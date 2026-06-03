@@ -3,7 +3,9 @@ import { Link, useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader } from "./_shared";
 import { fmtINR, fmtNum, fmtDate, tierClass } from "@/lib/format";
-import { Search } from "lucide-react";
+import { Search, Download } from "lucide-react";
+
+const PAGE_SIZE = 100;
 
 export default function Customer360() {
   const [searchParams] = useSearchParams();
@@ -14,15 +16,58 @@ export default function Customer360() {
 
   const load = async () => {
     setLoading(true);
-    const r = await api.get("/customers", { params: { q, ...filter, limit: 100 } });
-    setData(r.data);
-    setLoading(false);
+    try {
+      const r = await api.get("/customers", { params: { q, ...filter, limit: PAGE_SIZE } });
+      setData(r.data);
+    } finally {
+      setLoading(false);
+    }
   };
-  useEffect(() => { load(); }, [filter]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [filter]);
+
+  const exportCsv = () => {
+    const header = ["Location","Loc Code","Mobile","Name","Total Bills","Total Purchase","Total Visits","Last Purchase","Total Earn","Total Burn","Email","Birthday","Anniversary","Tier","Points Balance","Churn"];
+    const lines = [header.join(",")];
+    for (const c of data.items) {
+      const row = [
+        (c.city || "").replace(/,/g, " "),
+        (c.home_store_code || "—").replace(/,/g, " "),
+        c.mobile || "",
+        (c.name || "").replace(/,/g, " "),
+        c.visit_count || 0,
+        c.lifetime_spend || 0,
+        c.visit_count || 0,
+        c.last_visit_at ? c.last_visit_at.slice(0,10) : "",
+        c.lifetime_points_earned || 0,
+        c.lifetime_points_redeemed || 0,
+        (c.email || "").replace(/,/g, " "),
+        c.birthday || "",
+        c.anniversary || "",
+        c.tier || "",
+        c.points_balance || 0,
+        c.churn_risk || "",
+      ];
+      lines.push(row.join(","));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `customer-data-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
 
   return (
     <div data-testid="customer-360-page">
-      <PageHeader title="Customer 360" subtitle="DEEP CUSTOMER INTELLIGENCE" />
+      <PageHeader
+        title="Raw Customer Data"
+        subtitle="DEEP CUSTOMER INTELLIGENCE · ALL FIELDS"
+        actions={
+          <button className="k-btn k-btn-outline k-btn-sm" onClick={exportCsv} data-testid="cust-export-csv">
+            <Download className="w-3.5 h-3.5" /> Export CSV
+          </button>
+        }
+      />
       <div className="p-8">
         <div className="flex flex-wrap gap-3 mb-5">
           <div className="relative flex-1 max-w-md">
@@ -45,41 +90,54 @@ export default function Customer360() {
           <button className="k-btn" onClick={load}>Search</button>
         </div>
 
-        <div className="text-xs text-neutral-500 mb-3">Showing {data.items.length} of {fmtNum(data.total)}</div>
+        <div className="text-xs text-neutral-500 mb-3">
+          Showing {data.items.length} of {fmtNum(data.total)} customers
+          {loading && <span className="ml-2 text-amber-700">loading…</span>}
+        </div>
 
         <div className="bg-white border border-black/10 overflow-x-auto">
           <table className="data-table">
             <thead>
               <tr>
-                <th>Customer</th>
+                <th>Location</th>
+                <th>Loc Code</th>
                 <th>Mobile</th>
-                <th>City</th>
+                <th>Name</th>
+                <th className="text-right">Total Bills</th>
+                <th className="text-right">Total Purchase</th>
+                <th className="text-right">Total Visits</th>
+                <th>Last Purchase</th>
+                <th className="text-right">Total Earn</th>
+                <th className="text-right">Total Burn</th>
+                <th>Email</th>
+                <th>Birthday</th>
+                <th>Anniversary</th>
                 <th>Tier</th>
-                <th className="text-right">Lifetime Spend</th>
-                <th className="text-right">Points</th>
-                <th className="text-right">Visits</th>
-                <th>Last visit</th>
-                <th>Churn</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {data.items.map((c) => (
                 <tr key={c.id} data-testid={`customer-row-${c.id}`}>
-                  <td className="font-medium">{c.name || "—"}</td>
+                  <td className="whitespace-nowrap">{c.city || "—"}</td>
+                  <td className="font-mono text-xs text-neutral-600">{c.home_store_code || "—"}</td>
                   <td className="font-mono text-xs">{c.mobile}</td>
-                  <td>{c.city}</td>
-                  <td><span className={tierClass(c.tier)}>{c.tier?.toUpperCase()}</span></td>
+                  <td className="font-medium">{c.name || "—"}</td>
+                  <td className="text-right font-mono">{fmtNum(c.visit_count)}</td>
                   <td className="text-right font-mono">{fmtINR(c.lifetime_spend)}</td>
-                  <td className="text-right font-mono">{fmtNum(c.points_balance)}</td>
-                  <td className="text-right font-mono">{c.visit_count}</td>
-                  <td className="text-xs">{fmtDate(c.last_visit_at)}</td>
-                  <td><span className={`pill pill-${c.churn_risk === "high" ? "danger" : c.churn_risk === "medium" ? "warning" : "success"}`}>{c.churn_risk}</span></td>
-                  <td><Link to={`/admin/customers/${c.id}`} className="text-xs kazo-text-burgundy font-medium hover:underline">View →</Link></td>
+                  <td className="text-right font-mono">{fmtNum(c.visit_count)}</td>
+                  <td className="text-xs whitespace-nowrap">{fmtDate(c.last_visit_at)}</td>
+                  <td className="text-right font-mono text-emerald-700">{fmtNum(c.lifetime_points_earned)}</td>
+                  <td className="text-right font-mono text-rose-700">{fmtNum(c.lifetime_points_redeemed)}</td>
+                  <td className="text-xs whitespace-nowrap truncate max-w-[160px]" title={c.email}>{c.email || "—"}</td>
+                  <td className="text-xs whitespace-nowrap">{c.birthday || "—"}</td>
+                  <td className="text-xs whitespace-nowrap">{c.anniversary || "—"}</td>
+                  <td><span className={tierClass(c.tier)}>{c.tier?.toUpperCase()}</span></td>
+                  <td><Link to={`/admin/customers/${c.id}`} className="text-xs kazo-text-burgundy font-medium hover:underline whitespace-nowrap">View →</Link></td>
                 </tr>
               ))}
               {data.items.length === 0 && !loading && (
-                <tr><td colSpan={10} className="text-center py-10 text-neutral-500">No customers found</td></tr>
+                <tr><td colSpan={15} className="text-center py-10 text-neutral-500">No customers found</td></tr>
               )}
             </tbody>
           </table>

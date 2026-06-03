@@ -7,7 +7,8 @@ import { PageHeader, KPICard, SectionHeading } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
-import { RefreshCw, AlertTriangle, Users, TrendingUp } from "lucide-react";
+import { RefreshCw, AlertTriangle, Users, TrendingUp, Download } from "lucide-react";
+import { downloadCsv } from "@/lib/csv_export";
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip,
   CartesianGrid, Cell, PieChart, Pie, Legend, ComposedChart, Area,
@@ -23,6 +24,7 @@ const TIER_COLOR = {
 
 export default function CohortsDashboard() {
   const navigate = useNavigate();
+  const [period, setPeriod] = useState(0);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drill, setDrill] = useState(null);
@@ -30,11 +32,40 @@ export default function CohortsDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/dashboard/cohorts-segmentation");
+      const r = await api.get("/dashboard/cohorts-segmentation", { params: { period_days: period } });
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+
+  const exportCsv = () => {
+    if (!data) return;
+    const sections = [];
+    // 1) Frequency segments
+    sections.push("=== FREQUENCY SEGMENTS ===");
+    sections.push("Segment,Customers,Total Spend,Share %,Avg ATV");
+    for (const s of data.frequency_segments || []) {
+      sections.push([s.segment, s.count, s.total_spend, s.pct?.toFixed(1), s.avg_atv?.toFixed(0)].join(","));
+    }
+    // 2) ATV distribution
+    sections.push("");
+    sections.push("=== AVERAGE TRANSACTION VALUE BANDS ===");
+    sections.push("Band,Customers");
+    for (const a of data.atv_distribution || []) sections.push([a.band, a.count].join(","));
+    // 3) Retention triangle
+    sections.push("");
+    sections.push("=== RETENTION TRIANGLE ===");
+    sections.push("Cohort,New customers," + (data.retention_triangle?.months || []).map(m => `M+${m}`).join(","));
+    for (const r of data.retention_triangle?.rows || []) {
+      sections.push([r.cohort, r.new_customers, ...(r.retained || []).map(v => `${(v.pct || 0).toFixed(1)}%`)].join(","));
+    }
+    const blob = new Blob([sections.join("\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `cohorts-segmentation-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Computing cohorts & segments…</div>;
   if (!data) return null;
@@ -80,9 +111,21 @@ export default function CohortsDashboard() {
         title="Cohorts & Segmentation"
         subtitle="ONE-TIMERS · REPEAT BANDS · ATV · RETENTION · LIVE"
         actions={
-          <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="cohorts-refresh">
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
-          </button>
+          <>
+            <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="cohorts-period">
+              <option value={0}>All time</option>
+              <option value={30}>Last 30 days</option>
+              <option value={90}>Last 90 days</option>
+              <option value={180}>Last 180 days</option>
+              <option value={365}>Last 365 days</option>
+            </select>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={exportCsv} data-testid="cohorts-export-csv">
+              <Download className="w-3.5 h-3.5" /> Export CSV
+            </button>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="cohorts-refresh">
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
+            </button>
+          </>
         }
       />
 

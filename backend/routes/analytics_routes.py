@@ -1,7 +1,7 @@
 """Additional drill-down dashboards and entity-level detail views."""
 from datetime import datetime, timezone, timedelta
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, Query
 from database import transactions_col, customers_col, stores_col, campaigns_col, points_ledger_col, nps_col, coupons_col, coupon_redemptions_col
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
@@ -95,12 +95,18 @@ async def sales_dashboard(period_days: int = 30, user: dict = Depends(get_curren
 
 # Customer dashboard - RFM-style + cohorts
 @router.get("/customer-dashboard")
-async def customer_dashboard(user: dict = Depends(get_current_user)):
+async def customer_dashboard(
+    period_days: int = Query(0, ge=0, le=3650),
+    user: dict = Depends(get_current_user),
+):
     now = datetime.now(timezone.utc)
 
     # R1: New customer trend uses first_purchase_at (actual first bill date), not created_at.
     # R5: loyalty members only (must have mobile)
+    # period_days=0 → all time. >0 → constrain to customers with last_visit_at in window.
     loyalty_q = {"mobile": {"$nin": [None, ""]}}
+    if period_days > 0:
+        loyalty_q["last_visit_at"] = {"$gte": (now - timedelta(days=period_days)).isoformat()}
     start = (now - timedelta(days=90)).isoformat()
     new_pipe = [
         {"$match": {**loyalty_q, "first_purchase_at": {"$gte": start}}},
@@ -150,12 +156,112 @@ async def customer_dashboard(user: dict = Depends(get_current_user)):
     ]
     city = await customers_col.aggregate(city_pipe).to_list(20)
 
+    # Customer Health Distribution (R6 — bucket by RECENCY of last bill)
+    # Healthy: last bill within 30 days · Slipping: 31-90 · At Risk: 91-180 · Lost: > 180
+    health_pipe = [
+        {"$match": loyalty_q},
+        {"$project": {
+            "bucket": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$eq": [{"$ifNull": ["$last_visit_at", None]}, None]}, "then": "Never transacted"},
+                        {"case": {"$gte": ["$last_visit_at",
+                                              (now - timedelta(days=30)).isoformat()]}, "then": "Healthy"},
+                        {"case": {"$gte": ["$last_visit_at",
+                                              (now - timedelta(days=90)).isoformat()]}, "then": "Slipping"},
+                        {"case": {"$gte": ["$last_visit_at",
+                                              (now - timedelta(days=180)).isoformat()]}, "then": "At Risk"},
+                    ],
+                    "default": "Lost",
+                },
+            },
+        }},
+        {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
+    ]
+    health_rows = await customers_col.aggregate(health_pipe).to_list(10)
+    HEALTH_ORDER = ["Healthy", "Slipping", "At Risk", "Lost", "Never transacted"]
+    health_map = {r["_id"]: r["count"] for r in health_rows}
+    health_distribution = [{"bucket": b, "count": health_map.get(b, 0)} for b in HEALTH_ORDER]
+
+    # Recency histogram (all loyalty customers) — days since last bill
+    recency_pipe = [
+        {"$match": {"mobile": {"$nin": [None, ""]}, "last_visit_at": {"$ne": None}}},
+        {"$project": {
+            "bucket": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=7)).isoformat()]}, "then": "0-7d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=30)).isoformat()]}, "then": "8-30d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=90)).isoformat()]}, "then": "31-90d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=180)).isoformat()]}, "then": "91-180d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=365)).isoformat()]}, "then": "181-365d"},
+                    ],
+                    "default": "365d+",
+                },
+            },
+        }},
+        {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
+    ]
+    rec_rows = await customers_col.aggregate(recency_pipe).to_list(10)
+    REC_ORDER = ["0-7d", "8-30d", "31-90d", "91-180d", "181-365d", "365d+"]
+    rec_map = {r["_id"]: r["count"] for r in rec_rows}
+    recency_distribution = [{"bucket": b, "count": rec_map.get(b, 0)} for b in REC_ORDER]
+
+    # One-timer recency histogram (visit_count = 1 only) — addresses #22 in docx
+    onetimer_pipe = [
+        {"$match": {**loyalty_q, "visit_count": 1, "last_visit_at": {"$ne": None}}},
+        {"$project": {
+            "bucket": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=7)).isoformat()]}, "then": "0-7d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=30)).isoformat()]}, "then": "8-30d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=90)).isoformat()]}, "then": "31-90d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=180)).isoformat()]}, "then": "91-180d"},
+                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=365)).isoformat()]}, "then": "181-365d"},
+                    ],
+                    "default": "365d+",
+                },
+            },
+        }},
+        {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
+    ]
+    ot_rows = await customers_col.aggregate(onetimer_pipe).to_list(10)
+    ot_map = {r["_id"]: r["count"] for r in ot_rows}
+    one_timer_recency_distribution = [{"bucket": b, "count": ot_map.get(b, 0)} for b in REC_ORDER]
+
+    # Lifecycle split — one-timer vs repeat (addresses #11 in docx)
+    lifecycle_pipe = [
+        {"$match": loyalty_q},
+        {"$group": {
+            "_id": {"$cond": [{"$lte": [{"$ifNull": ["$visit_count", 0]}, 1]}, "one_timer", "repeat"]},
+            "count": {"$sum": 1},
+            "lifetime_spend": {"$sum": "$lifetime_spend"},
+        }},
+    ]
+    life_rows = await customers_col.aggregate(lifecycle_pipe).to_list(5)
+    life_map = {r["_id"]: r for r in life_rows}
+    lifecycle_split = {
+        "one_timer": {
+            "count": life_map.get("one_timer", {}).get("count", 0),
+            "lifetime_spend": round(life_map.get("one_timer", {}).get("lifetime_spend", 0), 2),
+        },
+        "repeat": {
+            "count": life_map.get("repeat", {}).get("count", 0),
+            "lifetime_spend": round(life_map.get("repeat", {}).get("lifetime_spend", 0), 2),
+        },
+    }
+
     return {
         "new_customer_trend": [{"date": r["_id"], "count": r["count"]} for r in new_cust],
         "churn_distribution": [{"risk": r["_id"], "count": r["count"]} for r in churn],
         "visit_frequency": [{"bucket": r["_id"], "count": r["count"]} for r in freq],
         "top_customers": top,
         "city_distribution": [{"city": r["_id"], "count": r["count"], "spend": round(r["spend"], 2)} for r in city],
+        "health_distribution": health_distribution,
+        "recency_distribution": recency_distribution,
+        "one_timer_recency_distribution": one_timer_recency_distribution,
+        "lifecycle_split": lifecycle_split,
     }
 
 
@@ -181,12 +287,19 @@ async def campaign_dashboard(user: dict = Depends(get_current_user)):
 
 # Loyalty dashboard
 @router.get("/loyalty-dashboard")
-async def loyalty_dashboard(user: dict = Depends(get_current_user)):
+async def loyalty_dashboard(
+    period_days: int = Query(0, ge=0, le=3650),
+    user: dict = Depends(get_current_user),
+):
     # R5: loyalty members only (have mobile)
-    loyalty_q = {"mobile": {"$nin": [None, ""]}}
+    loyalty_q: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
+    if period_days > 0:
+        now = datetime.now(timezone.utc)
+        loyalty_q["last_visit_at"] = {"$gte": (now - timedelta(days=period_days)).isoformat()}
     tier_pipe = [
         {"$match": loyalty_q},
-        {"$group": {"_id": "$tier", "count": {"$sum": 1}, "avg_spend": {"$avg": "$lifetime_spend"}, "total_points": {"$sum": "$points_balance"}}},
+        {"$group": {"_id": "$tier", "count": {"$sum": 1}, "avg_spend": {"$avg": "$lifetime_spend"},
+                     "total_spend": {"$sum": "$lifetime_spend"}, "total_points": {"$sum": "$points_balance"}}},
         {"$sort": {"avg_spend": -1}},
     ]
     tiers = await customers_col.aggregate(tier_pipe).to_list(10)
@@ -217,7 +330,9 @@ async def loyalty_dashboard(user: dict = Depends(get_current_user)):
         elif t == "bonus":
             v["bonus"] = r["points"]
     return {
-        "tiers": [{"tier": r["_id"], "count": r["count"], "avg_spend": round(r["avg_spend"], 2), "total_points": int(r["total_points"])} for r in tiers],
+        "tiers": [{"tier": r["_id"], "count": r["count"], "avg_spend": round(r["avg_spend"], 2),
+                    "total_spend": round(r.get("total_spend", 0), 2),
+                    "total_points": int(r["total_points"])} for r in tiers],
         "points_trend": sorted(by_date.values(), key=lambda x: x["date"]),
     }
 

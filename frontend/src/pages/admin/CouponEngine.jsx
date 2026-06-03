@@ -9,6 +9,7 @@ const COUPON_TYPES = ["flat", "percentage", "sku", "category", "store", "city", 
 
 export default function CouponEngine() {
   const [coupons, setCoupons] = useState([]);
+  const [period, setPeriod] = useState(0);
   const [show, setShow] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm());
@@ -29,6 +30,18 @@ export default function CouponEngine() {
     setCoupons(r.data);
   };
   useEffect(() => { load(); }, []);
+
+  // Filter coupons by issuance-date window. Doing this client-side keeps the
+  // API contract stable; full coupons list is small enough (typically <500
+  // active templates per brand) for in-memory filtering.
+  const filteredCoupons = (() => {
+    if (!period) return coupons;
+    const cutoff = Date.now() - period * 86400000;
+    return coupons.filter((c) => {
+      if (!c.created_at) return false;
+      return new Date(c.created_at).getTime() >= cutoff;
+    });
+  })();
 
   const genCode = async () => {
     const r = await api.post("/coupons/generate-code", null, { params: { prefix: "KAZO" } });
@@ -70,7 +83,18 @@ export default function CouponEngine() {
       <PageHeader
         title="Coupon Engine"
         subtitle="DYNAMIC COUPON BUILDER"
-        actions={<button className="k-btn kazo-bg-burgundy" onClick={() => { setEditingId(null); setForm(emptyForm()); setShow(true); }} data-testid="new-coupon-btn"><Plus className="w-4 h-4" /> New coupon</button>}
+        actions={
+          <>
+            <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="cp-period">
+              <option value={0}>All time</option>
+              <option value={7}>Issued · 7d</option>
+              <option value={30}>Issued · 30d</option>
+              <option value={90}>Issued · 90d</option>
+              <option value={365}>Issued · 365d</option>
+            </select>
+            <button className="k-btn kazo-bg-burgundy" onClick={() => { setEditingId(null); setForm(emptyForm()); setShow(true); }} data-testid="new-coupon-btn"><Plus className="w-4 h-4" /> New coupon</button>
+          </>
+        }
       />
 
       <div className="p-8">
@@ -80,7 +104,7 @@ export default function CouponEngine() {
               <tr><th>Code</th><th>Name</th><th>Type</th><th>Value</th><th>Min Bill</th><th>Issued On</th><th>Valid To</th><th className="text-right">Used / Issued</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
-              {coupons.map((c) => (
+              {filteredCoupons.map((c) => (
                 <tr key={c.id} data-testid={`coupon-row-${c.code}`}>
                   <td><span className="font-mono font-semibold inline-block px-2 py-0.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-sm" data-testid={`coupon-code-${c.code}`}>{c.code}</span></td>
                   <td>{c.name}</td>
@@ -94,7 +118,7 @@ export default function CouponEngine() {
                   <td><button className="k-btn k-btn-ghost k-btn-sm" onClick={() => openEdit(c)} data-testid={`edit-coupon-${c.code}`}>Edit</button></td>
                 </tr>
               ))}
-              {coupons.length === 0 && <tr><td colSpan={10} className="text-center py-10 text-neutral-500">No coupons yet</td></tr>}
+              {filteredCoupons.length === 0 && <tr><td colSpan={10} className="text-center py-10 text-neutral-500">{period ? "No coupons issued in this window" : "No coupons yet"}</td></tr>}
             </tbody>
           </table>
         </div>

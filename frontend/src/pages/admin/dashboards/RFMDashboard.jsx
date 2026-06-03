@@ -7,7 +7,8 @@ import { PageHeader, KPICard, SectionHeading } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
-import { RefreshCw, Users, TrendingDown } from "lucide-react";
+import { RefreshCw, Users, TrendingDown, Download } from "lucide-react";
+import { downloadCsv } from "@/lib/csv_export";
 
 // Colour scale for the 5x5 heatmap — burgundy-to-indigo by health
 const SEG_COLORS = {
@@ -26,6 +27,7 @@ const SEG_COLORS = {
 
 export default function RFMDashboard() {
   const navigate = useNavigate();
+  const [period, setPeriod] = useState(0);  // 0 = All time
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeSeg, setActiveSeg] = useState(null);
@@ -34,13 +36,25 @@ export default function RFMDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/dashboard/rfm");
+      const r = await api.get("/dashboard/rfm", { params: { period_days: period } });
       setData(r.data);
     } finally {
       setLoading(false);
     }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+
+  const exportSegmentsCsv = () => {
+    if (!data) return;
+    downloadCsv(
+      `rfm-segments-${new Date().toISOString().slice(0,10)}.csv`,
+      ["Segment", "Customers", "Share %", "Total Spend", "Avg R", "Avg F", "Avg M", "Description"],
+      data.segments.map((s) => [
+        s.segment, s.count, s.pct?.toFixed(1), s.total_spend,
+        s.avg_r?.toFixed(2), s.avg_f?.toFixed(2), s.avg_m?.toFixed(2), s.description || "",
+      ]),
+    );
+  };
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Computing RFM…</div>;
   if (!data) return null;
@@ -91,9 +105,21 @@ export default function RFMDashboard() {
         title="RFM & Churn"
         subtitle="11-SEGMENT CUSTOMER INTELLIGENCE · LIVE"
         actions={
-          <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="rfm-refresh">
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
-          </button>
+          <>
+            <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="rfm-period">
+              <option value={0}>All time</option>
+              <option value={30}>Last 30 days</option>
+              <option value={90}>Last 90 days</option>
+              <option value={180}>Last 180 days</option>
+              <option value={365}>Last 365 days</option>
+            </select>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={exportSegmentsCsv} data-testid="rfm-export-csv">
+              <Download className="w-3.5 h-3.5" /> Export CSV
+            </button>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="rfm-refresh">
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
+            </button>
+          </>
         }
       />
 

@@ -6,7 +6,8 @@ import { PageHeader, KPICard, SectionHeading } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Download } from "lucide-react";
+import { downloadCsv } from "@/lib/csv_export";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   Legend, Cell,
@@ -59,6 +60,29 @@ export default function PointsDashboard() {
               <option value={180}>Last 180 days</option>
               <option value={365}>Last 365 days</option>
             </select>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={() => {
+              if (!data) return;
+              const sections = [];
+              sections.push("=== TOP STORES — POINTS EARNED ===");
+              sections.push("Rank,Store,Code,City,Points Earned,Bills,Sales");
+              (data.top_stores_earning || []).forEach((s, i) => sections.push([i+1, s.store_name, s.store_code, s.city, s.points, s.bills, s.net_amount].join(",")));
+              sections.push("");
+              sections.push("=== TOP STORES — POINTS REDEEMED ===");
+              sections.push("Rank,Store,Code,City,Points Redeemed,Bills,INR Value");
+              (data.top_stores_burning || []).forEach((s, i) => sections.push([i+1, s.store_name, s.store_code, s.city, s.points, s.bills, s.inr_value].join(",")));
+              sections.push("");
+              sections.push("=== TOP REDEEMERS (CUSTOMERS) ===");
+              sections.push("Rank,Name,Mobile,City,Tier,Points Burned,INR Value,Events");
+              (data.top_redeemers || []).forEach((r, i) => sections.push([i+1, r.name || "—", r.mobile, r.city || "—", r.tier, r.points_burned, r.inr_value, r.events].join(",")));
+              const blob = new Blob([sections.join("\n")], { type: "text/csv;charset=utf-8" });
+              const a = document.createElement("a");
+              a.href = URL.createObjectURL(blob);
+              a.download = `points-economics-${new Date().toISOString().slice(0,10)}.csv`;
+              a.click();
+              URL.revokeObjectURL(a.href);
+            }} data-testid="pe-export-csv">
+              <Download className="w-3.5 h-3.5" /> Export CSV
+            </button>
             <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="pe-refresh">
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
             </button>
@@ -70,11 +94,14 @@ export default function PointsDashboard() {
         <AIInsightStrip dashboardKey={`points_economics_${period}d`} payload={aiPayload} title="Points Economics Intelligence" />
 
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <KPICard label="Outstanding Points" value={fmtNum(data.liability.outstanding_points)} accent="amber" testid="pe-kpi-out-points" />
-          <KPICard label="Liability" value={fmtINR(data.liability.outstanding_inr)} hint={`@ ₹${data.config.burn_ratio}/pt`} accent="rose" testid="pe-kpi-liability" />
+          <KPICard label="Outstanding Points" value={fmtNum(data.liability.outstanding_points)} accent="amber" testid="pe-kpi-out-points"
+            info="OUTSTANDING POINTS — sum of points_balance across all loyalty customers. Represents the total points yet to be redeemed (your loyalty liability in point form)." />
+          <KPICard label="Liability" value={fmtINR(data.liability.outstanding_inr)} hint={`@ ₹${data.config.burn_ratio}/pt`} accent="rose" testid="pe-kpi-liability"
+            info={`LIABILITY — outstanding points × burn ratio (₹${data.config.burn_ratio}/pt). The rupee value at risk if every customer redeemed today.`} />
           <KPICard label="Lifetime Earned" value={fmtNum(data.liability.lifetime_earned)} accent="emerald" testid="pe-kpi-earned" />
           <KPICard label="Lifetime Redeemed" value={fmtNum(data.liability.lifetime_redeemed)} hint={fmtPct(data.liability.redemption_pct)} accent="indigo" testid="pe-kpi-redeemed" />
-          <KPICard label="Breakage risk" value={fmtINR(data.breakage_risk.inr_at_risk)} hint={`${data.breakage_risk.stale_180d_customers} stale customers`} accent="rose" testid="pe-kpi-breakage" />
+          <KPICard label="Breakage risk" value={fmtINR(data.breakage_risk.inr_at_risk)} hint={`${data.breakage_risk.stale_180d_customers} stale customers`} accent="rose" testid="pe-kpi-breakage"
+            info="BREAKAGE RISK — INR value of points held by customers who haven't transacted in 180+ days. These points are likely to expire unredeemed (loyalty 'breakage' — a back-of-the-envelope financial uplift)." />
           <KPICard label="Burn ratio" value={`₹${data.config.burn_ratio}`} hint="per point" accent="slate" testid="pe-kpi-ratio" />
         </div>
 
@@ -144,6 +171,53 @@ export default function PointsDashboard() {
               ))}
             </tbody>
           </table>
+        </div>
+
+        {/* Top 10 Earning + Burning Stores — addresses docx #28 */}
+        <div className="grid lg:grid-cols-2 gap-4">
+          <div className="bg-white border border-black/10 p-5" data-testid="pe-stores-earning">
+            <SectionHeading eyebrow="POINTS ISSUED" title="Top 10 earning stores" accent="emerald" />
+            <table className="data-table">
+              <thead><tr><th>#</th><th>Store</th><th>Code</th><th className="text-right">Pts Earned</th><th className="text-right">Bills</th><th className="text-right">Sales</th></tr></thead>
+              <tbody>
+                {(data.top_stores_earning || []).length === 0 && (
+                  <tr><td colSpan={6} className="text-center py-6 text-neutral-500">No points earned in this window</td></tr>
+                )}
+                {(data.top_stores_earning || []).map((s, i) => (
+                  <tr key={s.store_id} data-testid={`pe-earn-${i}`}>
+                    <td className="font-mono">{i + 1}</td>
+                    <td className="font-medium truncate max-w-[180px]" title={s.store_name}>{s.store_name}</td>
+                    <td className="font-mono text-xs text-neutral-600">{s.store_code}</td>
+                    <td className="text-right font-mono text-emerald-700">{fmtNum(s.points)}</td>
+                    <td className="text-right font-mono">{fmtNum(s.bills)}</td>
+                    <td className="text-right font-mono">{fmtINR(s.net_amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="bg-white border border-black/10 p-5" data-testid="pe-stores-burning">
+            <SectionHeading eyebrow="POINTS REDEEMED" title="Top 10 burning stores" accent="rose" />
+            <table className="data-table">
+              <thead><tr><th>#</th><th>Store</th><th>Code</th><th className="text-right">Pts Redeemed</th><th className="text-right">Bills</th><th className="text-right">INR Value</th></tr></thead>
+              <tbody>
+                {(data.top_stores_burning || []).length === 0 && (
+                  <tr><td colSpan={6} className="text-center py-6 text-neutral-500">No redemptions in this window</td></tr>
+                )}
+                {(data.top_stores_burning || []).map((s, i) => (
+                  <tr key={s.store_id} data-testid={`pe-burn-${i}`}>
+                    <td className="font-mono">{i + 1}</td>
+                    <td className="font-medium truncate max-w-[180px]" title={s.store_name}>{s.store_name}</td>
+                    <td className="font-mono text-xs text-neutral-600">{s.store_code}</td>
+                    <td className="text-right font-mono text-rose-700">{fmtNum(s.points)}</td>
+                    <td className="text-right font-mono">{fmtNum(s.bills)}</td>
+                    <td className="text-right font-mono">{fmtINR(s.inr_value)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 

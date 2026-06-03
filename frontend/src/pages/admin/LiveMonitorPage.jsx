@@ -95,9 +95,10 @@ export default function LiveMonitorPage() {
       <div className="p-8 space-y-6">
         {/* KPI strip */}
         {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3" data-testid="lm-kpis">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-9 gap-3" data-testid="lm-kpis">
             <KPI label="Bills" value={(stats.bills_total || 0).toLocaleString()} icon={Receipt} color={PALETTE.burgundy} />
             <KPI label="Loyalty Bills" value={(stats.bills_with_mobile || 0).toLocaleString()} icon={Phone} color={PALETTE.emerald} testid="lm-kpi-loyalty-bills" />
+            <KPI label="Repeat Bills" value={(stats.repeat_bills || 0).toLocaleString()} icon={Award} color={PALETTE.indigo} testid="lm-kpi-repeat-bills" />
             <KPI label="Lost Opp." value={(stats.bills_without_mobile || 0).toLocaleString()}
                   icon={PhoneOff} color={PALETTE.rose} testid="lm-kpi-lost" />
             <KPI label="Attach %" value={`${(stats.mobile_attach_rate_pct || 0).toFixed(1)}%`} icon={CheckCircle2} color={PALETTE.indigo} />
@@ -144,6 +145,9 @@ export default function LiveMonitorPage() {
               { value: "360", label: "Last 6h" },
               { value: "1440", label: "Last 24h" },
               { value: "10080", label: "Last 7d" },
+              { value: "43200", label: "Last 30d" },
+              { value: "129600", label: "Last 90d" },
+              { value: "525600", label: "Last 365d" },
             ]} testid="lm-fil-window" />
             {activeFilterCount > 0 && (
               <button onClick={clearFilters} className="k-btn k-btn-ghost k-btn-sm" data-testid="lm-clear-filters">
