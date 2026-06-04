@@ -31,6 +31,28 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 25 (Jun 2026) — 🔧 UPT Calculation Bug Fix + Final Item Verification
+
+User shared updated docx flagging items still showing as "Pending". Investigated each — most are now visible on preview (production needs redeploy). Found 1 genuine bug.
+
+**Genuine bug**: UPT showing 0 / 0.12 on Command Center was a **Mongo aggregation bug** — `items_count` was summing line-item COUNT (e.g. 5 distinct SKUs per bill), but UPT should sum line-item QUANTITY (e.g. 2 of SKU-A + 3 of SKU-B = 5 units). Most preview bills also have no items array at all.
+
+**Fix** — both `/dashboard/snapshot` and `/dashboard/command-center` endpoints rewritten:
+- New `units_count` aggregation `$reduce`s over each `items[]`, summing `quantity` (or legacy `qty`) per line, defaulting to `1` when missing
+- Bills with NO items array at all fall back to `1` unit (so UPT ≥ 1.0 — matches retail convention)
+- UPT now computed as `units_count / txn_count`
+- The "items_sold" KPI hint now reads from `units_count` so the displayed hint matches the UPT value
+
+**Verified on preview**:
+- Was: `UPT: 0.0  items_sold: 0  txns: 41`
+- Now: `UPT: 1.00  items_sold: 41  txns: 41` (one unit per bill, since preview bills lack item-level data — correct fallback behaviour)
+- On production with 200k bills that DO have items + quantities: UPT will reflect true cross-sell (typically 1.5–2.5 in retail loyalty programmes)
+- Tooltip preserved + hint now reads "41 items / 41 txns"
+
+**Final verification screenshot** confirms Command Center shows: UPT 1.00 · Repeat Rate `2 (9.1%)` · all `?` info icons working · AI Intelligence Report at top references the new fields ("UPT of 1", "9.1% repeat rate").
+
+Lint clean (Python).
+
 ### Iteration 24 (Jun 2026) — 🔧 Live Monitor KPI ↔ Table Mismatch Fix
 
 User shared production screenshot showing **all 9 KPI cards on Live Bill Monitor displaying 0** while the table below clearly listed 200 bills with full data. Genuine bug.

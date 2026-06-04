@@ -68,12 +68,35 @@ async def kpis(period: str = "30d", store_id: Optional[str] = None, user: dict =
             "net_sales": {"$sum": "$net_amount"},
             "discount": {"$sum": "$discount_amount"},
             "txn_count": {"$sum": 1},
+            # UPT = Units Per Transaction. Sum each line item's `quantity` (or
+            # `qty` for older docs) defaulting to 1 when missing. Bills with NO
+            # items array still count as 1 unit so UPT ≥ 1.0 for any non-empty
+            # window (matches retail convention).
+            "units_count": {"$sum": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$items", []]}}, 0]},
+                    {"$reduce": {
+                        "input": {"$ifNull": ["$items", []]},
+                        "initialValue": 0,
+                        "in": {"$add": [
+                            "$$value",
+                            {"$ifNull": [
+                                {"$toInt": {"$ifNull": ["$$this.quantity", "$$this.qty"]}},
+                                1,
+                            ]},
+                        ]},
+                    }},
+                    1,
+                ],
+            }},
             "items_count": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
             "unique_customers": {"$addToSet": "$customer_mobile"},  # R4: mobile is identity
         }}
     ]
     cur = await transactions_col.aggregate(pipeline).to_list(1)
-    sales = cur[0] if cur else {"gross_sales": 0, "net_sales": 0, "discount": 0, "txn_count": 0, "items_count": 0, "unique_customers": []}
+    sales = cur[0] if cur else {"gross_sales": 0, "net_sales": 0, "discount": 0,
+                                   "txn_count": 0, "items_count": 0, "units_count": 0,
+                                   "unique_customers": []}
 
     prev_pipeline = [
         {"$match": prev_filter},
@@ -83,7 +106,8 @@ async def kpis(period: str = "30d", store_id: Optional[str] = None, user: dict =
     prev = prev_cur[0] if prev_cur else {"net_sales": 0, "txn_count": 0}
 
     aov = (sales["net_sales"] / sales["txn_count"]) if sales["txn_count"] else 0
-    upt = (sales["items_count"] / sales["txn_count"]) if sales["txn_count"] else 0
+    # UPT — units per transaction (corrected: was line-item-count which under-reported)
+    upt = (sales["units_count"] / sales["txn_count"]) if sales["txn_count"] else 0
     atv = aov  # average transaction value
 
     # Loyalty metrics — points ledger is timestamped on the BILL, not the ingest time
@@ -417,6 +441,26 @@ async def command_center(
             "gross": {"$sum": "$gross_amount"},
             "discount": {"$sum": "$discount_amount"},
             "txns": {"$sum": 1},
+            # UPT = Units Per Transaction. See dashboard_routes::snapshot
+            # for the same correction (was line-item-count, now units; bills
+            # without items array fall back to 1 unit).
+            "units": {"$sum": {
+                "$cond": [
+                    {"$gt": [{"$size": {"$ifNull": ["$items", []]}}, 0]},
+                    {"$reduce": {
+                        "input": {"$ifNull": ["$items", []]},
+                        "initialValue": 0,
+                        "in": {"$add": [
+                            "$$value",
+                            {"$ifNull": [
+                                {"$toInt": {"$ifNull": ["$$this.quantity", "$$this.qty"]}},
+                                1,
+                            ]},
+                        ]},
+                    }},
+                    1,
+                ],
+            }},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
             "customers": {"$addToSet": "$customer_mobile"},
         }},
@@ -432,7 +476,7 @@ async def command_center(
     net = cur.get("net", 0) or 0
     txns = cur.get("txns", 0) or 0
     aov = (net / txns) if txns else 0
-    upt = ((cur.get("items", 0) or 0) / txns) if txns else 0
+    upt = ((cur.get("units", 0) or 0) / txns) if txns else 0
     prev_net = prev.get("net", 0) or 0
     prev_txns = prev.get("txns", 0) or 0
     sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
@@ -575,7 +619,7 @@ async def command_center(
             "transactions_delta_pct": txn_delta,
             "aov": round(aov, 2),
             "upt": round(upt, 2),
-            "items_sold": int(cur.get("items", 0) or 0),
+            "items_sold": int(cur.get("units", 0) or 0),
             "active_customers": active,
             "total_customers": total_customers,
             "repeat_customers": int(rr.get("repeat", 0) or 0),
