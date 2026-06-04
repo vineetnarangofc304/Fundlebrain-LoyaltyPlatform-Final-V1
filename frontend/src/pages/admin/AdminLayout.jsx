@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { BRAND } from "@/brand.config";
+import FundleBrainFAB from "./_fundle_brain_fab";
 
 const SECTIONS = [
   {
@@ -54,7 +55,8 @@ const SECTIONS = [
   {
     label: "AI TOOLS",
     items: [
-      { to: "/admin/ai", icon: Brain, label: "Fundle Brain", testid: "nav-ai" },
+      // Fundle Brain moved out of this section — surfaced as a dedicated hero
+      // entry at the top of the sidebar so it stands apart visually.
     ],
   },
   {
@@ -168,8 +170,43 @@ export default function AdminLayout() {
           </button>
         </div>
         <nav className="flex-1 py-3 overflow-y-auto">
+          {/* Fundle Brain hero entry — sits above every section so it stands
+              apart. Champagne-on-burgundy treatment matches the AI accent
+              colour used elsewhere in the app. */}
+          <NavLink
+            to="/admin/ai"
+            data-testid="nav-ai"
+            className={({ isActive }) =>
+              `mx-3 mb-3 flex items-center gap-3 px-4 py-3 rounded-sm relative overflow-hidden transition-all group ${
+                isActive
+                  ? "ring-2 ring-amber-300/60"
+                  : "hover:ring-2 hover:ring-amber-300/30"
+              }`
+            }
+            style={{
+              background:
+                "linear-gradient(135deg, var(--kazo-burgundy) 0%, var(--kazo-burgundy-deep) 60%, #2A0814 100%)",
+            }}
+          >
+            <div className="absolute inset-0 opacity-20 pointer-events-none"
+                  style={{ background: "radial-gradient(circle at 80% 0%, var(--kazo-champagne) 0%, transparent 50%)" }} />
+            <div className="relative w-9 h-9 rounded-full bg-gradient-to-br from-amber-300/30 to-amber-100/10 border border-amber-200/40 flex items-center justify-center shrink-0">
+              <Brain className="w-4 h-4 kazo-text-champagne" />
+            </div>
+            <div className="relative flex-1 min-w-0">
+              <div className="font-display text-[15px] tracking-tight text-white flex items-center gap-1.5">
+                Fundle Brain
+                <Sparkles className="w-3 h-3 kazo-text-champagne" />
+              </div>
+              <div className="text-[10px] uppercase tracking-[0.2em] kazo-text-champagne/80 mt-0.5">
+                ASK ANYTHING · LIVE DATA
+              </div>
+            </div>
+          </NavLink>
+
           {SECTIONS.map((section) => {
             if (section.adminOnly && !hasRole(user, "super_admin", "brand_admin")) return null;
+            if (!section.items || section.items.length === 0) return null;
             const isCollapsed = !!collapsed[section.label];
             return (
               <div key={section.label} className="mb-1">
@@ -215,6 +252,7 @@ export default function AdminLayout() {
       <main className="flex-1 overflow-x-hidden min-w-0">
         <Outlet />
       </main>
+      <FundleBrainFAB />
     </div>
   );
 }

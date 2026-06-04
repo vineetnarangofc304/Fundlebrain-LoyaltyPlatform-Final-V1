@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from database import (
     customers_col, transactions_col, stores_col, campaigns_col, coupons_col,
     points_ledger_col, nps_col, tickets_col, message_log_col, campaign_metrics_col,
+    loyalty_config_col,
 )
 from routes._loyalty import LOYALTY_TX_MATCH, loyalty_match
 
@@ -19,7 +20,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_overall_kpis",
-            "description": "Return live business KPIs for the brand: total customers, net sales / txns over the last N days, average order value, points outstanding. Pass days=0 for ALL-TIME (full historical scan).",
+            "description": "Return live business KPIs for the brand: total loyalty customers, net sales / txns over the last N days, average order value, points outstanding, OUTSTANDING LIABILITY in ₹ (points × burn_ratio), and the burn/earn ratios. Pass days=0 for ALL-TIME (full historical scan). Use this when asked about liability, points obligation, total points, or any rupee-value of unredeemed points.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -194,13 +195,24 @@ async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
                     "earned": {"$sum": "$lifetime_points_earned"},
                     "redeemed": {"$sum": "$lifetime_points_redeemed"}}}
     ]).to_list(1)
+
+    # Pull burn_ratio from loyalty_config so the LLM can compute liability in ₹
+    # without needing a follow-up question. Default to 0.25 per point (matches
+    # Command Center hint).
+    cfg = await loyalty_config_col.find_one({}, {"_id": 0})
+    burn_ratio = float((cfg or {}).get("burn_ratio") or 0.25)
+    earn_ratio = float((cfg or {}).get("earn_ratio") or 1.0)
+    outstanding = int(pts[0]["outstanding"]) if pts else 0
     return {
         "window_days": days,
         "total_customers": total_cust,
         "net_sales": round(sales[0]["net"], 2) if sales else 0,
         "transactions": sales[0]["txns"] if sales else 0,
         "average_order_value": round(sales[0]["net"] / sales[0]["txns"], 2) if sales and sales[0]["txns"] else 0,
-        "points_outstanding": int(pts[0]["outstanding"]) if pts else 0,
+        "points_outstanding": outstanding,
+        "outstanding_liability_inr": round(outstanding * burn_ratio, 2),
+        "burn_ratio_inr_per_point": burn_ratio,
+        "earn_ratio_pts_per_inr": earn_ratio,
         "lifetime_points_earned": int(pts[0]["earned"]) if pts else 0,
         "lifetime_points_redeemed": int(pts[0]["redeemed"]) if pts else 0,
     }

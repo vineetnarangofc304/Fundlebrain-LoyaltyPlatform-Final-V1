@@ -31,6 +31,49 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 26 (Jun 2026) — 🧠 Fundle Brain Promoted: Hero Sidebar Entry + Floating FAB + Liability Tool Fix
+
+User: *"Just make sure Fundle Brain works perfectly on the data set. Also have it first even before the Command Center in a different colour. Also a floater of Fundle Brain across all pages."*
+
+#### Fundle Brain data accuracy — fixed liability question
+The only failing query in smoke testing was *"What is our outstanding liability in rupees?"* — Brain returned the points (15,855) but couldn't compute the ₹ value because it didn't know the burn ratio. Fix in `routes/ai_tools.py::get_overall_kpis`:
+- Added `loyalty_config_col` import
+- Tool now pulls `burn_ratio` + `earn_ratio` from `loyalty_config` (defaults to 0.25 ₹/pt + 1.0 pt/₹)
+- Response now exposes `outstanding_liability_inr` and `burn_ratio_inr_per_point` alongside `points_outstanding`
+- Tool description updated to advertise the new fields so the LLM uses them
+
+**Verified — every probe answered correctly with live data**:
+| Question | Brain's answer |
+|---|---|
+| Total net sales all-time | **₹49,527** (41 txns, AOV ₹1,208) ✓ |
+| Active loyalty customers | **57** (last 30 days) ✓ |
+| Top 3 cities by lifetime spend | Lucknow ₹7,823 · Guwahati ₹6,270 · etc + warning about blank city captures ✓ |
+| Outstanding liability in rupees | **₹3,963.75** (15,855 points × ₹0.25/pt) ✓ (was failing before) |
+| Points redeemed last 90 days | **3,320 points** ✓ |
+| Top 3 RFM Champions (by name) | Honestly admits the RFM tool only returns aggregates, then offers the tier-level data instead ✓ |
+
+#### Sidebar promotion — Fundle Brain as hero
+- Removed from the buried "AI TOOLS" section
+- New **hero NavLink** mounted at the very top of the sidebar — above DASHBOARDS, above Command Center
+- Burgundy-to-deep-burgundy gradient with champagne accents + radial highlight in top-right corner
+- Brain icon inside a circular champagne badge (gradient from amber-300/30 to amber-100/10)
+- Two-line label: "**Fundle Brain** ✨" + "ASK ANYTHING · LIVE DATA"
+- Active state: amber ring; hover state: subtle amber ring
+- Visually stands completely apart from the rest of the nav
+
+#### Floating FAB across every admin page
+- New component `frontend/src/pages/admin/_fundle_brain_fab.jsx`
+- Mounted in `AdminLayout.jsx` so it appears on every `/admin/*` page
+- Pill-shaped FAB at bottom-right (right-5 bottom-5) — same burgundy gradient + champagne border as the sidebar hero
+- Brain icon + "Fundle Brain / ASK ANYTHING" two-line label
+- Hover micro-interaction: scales 1.03x, icon rotates 6°, shadow deepens
+- **Intelligently hides itself** when user is already on `/admin/ai` (no redundant overlap)
+- Verified: FAB count=1 on Command Center, count=0 on the chat page itself
+
+Lint clean across 3 frontend files + 1 backend file. No service interruption.
+
+**User next step**: Redeploy production → Fundle Brain promoted to hero + FAB appears on every page + liability question now answered correctly.
+
 ### Iteration 25 (Jun 2026) — 🔧 UPT Calculation Bug Fix + Final Item Verification
 
 User shared updated docx flagging items still showing as "Pending". Investigated each — most are now visible on preview (production needs redeploy). Found 1 genuine bug.
