@@ -26,6 +26,9 @@ def _now_iso():
 async def live_transactions(
     limit: int = Query(200, ge=1, le=2000),
     since: Optional[str] = Query(None, description="ISO timestamp — return only newer bills"),
+    since_minutes: Optional[int] = Query(None, ge=1, le=525600,
+        description="Convenience window in minutes (1 = 1 min, 1440 = 1d, up to 365d)."
+        " Overrides `since` if both given."),
     store_id: Optional[str] = None,
     store_code: Optional[str] = None,
     city: Optional[str] = None,
@@ -43,7 +46,12 @@ async def live_transactions(
 ):
     """Paginated list of recent transactions for the cockpit table."""
     fil: dict = {}
-    if since:
+    if since_minutes:
+        # Compute cutoff so the table matches whatever Stats Window the
+        # frontend is using — keeps the KPI strip and the row list consistent.
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=since_minutes)).isoformat()
+        fil["bill_date"] = {"$gte": cutoff}
+    elif since:
         fil["bill_date"] = {"$gt": since}
     if store_id:
         fil["store_id"] = store_id

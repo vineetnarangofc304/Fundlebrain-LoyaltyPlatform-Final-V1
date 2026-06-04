@@ -31,6 +31,27 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 24 (Jun 2026) — 🔧 Live Monitor KPI ↔ Table Mismatch Fix
+
+User shared production screenshot showing **all 9 KPI cards on Live Bill Monitor displaying 0** while the table below clearly listed 200 bills with full data. Genuine bug.
+
+**Root cause**: KPI strip was filtered by `Stats Window: Last 1h` (default 60 min), but the table below had NO time filter — it always showed the most recent 200 bills regardless of when they happened. On production where most bills are days/weeks old, "last 1 hour" had zero matches → KPIs = 0 even though the table was full. Confusing UX.
+
+**Fix**:
+- **Backend** `/live-monitor/transactions` now accepts `since_minutes` query param (1 min – 365 days). When set, filters by `bill_date >= cutoff`. Backwards compatible: existing `since` ISO param still works.
+- **Frontend** Live Bill Monitor passes the same `statsWindow` to BOTH endpoints so the table and KPIs always show the same time window. The number of bills in the table now exactly matches `bills_total` in the KPI strip.
+- **Frontend** default `statsWindow` raised from `60 min` (1h) to `10080 min` (Last 7d) — covers the common case of low-traffic preview / weekend stores without forcing the user to pick a longer window every time.
+
+**Verified end-to-end on preview**:
+- KPI strip shows: Bills 4, Loyalty Bills 3, Repeat Bills 2, Lost Opp 1, Attach 75%, Total Purchase ₹1.7K, Loyalty Purchase ₹1.2K, Returns 1
+- Table below shows exactly 4 bills — perfectly consistent with the KPI counts
+- Bill rows: REPEAT (green pill), WALK-IN (red pill), NEW (amber pill) — Customer Type column correctly distinguishing all 3 states
+- Stats Window dropdown selector default reads "Last 7d"
+
+Lint clean (1 PY + 1 JSX).
+
+**User next step**: Redeploy production → KPI strip will populate immediately on the default "Last 7d" view. To zoom further out (e.g. month-end review), switch Stats Window to "Last 30d" / "Last 90d" / "Last 365d" — KPIs and table will stay in sync.
+
 ### Iteration 23 (Jun 2026) — 📋 Dashboard Refresh Wave 9 — Item-by-Item Pass on Updated Docx
 
 User uploaded updated docx with status flags. Worked through every "Pending" item below. **20+ additional fixes shipped in this iteration. Lint clean. CSV downloads verified non-blank end-to-end.**

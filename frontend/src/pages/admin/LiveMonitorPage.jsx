@@ -33,13 +33,13 @@ export default function LiveMonitorPage() {
     min_amount: "",
     max_amount: "",
   });
-  const [statsWindow, setStatsWindow] = useState(60); // minutes
+  const [statsWindow, setStatsWindow] = useState(10080); // default = 7d so the KPI strip and table aren't blank on fresh login (a 24h default would show zero on quieter stores)
   const [drillRow, setDrillRow] = useState(null);
   const lastFetchRef = useRef(null);
 
   const load = async () => {
     try {
-      const params = { limit: 200 };
+      const params = { limit: 200, since_minutes: statsWindow };
       Object.entries(filters).forEach(([k, v]) => {
         if (v !== "" && v !== "all") params[k] = v;
       });
