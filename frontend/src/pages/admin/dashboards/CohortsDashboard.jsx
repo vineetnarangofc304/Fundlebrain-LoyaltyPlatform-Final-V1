@@ -193,6 +193,40 @@ export default function CohortsDashboard() {
           </div>
         </div>
 
+        {/* Repeat customer block — the counterpart to one-timer (docx item #21) */}
+        {data.repeat && (
+          <div className="bg-gradient-to-br from-emerald-50 to-white border border-emerald-200 p-6 grid lg:grid-cols-3 gap-6" data-testid="co-repeat-panel">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.3em] text-emerald-700 font-medium mb-2 flex items-center gap-2">
+                <TrendingUp className="w-3 h-3" />
+                REPEAT CUSTOMER BLOCK
+              </div>
+              <div className="font-display text-4xl tracking-tight text-emerald-900">{fmtNum(data.repeat.count)}</div>
+              <div className="text-sm text-neutral-600 mt-2">
+                <span className="font-mono">{fmtPct(data.repeat.pct_of_transacted)}</span> of transacted · contributing <span className="font-mono">{fmtINR(data.repeat.total_spend)}</span> in lifetime spend
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 mb-2">AVG SPEND / REPEAT CUSTOMER</div>
+              <div className="font-display text-2xl text-neutral-900">{fmtINR(data.repeat.avg_spend_per_customer)}</div>
+              <div className="text-xs text-neutral-500 mt-2">
+                Versus one-timer avg first basket of <span className="font-mono">{fmtINR(oneTimer.avg_first_basket)}</span> — the second-purchase nudge unlocks <span className="font-mono">{oneTimer.avg_first_basket ? `${((data.repeat.avg_spend_per_customer / oneTimer.avg_first_basket) - 1).toFixed(1)}x` : "—"}</span> ARPU
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 mb-2">FREQUENCY BREAKDOWN</div>
+              <div className="space-y-1.5">
+                {(data.repeat.frequency_breakdown || []).map((b) => (
+                  <div key={b.band} className="flex justify-between items-center text-sm" data-testid={`co-repeat-band-${b.band.replace(/\s/g,"")}`}>
+                    <span className="text-neutral-700">{b.band}</span>
+                    <span className="font-mono">{fmtNum(b.count)} · {fmtINR(b.total_spend)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Frequency segmentation */}
         <div className="grid lg:grid-cols-[3fr_2fr] gap-4">
           <div className="chart-card p-5" data-testid="co-frequency-bars">

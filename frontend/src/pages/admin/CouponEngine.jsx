@@ -9,6 +9,7 @@ const COUPON_TYPES = ["flat", "percentage", "sku", "category", "store", "city", 
 
 export default function CouponEngine() {
   const [coupons, setCoupons] = useState([]);
+  const [issuances, setIssuances] = useState([]);
   const [period, setPeriod] = useState(0);
   const [show, setShow] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -26,8 +27,12 @@ export default function CouponEngine() {
   }
 
   const load = async () => {
-    const r = await api.get("/coupons");
+    const [r, iss] = await Promise.all([
+      api.get("/coupons"),
+      api.get("/coupons/recent-issuances", { params: { limit: 100 } }),
+    ]);
     setCoupons(r.data);
+    setIssuances(iss.data.rows || []);
   };
   useEffect(() => { load(); }, []);
 
@@ -119,6 +124,36 @@ export default function CouponEngine() {
                 </tr>
               ))}
               {filteredCoupons.length === 0 && <tr><td colSpan={10} className="text-center py-10 text-neutral-500">{period ? "No coupons issued in this window" : "No coupons yet"}</td></tr>}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Recent Issuances — addresses docx "Customer mobile no is not visible" */}
+        <div className="bg-white border border-black/10 overflow-x-auto mt-6" data-testid="coupon-issuances-table">
+          <div className="px-5 py-3 border-b border-black/10 flex items-center justify-between">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 font-medium">RECENT ISSUANCES</div>
+              <div className="font-display text-lg">Per-customer coupon usage · last {issuances.length} events</div>
+            </div>
+          </div>
+          <table className="data-table">
+            <thead>
+              <tr><th>Issued On</th><th>Coupon Code</th><th>Customer Mobile</th><th>Customer</th><th>Tier</th><th>Bill #</th><th className="text-right">Discount Given</th><th>Source</th></tr>
+            </thead>
+            <tbody>
+              {issuances.map((iss) => (
+                <tr key={iss.id} data-testid={`iss-row-${iss.id}`}>
+                  <td className="text-xs whitespace-nowrap">{iss.created_at ? fmtDate(iss.created_at) : "—"}</td>
+                  <td><span className="font-mono font-semibold inline-block px-2 py-0.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-sm">{iss.coupon_code || "—"}</span></td>
+                  <td className="font-mono text-xs text-emerald-700">{iss.customer_mobile || "—"}</td>
+                  <td>{iss.customer_name || "—"}</td>
+                  <td><span className="pill pill-neutral">{iss.customer_tier?.toUpperCase() || "—"}</span></td>
+                  <td className="font-mono text-xs">{iss.bill_number || "—"}</td>
+                  <td className="text-right font-mono">₹{Math.round(iss.discount_amount || 0).toLocaleString()}</td>
+                  <td className="text-xs text-neutral-500">{iss.source || "—"}</td>
+                </tr>
+              ))}
+              {issuances.length === 0 && <tr><td colSpan={8} className="text-center py-10 text-neutral-500">No coupon issuances tracked yet</td></tr>}
             </tbody>
           </table>
         </div>

@@ -224,9 +224,11 @@ export default function LiveMonitorPage() {
                       {r.tier && <div className="text-[10px] text-neutral-500 uppercase tracking-widest">{r.tier}</div>}
                     </td>
                     <td className="text-[10px] uppercase tracking-widest">
-                      {r.has_mobile
-                        ? <span className="pill pill-success">Loyalty</span>
-                        : <span className="pill pill-danger">Walk-in</span>}
+                      {!r.has_mobile
+                        ? <span className="pill pill-danger">Walk-in</span>
+                        : r.customer_status === "new"
+                          ? <span className="pill" style={{ background: "#FDE68A", color: "#92400E", border: "1px solid #FBBF24" }}>New</span>
+                          : <span className="pill pill-success">Repeat</span>}
                     </td>
                     <td className="font-mono text-[12px]">
                       {r.customer_mobile ? (

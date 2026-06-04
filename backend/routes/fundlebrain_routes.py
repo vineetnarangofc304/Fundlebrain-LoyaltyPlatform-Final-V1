@@ -1011,6 +1011,31 @@ async def cohorts_segmentation(
         # Industry rule of thumb: 15% of one-timers can be reactivated with the right play
     }
 
+    # ---- Repeat customer block (the counterpart to one_timer — addresses
+    # docx "Repeat customer data to be visible" in Cohorts & Segments) ----
+    # Aggregate all freq_buckets that are NOT 'one_timer' into a single
+    # "repeat" summary + a frequency-band breakdown showing how repeats split
+    # between 2 visits / 3-5 visits / 6-10 visits / 11+ visits.
+    repeat_count = sum(b["count"] for k, b in freq_buckets.items() if k != "one_timer")
+    repeat_spend = sum(b["spend"] for k, b in freq_buckets.items() if k != "one_timer")
+    repeat_freq_breakdown = []
+    for label, key in [("Light repeat (2-5)", "light"), ("Regular (6-15)", "regular"),
+                        ("Loyal (16-30)", "loyal"), ("VIP (31+)", "vip")]:
+        b = freq_buckets.get(key, {"count": 0, "spend": 0})
+        repeat_freq_breakdown.append({
+            "band": label,
+            "count": b["count"],
+            "total_spend": round(b["spend"], 2),
+            "avg_spend_per_customer": round(b["spend"] / b["count"], 2) if b["count"] else 0,
+        })
+    repeat_block = {
+        "count": repeat_count,
+        "pct_of_transacted": round((repeat_count / total_with_tx) * 100, 2) if total_with_tx else 0,
+        "total_spend": round(repeat_spend, 2),
+        "avg_spend_per_customer": round(repeat_spend / repeat_count, 2) if repeat_count else 0,
+        "frequency_breakdown": repeat_freq_breakdown,
+    }
+
     return {
         "generated_at": now.isoformat(),
         "total_customers": total_pop,
@@ -1020,6 +1045,7 @@ async def cohorts_segmentation(
         "spend_segments": spend_seg,
         "tier_segments": tier_seg,
         "one_timer": one_timer,
+        "repeat": repeat_block,
         "retention_triangle": {
             "cohorts": sorted_cohorts,
             "max_offset": max_offset,

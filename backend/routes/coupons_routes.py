@@ -30,6 +30,36 @@ async def list_coupons(
     return items
 
 
+@router.get("/recent-issuances")
+async def recent_issuances(
+    limit: int = 200,
+    coupon_code: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """List of recent coupon issuances/redemptions with customer mobile, bill #,
+    discount amount, coupon code and code/created_at.
+    Addresses docx 'Coupon Engine — customer mobile not visible / dummy
+    coupon code visible'."""
+    fil: dict = {}
+    if coupon_code:
+        fil["coupon_code"] = coupon_code
+    rows = await coupon_redemptions_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+
+    # Enrich with customer name (best-effort batch)
+    mobiles = list({r.get("customer_mobile") for r in rows if r.get("customer_mobile")})
+    cust_map: dict = {}
+    if mobiles:
+        async for c in customers_col.find({"mobile": {"$in": mobiles}},
+                                            {"_id": 0, "mobile": 1, "name": 1, "tier": 1}):
+            cust_map[c["mobile"]] = c
+    for r in rows:
+        m = r.get("customer_mobile")
+        c = cust_map.get(m) if m else None
+        r["customer_name"] = (c or {}).get("name") or "—"
+        r["customer_tier"] = (c or {}).get("tier") or "—"
+    return {"rows": rows, "count": len(rows)}
+
+
 @router.post("", response_model=Coupon)
 async def create_coupon(payload: CouponCreate, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
     if not payload.code:

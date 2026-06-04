@@ -88,13 +88,31 @@ async def live_transactions(
     cust_map = {}
     if mobiles:
         async for c in customers_col.find({"mobile": {"$in": mobiles}},
-                                            {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "points_balance": 1}):
+                                            {"_id": 0, "mobile": 1, "name": 1, "tier": 1,
+                                             "points_balance": 1, "first_purchase_at": 1,
+                                             "visit_count": 1}):
             cust_map[c["mobile"]] = c
 
     enriched = []
     for r in rows:
         mob = r.get("customer_mobile")
         c = cust_map.get(mob) if mob else None
+        # Derive customer_status: walk-in (no mobile) vs new (first ever bill)
+        # vs repeat (had earlier bills). "first ever" means this row's bill_date
+        # equals the customer's first_purchase_at (same calendar date).
+        customer_status = "walk_in"
+        if c:
+            bill_d = (r.get("bill_date") or "")[:10]
+            first_d = (c.get("first_purchase_at") or "")[:10]
+            if first_d and bill_d and first_d == bill_d:
+                customer_status = "new"
+            elif (c.get("visit_count") or 0) <= 1:
+                customer_status = "new"
+            else:
+                customer_status = "repeat"
+        elif mob:
+            # has mobile but no master record yet — treat as new lead
+            customer_status = "new"
         enriched.append({
             "id": r.get("id"),
             "bill_number": r.get("bill_number"),
@@ -108,6 +126,7 @@ async def live_transactions(
             "customer_name": r.get("customer_name") or (c.get("name") if c else None),
             "tier": (c.get("tier") if c else None) or r.get("tier"),
             "current_points": (c.get("points_balance") if c else None),
+            "customer_status": customer_status,
             "gross_amount": r.get("gross_amount"),
             "net_amount": r.get("net_amount"),
             "final_amount": r.get("final_amount"),

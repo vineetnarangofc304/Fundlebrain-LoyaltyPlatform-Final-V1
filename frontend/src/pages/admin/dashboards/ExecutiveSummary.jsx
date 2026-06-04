@@ -42,7 +42,10 @@ export default function ExecutiveSummary() {
   if (loading && !data) return <div className="p-10 text-neutral-500">Generating executive summary…</div>;
   if (!data) return null;
 
-  const k = data.kpis;
+  // Defensive — production may have empty arrays before backfill jobs run
+  const k = data.kpis || {};
+  if (!Array.isArray(data.top_stores)) data.top_stores = [];
+  if (!Array.isArray(data.top_cities)) data.top_cities = [];
   const aiPayload = { ...k, period_days: period,
     top_stores: data.top_stores, top_cities: data.top_cities };
 

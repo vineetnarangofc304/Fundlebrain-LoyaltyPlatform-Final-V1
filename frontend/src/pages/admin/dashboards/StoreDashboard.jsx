@@ -46,9 +46,14 @@ export default function StoreDashboard() {
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading store performance…</div>;
   if (!data) return null;
 
+  // Defensive — production may return empty arrays before any bills/stores ingest
+  if (!Array.isArray(data.leaderboard)) data.leaderboard = [];
+  if (!Array.isArray(data.by_city)) data.by_city = [];
+  if (!Array.isArray(data.by_day)) data.by_day = [];
+
   const top = data.leaderboard[0];
-  const totalNet = data.leaderboard.reduce((s, r) => s + r.net, 0);
-  const totalTxns = data.leaderboard.reduce((s, r) => s + r.txns, 0);
+  const totalNet = data.leaderboard.reduce((s, r) => s + (r.net || 0), 0);
+  const totalTxns = data.leaderboard.reduce((s, r) => s + (r.txns || 0), 0);
   const avgAOV = totalTxns ? totalNet / totalTxns : 0;
 
   const aiPayload = {

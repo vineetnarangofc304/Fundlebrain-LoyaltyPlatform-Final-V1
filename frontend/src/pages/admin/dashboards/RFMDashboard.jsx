@@ -130,6 +130,29 @@ export default function RFMDashboard() {
           title="Segmentation Intelligence"
         />
 
+        {/* Hero — Total customers in the cohort (docx: "Total Customer not showing clearly") */}
+        <div className="bg-gradient-to-br from-neutral-900 to-neutral-800 text-white p-6 flex flex-wrap items-end gap-6" data-testid="rfm-hero-total">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.3em] text-white/60 mb-1">TOTAL CUSTOMERS IN COHORT</div>
+            <div className="font-display text-6xl tracking-tight tabular-nums">{fmtNum(data.total_customers)}</div>
+            <div className="text-xs text-white/50 mt-1">{period === 0 ? "All-time loyalty members" : `Active in last ${period} days`}</div>
+          </div>
+          <div className="flex-1 grid grid-cols-3 gap-4 text-right">
+            <div>
+              <div className="text-[9px] uppercase tracking-[0.2em] text-emerald-300 mb-0.5">CHAMPIONS</div>
+              <div className="font-mono text-2xl">{fmtNum(champions?.count)} · {fmtPct(champions?.pct)}</div>
+            </div>
+            <div>
+              <div className="text-[9px] uppercase tracking-[0.2em] text-rose-300 mb-0.5">AT RISK</div>
+              <div className="font-mono text-2xl">{fmtNum(atRisk?.count)} · {fmtPct(atRisk?.pct)}</div>
+            </div>
+            <div>
+              <div className="text-[9px] uppercase tracking-[0.2em] text-slate-300 mb-0.5">LOST</div>
+              <div className="font-mono text-2xl">{fmtNum(lost?.count)} · {fmtPct(lost?.pct)}</div>
+            </div>
+          </div>
+        </div>
+
         {/* Hero KPIs */}
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
           <KPICard
