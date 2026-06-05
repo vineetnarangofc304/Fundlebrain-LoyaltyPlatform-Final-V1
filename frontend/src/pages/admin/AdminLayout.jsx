@@ -84,8 +84,22 @@ const SECTIONS = [
     ],
   },
   {
+    label: "SUPPORT DESK",
+    items: [
+      { to: "/admin/support-desk/search-redeem-points-otp", icon: KeyRound, label: "Search Redeem Points OTP", testid: "nav-sd-rpo" },
+      { to: "/admin/support-desk/search-redeem-coupon-otp", icon: KeyRound, label: "Search Redeem Coupon OTP", testid: "nav-sd-rco" },
+      { to: "/admin/support-desk/reactivate-coupon", icon: Ticket, label: "Reactivate Coupon", testid: "nav-sd-rac" },
+      { to: "/admin/support-desk/reactivate-redeem-points", icon: Award, label: "Reactivate Redeem Points", testid: "nav-sd-rrp" },
+      { to: "/admin/support-desk/customer-deactivate", icon: UserCog, label: "Customer Deactivate", testid: "nav-sd-deact" },
+      { to: "/admin/support-desk/customer-reactivate", icon: UserCog, label: "Customer Reactivate", testid: "nav-sd-react" },
+      { to: "/admin/support-desk/unsubscribe", icon: MessageSquare, label: "Unsubscribe Customer", testid: "nav-sd-unsub" },
+      { to: "/admin/support-desk/audit-log", icon: ShieldCheck, label: "Support Desk Audit", testid: "nav-sd-audit" },
+    ],
+  },
+  {
     label: "REPORTS",
     items: [
+      { to: "/admin/legacy-reports", icon: FileBarChart, label: "Reports (Legacy)", testid: "nav-legacy-reports" },
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },
       { to: "/admin/reports/digests", icon: FileText, label: "Exec Digests", testid: "nav-reports-digests" },
       { to: "/admin/formula-catalog", icon: FileText, label: "Formula Catalog", testid: "nav-formula" },

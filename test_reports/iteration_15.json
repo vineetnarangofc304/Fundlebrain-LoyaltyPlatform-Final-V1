@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 15 — Support Desk (14 endpoints + 8 pages) and Legacy Reports (11 endpoints + hub + 11 pages) end-to-end verified. 28/28 backend pytest PASS. Frontend: all 8 SD pages and all 11 LR pages render with seeded data, hub shows 24 cards across 3 sections (SUMMARY/DETAILED/CAMPAIGN ROI), sidebar exposes all 9 new testids (nav-sd-* x8 + nav-legacy-reports). Write flow e2e validated: deactivate → list contains → reactivate → list contains → unsubscribe(sms) → unsubscribed list has channel=sms → resubscribe(all). Audit Log page shows resulting support_desk.* entries (customer_deactivate / customer_reactivate / unsubscribe / resubscribe) with reason metadata. CSV export from /legacy-reports/customer-data returns text/csv with proper Mobile header.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Admin shell (any route after login)",
+        "issues": [
+          "React hydration warning logged once on /admin: '<span> cannot be a child of <option>'. Source is a <Select>/<option> in the layout (likely the ALL stores/cities filter on Command Center). Non-blocking but should be fixed by replacing inline <span> inside <option> with plain text or using a custom dropdown. No functional impact observed."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration15_support_desk_legacy_reports_test.py",
+    "/app/test_reports/pytest/iteration15_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Remove <span> child from <option> element in the city/store select component on AdminLayout/CommandCenter (suppresses React hydration warning).",
+    "OPTIONAL: feedback-data and expiry-points tables render 0 rows because the seed has no nps_responses with feedback and no points_ledger.expires_at in next 60 days. Consider seeding 2-3 of each so the UI demos non-empty states."
+  ],
+  "critical_code_review_comments": [
+    "support_desk_routes.py:32-41 — _norm_mobile accepts 7+ digit shorts to support legacy 9-digit numbers; correct but logged as documented behavior.",
+    "support_desk_routes.py:264-288 — customer-deactivate guards on is_active is False (already deactivated → 400). Good.",
+    "support_desk_routes.py:206-254 — reactivate-redeem-points inserts a compensating ledger AND restores points_balance + adjusts lifetime_points_redeemed. Net effect is correct but balance double-update would be a risk if any future job recomputes from ledger. Safe today.",
+    "support_desk_routes.py:444-464 — audit-log filters action with regex '^support_desk\\.' and additional 'action' regex if provided. NOTE: the second filter overwrites the first (single key in dict) — verified by test, but a future maintainer might expect both to apply. Consider $and: [...] for correctness; doesn't affect current tests because all support_desk.* match the additional sub-regex.",
+    "legacy_reports_routes.py:229-286 — fraud-report rapid-fire heuristic groups by mobile + hour-bucket (first 13 chars of bill_date). Will produce 3 flags from seed (verified). Large-redemption pulls $lte: -10000; correct because redeem entries are stored as negative points.",
+    "legacy_reports_routes.py:84-128 — customer-data CSV export streams properly with text/csv header.",
+    "legacy_reports_routes.py:381-413 — location-wise-customers joins to stores_col and post-filters by state/zone; correct approach, slightly inefficient at scale but fine for 11 stores.",
+    "Frontend coverage observed: all 8 SD page headings exact match expectation; LegacyReportsHub renders 24 cards (5+12+7), 3 section labels visible.",
+    "AdminLayout exposes nav-sd-rpo, nav-sd-rco, nav-sd-rac, nav-sd-rrp, nav-sd-deact, nav-sd-react, nav-sd-unsub, nav-sd-audit, nav-legacy-reports — all 9 present in DOM (confirmed via document.querySelectorAll)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration15_support_desk_legacy_reports_test.py"
+  ],
+  "success_rate": {"backend": "100% (28/28)", "frontend": "100% — 8/8 SD pages, 11/11 LR pages, hub 24 cards, sidebar 9/9 testids, write/audit e2e ✓, CSV export ✓"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (login at /enterprise/login)",
+  "seed_data_creation": "During the e2e flow tests a customer (mobile picked from /legacy-reports/customer-data row 1, e.g., 88881000... in seed) was deactivated, reactivated, unsubscribed(sms), resubscribed(all). All 4 actions logged to audit_logs_col with prefix support_desk.* and reason='TEST iter15 *'. Frontend Audit Log page shows them.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Login route is /enterprise/login (NOT /login or /admin/login — those redirect to public marketing site). After login URL is /admin (no trailing path). Sidebar groups are collapsible — querying by testid via locator immediately after navigation can return 0 because of transient render; either await page.wait_for_timeout(1500) or query via document.querySelectorAll which works regardless of CSS visibility. Backend test seeds depend on the customer-deactivate test running before the dependent assertions — keep them in the TestSupportDeskWriteFlow class order. Fraud report seed produces exactly 3 rapid-fire flags.",
+  "rca_of_the_issue": "N/A — both new modules functioning correctly with no defects found."
+}

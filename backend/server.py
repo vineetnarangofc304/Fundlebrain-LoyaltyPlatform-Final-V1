@@ -46,6 +46,8 @@ from routes.segments_routes import router as segments_router
 from routes.cohort_library import router as cohort_library_router
 from routes.auto_campaigns_routes import router as auto_campaigns_router
 from routes.raw_reports_routes import router as raw_reports_router
+from routes.support_desk_routes import router as support_desk_router
+from routes.legacy_reports_routes import router as legacy_reports_router
 
 app = FastAPI(title="KAZO Fundle Platform", version="1.0.0")
 api_router = APIRouter(prefix="/api")
@@ -97,6 +99,8 @@ api_router.include_router(segments_router)
 api_router.include_router(cohort_library_router)
 api_router.include_router(auto_campaigns_router)
 api_router.include_router(raw_reports_router)
+api_router.include_router(support_desk_router)
+api_router.include_router(legacy_reports_router)
 
 app.include_router(api_router)
 
