@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 16 — Loyalty Logic Editor backend + frontend e2e tests. Backend: 19/19 pytest PASS covering GET/PUT /loyalty/config (with backfill of all new fields), tier-ordering / earn_mode / reset-cadence validations (400 paths), tier CRUD (add/toggle/delete with last-tier guard and 404s), festival booster add+delete, and full simulator coverage (default mode, percent_of_spend mode, store-type multiplier, category multiplier, festival booster on bill_date, below-min-bill threshold). Frontend: /admin/loyalty renders 'Loyalty Logic Editor' with loyalty-configurator root + all 28 expected testids found (cfg-percent-of-spend appears only in POS mode, reset-anchor only in annual mode — both verified by toggling). Earn-mode toggle (PPS/POS) swaps the right-hand input. Simulator with bill=5000 + tier=gold returned 6250 pts with breakdown ['Base earn 5000', 'Tier multiplier gold x1.25 +1250'] — matches backend math. Save (happy path) shows Sonner toast 'Loyalty configuration updated'. Validation 400 path (Silver max=10000, Gold min=5000) surfaces the backend error toast 'Tier gold overlaps the previous tier (min < previous max)' correctly. Add-Tier modal and Add-Booster modal open and expose newtier-*/newfb-* testids. No console errors during the entire flow.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration16_loyalty_logic_editor_test.py",
+    "/app/test_reports/pytest/iteration16_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL/INFO: Existing seeded tier_rules in DB have max_lifetime_spend=None for silver/gold/platinum/diamond (UI shows ∞). The DEFAULT_CONFIG in /loyalty_routes.py declares them with values (25000/75000/150000/None) but the doc was seeded earlier without those fields and backfill copies only missing keys at the top level (not nested into tier_rules). Consider a one-time migration to backfill per-tier max_lifetime_spend so the editor shows the documented ladder by default.",
+    "OPTIONAL: PUT /loyalty/config replaces the whole document with payload — frontends that omit a key effectively delete it. Safer to merge with existing doc, or document that the editor always sends the full cfg."
+  ],
+  "critical_code_review_comments": [
+    "loyalty_routes.py:88-119 — PUT /config sets the entire payload onto the document via $set; combined with the editor sending the full state this is fine, but any partial PUT from another client would wipe unrelated fields. Consider whitelisting keys or using $set with only known fields.",
+    "loyalty_routes.py:283-292 — Tier-multiplier breakdown step is skipped when mult==1.0. Silver has mult=1.0 by default → 'Tier multiplier' step is absent for silver simulations. Frontend explanation still names the tier so this is acceptable but documented behavior.",
+    "loyalty_routes.py:315-326 — Festival booster bill_date comparison uses lexicographic string compare on YYYY-MM-DD; correct because ISO date strings are lexicographically ordered. No timezone handling — booster windows are date-bucket, which matches the product intent.",
+    "loyalty_routes.py:139-158 — POST /tiers re-sorts by min_lifetime_spend before persisting; if the new tier's min collides with an existing one and is not active, ordering validation in PUT may still pass but the UX is awkward. Minor.",
+    "LoyaltyConfigurator.jsx — 592 lines; getting close to the 700-line guideline. Extracting AddTierButton / AddFestivalBooster / MultiplierEditor / EarnSimulator into separate files would help long-term."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration16_loyalty_logic_editor_test.py"
+  ],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% on tested flows"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (already in /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — tests are self-contained and restore original config via module-scoped fixture.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All Loyalty Logic Editor endpoints + UI flows verified. iteration16 pytest is a stable regression for: tier ordering validation, earn_mode/reset_cadence validation, tier CRUD, festival booster CRUD, and the full simulator. To restore tier max ladder values (currently None in DB), main agent can run a one-time backfill or POST the DEFAULT_CONFIG tier_rules via PUT /loyalty/config. Sidebar 'Loyalty' link in screenshot matches /admin/loyalty route. No regressions observed in Support Desk / Legacy Reports paths from iter 15."
+}

@@ -171,29 +171,61 @@ class Transaction(TransactionBase):
 
 # ---------- Loyalty config ----------
 class TierRule(BaseModel):
-    tier: LoyaltyTier
-    min_lifetime_spend: float
+    """One tier in the loyalty program.
+
+    Tier identity (`tier`) is now a free string so brands can have custom
+    tiers beyond bronze/silver/gold/platinum (e.g., Diamond, VIP, Founders).
+    """
+    tier: str
+    name: Optional[str] = None  # Display name; defaults to tier.capitalize() if missing
+    min_lifetime_spend: float = 0
+    max_lifetime_spend: Optional[float] = None  # Optional ceiling before next tier kicks in
     earn_multiplier: float = 1.0
     welcome_bonus: int = 0
     birthday_bonus: int = 0
+    anniversary_bonus: int = 0
+    tier_type: str = "standard"  # entry | standard | premium | vip | partner
+    is_active: bool = True
+    # Per-tier perks
+    coupon_discount_pct: float = 0  # Auto-applied coupon discount on every bill (%)
+    free_shipping_min_bill: Optional[float] = None  # Min bill at/above which shipping is free
+    point_expiry_override_days: Optional[int] = None  # Overrides the global expiry
+    visit_threshold: Optional[int] = None  # Alt promotion path — N visits unlock this tier
+    color: Optional[str] = None  # Optional hex code for UI badges
 
 
 class LoyaltyConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = "default"
-    earn_ratio: float = 1.0  # 1 point per 1 INR
-    burn_ratio: float = 0.25  # 1 point = 0.25 INR
+    # ---- Earn engine ----
+    earn_mode: str = "points_per_spend"  # 'points_per_spend' | 'percent_of_spend'
+    earn_ratio: float = 1.0  # Points awarded per ₹ when mode=points_per_spend
+    percent_of_spend: float = 5.0  # % of bill awarded as points when mode=percent_of_spend
+    # ---- Redeem engine ----
+    burn_ratio: float = 0.25  # ₹ value of 1 point on redemption
     min_redeem_points: int = 100
+    max_redeem_pct_of_bill: float = 50.0  # Cap redemption to N% of bill
     point_expiry_days: int = 365
+    # ---- Bonuses ----
     welcome_bonus: int = 100
     birthday_bonus: int = 200
     anniversary_bonus: int = 200
     referral_points_referrer: int = 250
     referral_points_referee: int = 100
+    # ---- Tiers ----
     tier_rules: List[TierRule] = []
+    tier_reset_cadence: str = "never"  # never | annual | rolling_12m
+    tier_reset_anchor_date: str = "01-01"  # MM-DD for annual cadence
+    # ---- Multipliers ----
+    category_multipliers: Dict[str, float] = Field(default_factory=dict)  # { "category_name": 2.0 }
+    store_type_multipliers: Dict[str, float] = Field(default_factory=dict)  # { "online": 1.5 }
+    festival_boosters: List[Dict[str, Any]] = Field(default_factory=list)
+    # ---- Compliance / restrictions ----
     require_otp_for_redeem: bool = True
     allow_coupon_stacking: bool = False
     min_bill_for_earn: float = 0.0
+    block_earn_on_returns: bool = True
+    # ---- Meta ----
     updated_at: datetime = Field(default_factory=utcnow)
     updated_by: Optional[str] = None
 
