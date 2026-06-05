@@ -28,7 +28,7 @@ const SEG_COLORS = {
 
 export default function RFMDashboard() {
   const navigate = useNavigate();
-  const [period, setPeriod] = useState(0);  // 0 = All time
+  const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "", label: "All time" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeSeg, setActiveSeg] = useState(null);
@@ -37,13 +37,18 @@ export default function RFMDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/dashboard/rfm", { params: { period_days: period } });
+      const params = { period_days: range.period_days };
+      if (range.start_date && range.end_date) {
+        params.start_date = range.start_date;
+        params.end_date = range.end_date;
+      }
+      const r = await api.get("/dashboard/rfm", { params });
       setData(r.data);
     } finally {
       setLoading(false);
     }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
 
   const exportSegmentsCsv = () => {
     if (!data) return;
@@ -127,23 +132,23 @@ export default function RFMDashboard() {
 
         {/* Hero — Total customers in the cohort (docx: "Total Customer not showing clearly") */}
         <div className="bg-gradient-to-br from-neutral-900 to-neutral-800 text-white p-6 flex flex-wrap items-end gap-6" data-testid="rfm-hero-total">
-          <div>
+          <div className="min-w-0 flex-1">
             <div className="text-[10px] uppercase tracking-[0.3em] text-white/60 mb-1">TOTAL CUSTOMERS IN COHORT</div>
-            <div className="font-display text-6xl tracking-tight tabular-nums">{fmtNum(data.total_customers)}</div>
+            <div className="font-display hero-number" title={String(data.total_customers ?? "")}>{fmtNum(data.total_customers)}</div>
             <div className="text-xs text-white/50 mt-1">{range.period_days === 0 && !range.start_date ? "All-time loyalty members" : `Active in ${range.label || `last ${range.period_days} days`}`}</div>
           </div>
-          <div className="flex-1 grid grid-cols-3 gap-4 text-right">
-            <div>
+          <div className="flex-1 grid grid-cols-3 gap-4 text-right min-w-0">
+            <div className="min-w-0">
               <div className="text-[9px] uppercase tracking-[0.2em] text-emerald-300 mb-0.5">CHAMPIONS</div>
-              <div className="font-mono text-2xl">{fmtNum(champions?.count)} · {fmtPct(champions?.pct)}</div>
+              <div className="font-mono hero-number-md" title={`${champions?.count} · ${champions?.pct}%`}>{fmtNum(champions?.count)} · {fmtPct(champions?.pct)}</div>
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-[9px] uppercase tracking-[0.2em] text-rose-300 mb-0.5">AT RISK</div>
-              <div className="font-mono text-2xl">{fmtNum(atRisk?.count)} · {fmtPct(atRisk?.pct)}</div>
+              <div className="font-mono hero-number-md" title={`${atRisk?.count} · ${atRisk?.pct}%`}>{fmtNum(atRisk?.count)} · {fmtPct(atRisk?.pct)}</div>
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-[9px] uppercase tracking-[0.2em] text-slate-300 mb-0.5">LOST</div>
-              <div className="font-mono text-2xl">{fmtNum(lost?.count)} · {fmtPct(lost?.pct)}</div>
+              <div className="font-mono hero-number-md" title={`${lost?.count} · ${lost?.pct}%`}>{fmtNum(lost?.count)} · {fmtPct(lost?.pct)}</div>
             </div>
           </div>
         </div>
@@ -343,10 +348,10 @@ export default function RFMDashboard() {
                   data-testid={`rfm-segment-${s.segment.replace(/\s+/g, "-").toLowerCase()}`}
                 >
                   <div className="absolute top-0 left-0 bottom-0 w-1" style={{ background: color }} />
-                  <div className="pl-2">
-                    <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500 mb-1">{s.segment}</div>
-                    <div className="font-mono text-2xl">{fmtNum(s.count)}</div>
-                    <div className="text-xs text-neutral-500 mt-0.5">{fmtPct(s.pct)} of base</div>
+                  <div className="pl-2 min-w-0">
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500 mb-1 truncate">{s.segment}</div>
+                    <div className="font-mono hero-number-md" title={String(s.count ?? "")}>{fmtNum(s.count)}</div>
+                    <div className="text-xs text-neutral-500 mt-0.5 truncate">{fmtPct(s.pct)} of base</div>
                     <div className="mt-3 pt-3 border-t border-black/5 grid grid-cols-2 gap-2 text-xs">
                       <div>
                         <div className="text-[10px] text-neutral-400 uppercase">Avg spend</div>

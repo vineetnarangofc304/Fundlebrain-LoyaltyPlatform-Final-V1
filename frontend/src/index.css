@@ -111,11 +111,57 @@ body {
     transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.2s ease;
     position: relative;
     overflow: hidden;
+    min-width: 0;
 }
 .kpi-card:hover {
     border-color: var(--kazo-burgundy);
     cursor: pointer;
     box-shadow: 0 4px 14px -8px rgba(15, 23, 42, 0.18);
+}
+
+/* Auto-fit number/value typography for every KPI card —
+   scales with viewport, clips long values, preserves alignment. */
+.kpi-value {
+    font-size: clamp(1.05rem, 1.55vw, 1.6rem);
+    line-height: 1.15;
+    letter-spacing: -0.015em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    max-width: 100%;
+}
+/* Slightly more compact when used inside narrow grids */
+@media (max-width: 768px) {
+    .kpi-card { padding: 14px 16px; }
+}
+
+/* Responsive "hero number" display used by RFM/Cohorts hero panels.
+   Caps growth, allows shrink on narrow viewports, keeps alignment. */
+.hero-number {
+    font-size: clamp(1.75rem, 4vw, 3.25rem);
+    line-height: 1;
+    letter-spacing: -0.025em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    max-width: 100%;
+    display: block;
+}
+.hero-number-md {
+    font-size: clamp(1.4rem, 2.6vw, 2rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    max-width: 100%;
+    display: block;
 }
 
 /* Themed KPI cards — coloured border, soft tinted background, top accent strip */

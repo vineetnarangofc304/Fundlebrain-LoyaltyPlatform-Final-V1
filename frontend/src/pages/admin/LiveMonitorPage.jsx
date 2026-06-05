@@ -264,7 +264,7 @@ function KPI({ label, value, icon: Icon, color, testid }) {
       <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500 mb-1 font-medium flex items-center gap-1">
         <Icon className="w-3 h-3" style={{ color }} /> {label}
       </div>
-      <div className="text-2xl font-mono text-neutral-900 leading-tight">{value}</div>
+      <div className="kpi-value font-mono text-neutral-900" title={typeof value === 'string' || typeof value === 'number' ? String(value) : undefined}>{value}</div>
     </div>
   );
 }

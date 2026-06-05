@@ -33,7 +33,7 @@ export function KPICard({ label, value, delta, hint, info, onClick, mono = true,
           >?</span>
         )}
       </div>
-      <div className={`text-2xl md:text-3xl ${mono ? "font-mono" : "font-display"} text-neutral-900 leading-tight tabular-nums truncate`} title={fullValue != null ? String(fullValue) : undefined}>{value}</div>
+      <div className={`kpi-value ${mono ? "font-mono" : "font-display"} text-neutral-900 tabular-nums`} title={fullValue != null ? String(fullValue) : undefined}>{value}</div>
       <div className="mt-1 flex items-center gap-2 text-xs">
         {delta != null && (
           <span className={`font-mono ${deltaColor}`}>

@@ -31,6 +31,30 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 27 (Feb 2026) — 📐 Numbers-fit-in-boxes Pass + Dashboard Crash Fixes
+
+User: *"some figures are going out of boxes.. pls adjust font etc to manage this all over..."*
+
+#### 1) Universal number-fit typography
+- New `.kpi-value` CSS utility — `font-size: clamp(1.05rem, 1.55vw, 1.6rem)` with `line-height: 1.15`, `letter-spacing: -0.015em`, `white-space: nowrap`, `overflow: hidden`, `text-overflow: ellipsis`, `tabular-nums`. Used by every `KPICard` value across all 12 dashboards.
+- New `.hero-number` / `.hero-number-md` for the over-sized highlight numbers (RFM "57", Cohorts ₹43K, Customer one-timer/repeat counts, Points burn-to-earn %). Both clamp to the viewport, never overflow, expose the full value via `title` tooltip.
+- `.kpi-card` now has `min-width: 0` so flex/grid children can shrink properly. Tighter padding on mobile (`< 768px`).
+- LiveMonitor's custom `KPI` component switched to the same `.kpi-value` class.
+
+#### 2) Hardcoded oversized typography replaced
+Replaced fixed Tailwind sizes (`text-6xl`/`text-5xl`/`text-4xl`/`text-3xl`) on big-number displays with the responsive `.hero-number*` classes in: `RFMDashboard.jsx` (hero "Total customers in cohort" + segment heatmap counts), `CohortsDashboard.jsx` (one-timer ₹ at risk, recovery pool, recency buckets, repeat-customer block), `CustomerDashboard.jsx` (lifecycle bifurcation one-timer / repeat), `PointsDashboard.jsx` (burn-to-earn percent).
+
+#### 3) Critical dashboard crash fixes (pre-existing, surfaced during verification)
+Previous fork left an incomplete DateRangePicker migration that crashed three pages with `range is not defined` / `period is not defined`:
+- **CustomerDashboard.jsx** — replaced leftover `<select value={period} onChange={setPeriod}>` with `<DateRangePicker value={range} onChange={setRange}>`.
+- **RFMDashboard.jsx** — fully migrated `period`/`setPeriod` state to `range`/`setRange`; load() now sends `start_date`/`end_date` when present.
+- **PointsDashboard.jsx** — added `const period = range.period_days || 0;` alias so legacy display strings continue to work.
+
+#### 4) Verified
+Smoke-tested via Playwright at both 1440×900 and 1024×768 viewports: Command Center, Sales, Loyalty, RFM, Customer Analytics, Cohorts, Points, NPS all render with every figure fitting inside its card, no horizontal scrolling, no overflow. Lint clean across all edited JSX files.
+
+**User next step**: Open any dashboard — figures now scale with viewport width and stay inside their cards. Hover any KPI to see the full unrounded value as a tooltip.
+
 ### Iteration 26 (Jun 2026) — 🧠 Fundle Brain Promoted: Hero Sidebar Entry + Floating FAB + Liability Tool Fix
 
 User: *"Just make sure Fundle Brain works perfectly on the data set. Also have it first even before the Command Center in a different colour. Also a floater of Fundle Brain across all pages."*

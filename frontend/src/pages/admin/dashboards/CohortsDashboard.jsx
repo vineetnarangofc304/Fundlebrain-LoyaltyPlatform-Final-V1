@@ -160,13 +160,13 @@ export default function CohortsDashboard() {
                 ONE-TIMER REVENUE AT RISK
               </div>
             </div>
-            <div className="font-display text-4xl tracking-tight text-rose-900">{fmtINR(oneTimer.total_spend)}</div>
+            <div className="font-display hero-number text-rose-900" title={String(oneTimer.total_spend ?? "")}>{fmtINR(oneTimer.total_spend)}</div>
             <div className="text-xs text-neutral-600 mt-1">
               from {oneTimer.count} customers who bought once · avg first basket {fmtINR(oneTimer.avg_first_basket)}
             </div>
             <div className="mt-4 p-3 bg-white border border-emerald-200">
               <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-700 font-semibold">EST RECOVERY POOL</div>
-              <div className="font-display text-2xl text-emerald-800 mt-1">{fmtINR(oneTimer.estimated_recovery_pool_inr)}</div>
+              <div className="font-display hero-number-md text-emerald-800 mt-1" title={String(oneTimer.estimated_recovery_pool_inr ?? "")}>{fmtINR(oneTimer.estimated_recovery_pool_inr)}</div>
               <div className="text-[11px] text-neutral-500 mt-1">Industry: ~15% of one-timers can be reactivated with the right play</div>
             </div>
           </div>
@@ -178,10 +178,10 @@ export default function CohortsDashboard() {
                 const colors = ["#047857", "#B45309", "#9F1239", "#3B0D1B"];
                 const pct = oneTimer.count ? (count / oneTimer.count) * 100 : 0;
                 return (
-                  <div key={bucket} className="border p-3" style={{ borderColor: `${colors[i]}30`, background: `${colors[i]}08` }} data-testid={`co-onetimer-${bucket}`}>
-                    <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">{bucket}</div>
-                    <div className="font-mono text-3xl mt-1" style={{ color: colors[i] }}>{count}</div>
-                    <div className="text-xs text-neutral-500 mt-0.5">{fmtPct(pct)} of one-timers</div>
+                  <div key={bucket} className="border p-3 min-w-0" style={{ borderColor: `${colors[i]}30`, background: `${colors[i]}08` }} data-testid={`co-onetimer-${bucket}`}>
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500 truncate">{bucket}</div>
+                    <div className="font-mono hero-number-md mt-1" style={{ color: colors[i] }} title={String(count ?? "")}>{count}</div>
+                    <div className="text-xs text-neutral-500 mt-0.5 truncate">{fmtPct(pct)} of one-timers</div>
                     <div className="h-1 mt-2" style={{ background: colors[i], width: `${pct}%` }} />
                   </div>
                 );
@@ -201,14 +201,14 @@ export default function CohortsDashboard() {
                 <TrendingUp className="w-3 h-3" />
                 REPEAT CUSTOMER BLOCK
               </div>
-              <div className="font-display text-4xl tracking-tight text-emerald-900">{fmtNum(data.repeat.count)}</div>
+              <div className="font-display hero-number text-emerald-900" title={String(data.repeat.count ?? "")}>{fmtNum(data.repeat.count)}</div>
               <div className="text-sm text-neutral-600 mt-2">
                 <span className="font-mono">{fmtPct(data.repeat.pct_of_transacted)}</span> of transacted · contributing <span className="font-mono">{fmtINR(data.repeat.total_spend)}</span> in lifetime spend
               </div>
             </div>
             <div>
               <div className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 mb-2">AVG SPEND / REPEAT CUSTOMER</div>
-              <div className="font-display text-2xl text-neutral-900">{fmtINR(data.repeat.avg_spend_per_customer)}</div>
+              <div className="font-display hero-number-md text-neutral-900" title={String(data.repeat.avg_spend_per_customer ?? "")}>{fmtINR(data.repeat.avg_spend_per_customer)}</div>
               <div className="text-xs text-neutral-500 mt-2">
                 Versus one-timer avg first basket of <span className="font-mono">{fmtINR(oneTimer.avg_first_basket)}</span> — the second-purchase nudge unlocks <span className="font-mono">{oneTimer.avg_first_basket ? `${((data.repeat.avg_spend_per_customer / oneTimer.avg_first_basket) - 1).toFixed(1)}x` : "—"}</span> ARPU
               </div>

@@ -45,13 +45,7 @@ export default function CustomerDashboard() {
         subtitle="WHO IS KAZO · LIVE"
         actions={
           <>
-            <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="cust-period">
-              <option value={0}>All time</option>
-              <option value={30}>Last 30 days</option>
-              <option value={90}>Last 90 days</option>
-              <option value={180}>Last 180 days</option>
-              <option value={365}>Last 365 days</option>
-            </select>
+            <DateRangePicker value={range} onChange={setRange} testid="cust-date-range" />
             <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="cust-refresh">
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
             </button>
@@ -71,9 +65,9 @@ export default function CustomerDashboard() {
         <div className="chart-card p-5" data-accent="indigo" data-testid="cust-lifecycle-split">
           <SectionHeading eyebrow="LIFECYCLE BIFURCATION" title="One-time vs Repeat buyers" accent="indigo" />
           <div className="grid md:grid-cols-2 gap-4 mt-4">
-            <div className="border border-amber-200 bg-amber-50/50 p-5" data-testid="lifecycle-one-timer">
+            <div className="border border-amber-200 bg-amber-50/50 p-5 min-w-0" data-testid="lifecycle-one-timer">
               <div className="text-[10px] uppercase tracking-[0.3em] text-amber-800 font-medium mb-2">ONE-TIME BUYERS</div>
-              <div className="font-display text-4xl text-amber-900">{fmtNum(life.one_timer.count)}</div>
+              <div className="font-display hero-number text-amber-900" title={String(life.one_timer.count ?? "")}>{fmtNum(life.one_timer.count)}</div>
               <div className="mt-2 text-sm text-neutral-600">
                 <span className="font-mono">{lifePct(life.one_timer.count).toFixed(1)}%</span> of loyalty base · contributing <span className="font-mono">{fmtINR(life.one_timer.lifetime_spend)}</span> lifetime spend
               </div>
@@ -81,9 +75,9 @@ export default function CustomerDashboard() {
                 <div className="h-full bg-amber-500" style={{ width: `${lifePct(life.one_timer.count)}%` }} />
               </div>
             </div>
-            <div className="border border-emerald-200 bg-emerald-50/50 p-5" data-testid="lifecycle-repeat">
+            <div className="border border-emerald-200 bg-emerald-50/50 p-5 min-w-0" data-testid="lifecycle-repeat">
               <div className="text-[10px] uppercase tracking-[0.3em] text-emerald-800 font-medium mb-2">REPEAT BUYERS</div>
-              <div className="font-display text-4xl text-emerald-900">{fmtNum(life.repeat.count)}</div>
+              <div className="font-display hero-number text-emerald-900" title={String(life.repeat.count ?? "")}>{fmtNum(life.repeat.count)}</div>
               <div className="mt-2 text-sm text-neutral-600">
                 <span className="font-mono">{lifePct(life.repeat.count).toFixed(1)}%</span> of loyalty base · contributing <span className="font-mono">{fmtINR(life.repeat.lifetime_spend)}</span> lifetime spend
               </div>

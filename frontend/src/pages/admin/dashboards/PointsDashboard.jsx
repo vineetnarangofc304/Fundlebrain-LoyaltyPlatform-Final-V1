@@ -38,6 +38,9 @@ export default function PointsDashboard() {
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading points economics…</div>;
   if (!data) return null;
 
+  // Legacy alias used in display strings — derived from the date range picker
+  const period = range.period_days || 0;
+
   const aiPayload = {
     period_days: range.period_days,
     window_earn: data.window.earn_points,
@@ -109,8 +112,8 @@ export default function PointsDashboard() {
         <div className="grid lg:grid-cols-[2fr_3fr] gap-4">
           <div className="chart-card p-5" data-testid="pe-gauge">
             <SectionHeading eyebrow={`LAST ${period}d`} title="Earn vs Burn" accent="indigo" />
-            <div className="text-center mt-4">
-              <div className="font-display text-5xl text-neutral-900">{data.window.burn_to_earn_pct}%</div>
+            <div className="text-center mt-4 min-w-0">
+              <div className="font-display hero-number text-neutral-900" title={`${data.window.burn_to_earn_pct}%`}>{data.window.burn_to_earn_pct}%</div>
               <div className="text-xs text-neutral-500 mt-1 uppercase tracking-widest">Burn-to-earn ratio</div>
             </div>
             <div className="relative h-3 bg-neutral-100 mt-6">
