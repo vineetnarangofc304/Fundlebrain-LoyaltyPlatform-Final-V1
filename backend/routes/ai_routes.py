@@ -27,14 +27,24 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 MAX_TOOL_ITERATIONS = 6
 
-SYSTEM_PROMPT = """You are Fundle Brain, the AI analytics assistant for KAZO (premium Indian women's fashion brand) powered by Fundle.
+SYSTEM_PROMPT = """You are Fundle Brain, the AI analytics assistant AND operations agent for KAZO (premium Indian women's fashion brand) powered by Fundle.
 
 Capabilities:
-- You have direct read-access to the live Kazo MongoDB through tools. ALWAYS call the appropriate tool before answering numeric questions.
-- IMPORTANT — When the user asks about "all data", "all-time", "lifetime", "historical", "since launch", "across all years", or doesn't specify a recent window, call tools with `days=0` (the sentinel for "all time" — scans the full 20-year history). This is essential because KAZO has just bulk-imported years of historical billing data that lives outside the default 30-day window.
+- You have direct READ access to the live Kazo MongoDB through tools. ALWAYS call the appropriate tool before answering numeric questions.
+- You also have WRITE tools for L1 support operations: customer_deactivate, customer_reactivate, unsubscribe_customer, resubscribe_customer, reactivate_coupon_redemption, reactivate_redeem_points. These are role-gated to super_admin/brand_admin/support_agent and every action is audit-logged.
+
+Write-tool protocol — non-negotiable:
+1. NEVER call a WRITE tool without the user's explicit intent. If unclear, ASK first ("You want me to deactivate 9876543210, correct?").
+2. ALWAYS look up the target first with a READ tool (customer_search, list_redeemed_coupons, list_redeemed_points) to confirm identity and show the user what you're about to act on.
+3. Require a REASON string for every write. If the user didn't give one, ask: "What's the reason — I need to log it for audit."
+4. After a successful write, confirm in plain English what happened and where the audit entry lives ("Logged to Support Desk Audit Log as `support_desk.customer_deactivate`.").
+5. If a write fails with `permission denied`, tell the user their role lacks permission — don't retry.
+
+Data-tool protocol:
+- IMPORTANT — When the user asks about "all data", "all-time", "lifetime", "historical", "since launch", "across all years", or doesn't specify a recent window, call tools with `days=0` (the sentinel for "all time" — scans the full 20-year history).
 - After receiving tool results, synthesise an executive-friendly answer with ₹ for currency, percent for ratios.
 - If the user uploads a CSV, the contents will appear in the user message; reason over those rows directly.
-- If a tool with `days=N` returns zero rows, retry once with `days=0` before concluding "data not available" — the data may be older than N days.
+- If a tool with `days=N` returns zero rows, retry once with `days=0` before concluding "data not available".
 - NEVER fabricate numbers — if a tool still returns no data after the all-time retry, say "Data not available".
 - Be concise, action-oriented, and end with 1–2 recommended actions when appropriate.
 
@@ -79,10 +89,11 @@ def _resolve_model(req_model: Optional[str]) -> tuple[str, str]:
     return "openai", "gpt-5.2"
 
 
-async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str) -> tuple[str, List[Dict[str, Any]]]:
+async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str, user: Dict[str, Any] | None = None) -> tuple[str, List[Dict[str, Any]]]:
     """Multi-turn loop: model -> tool_calls -> execute -> append -> repeat until content.
 
-    Returns (final_text, tool_trace).
+    Returns (final_text, tool_trace). `user` is forwarded to execute_tool for
+    role-gated write tools.
     """
     tool_trace: List[Dict[str, Any]] = []
     for _ in range(MAX_TOOL_ITERATIONS):
@@ -108,7 +119,7 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
                     args = json.loads(tc.function.arguments or "{}")
                 except Exception:
                     args = {}
-                result = await execute_tool(name, args)
+                result = await execute_tool(name, args, user=user)
                 tool_trace.append({"tool": name, "args": args,
                                    "result_preview": str(result)[:500]})
                 messages.append({
@@ -164,7 +175,7 @@ async def chat(req: AIChatRequest, user: dict = Depends(get_current_user)):
 
     provider, model = _resolve_model(req.model)
     try:
-        reply, trace = await _run_tool_loop(history, model, provider)
+        reply, trace = await _run_tool_loop(history, model, provider, user=user)
     except Exception as e:
         raise HTTPException(500, f"AI error: {str(e)}")
 
@@ -238,7 +249,7 @@ async def chat_stream(req: AIChatRequest, user: dict = Depends(get_current_user)
                     except Exception:
                         args = {}
                     yield f"event: tool\ndata: {json.dumps({'tool': name, 'args': args})}\n\n"
-                    result = await execute_tool(name, args)
+                    result = await execute_tool(name, args, user=user)
                     trace.append({"tool": name, "args": args,
                                   "result_preview": str(result)[:300]})
                     history.append({"role": "tool", "tool_call_id": tc.id,
@@ -328,7 +339,7 @@ async def chat_upload_csv(
     })
     provider, mdl = _resolve_model(model)
     try:
-        reply, trace = await _run_tool_loop(history, mdl, provider)
+        reply, trace = await _run_tool_loop(history, mdl, provider, user=user)
     except Exception as e:
         raise HTTPException(500, f"AI error: {str(e)}")
 

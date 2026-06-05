@@ -31,6 +31,44 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 29 (Feb 2026) — 🧠 Fundle Brain expanded from 12 → 33 tools
+
+User: *"Yes pls wire support functions into brain fully. Also any other such things that brain can do should be wired."*
+
+Fundle Brain (the LLM chat) now has **21 new tools** spanning Support Desk operations, Legacy report data, and customer-level ops. End-to-end verified: Brain understands natural-language requests like *"Customer 6000048221 called and said please stop all messages"* and executes the right multi-step flow with role check + audit logging.
+
+#### New tools (categorised)
+
+**Support Desk reads (5)** — `list_deactivated_customers`, `list_unsubscribed`, `list_redeemed_coupons`, `list_redeemed_points`, `support_desk_audit_log`
+
+**Support Desk WRITES (6, role-gated)** — `customer_deactivate`, `customer_reactivate`, `unsubscribe_customer`, `resubscribe_customer`, `reactivate_coupon_redemption`, `reactivate_redeem_points`
+
+**Legacy reports (6)** — `fraud_anomalies`, `pending_bills_summary`, `expiry_points_summary`, `active_coupons_summary`, `location_wise_customer_summary`, `top_customers_report`
+
+**Customer ops (4)** — `customer_search`, `recent_bills_for_customer`, `points_ledger_for_customer`, `tickets_summary`
+
+#### Safety / governance
+- `execute_tool(name, args, user)` now threads the authenticated user through to every handler via `inspect.signature` keyword detection (read-only tools simply ignore it).
+- Every write tool calls `_require_write_role(user)` which gates to `{super_admin, brand_admin, support_agent}`.
+- Every successful write inserts an `audit_logs_col` entry with `source="fundle_brain"`, full reason, and actor email.
+- SYSTEM_PROMPT updated with a non-negotiable Write-tool protocol that the model must follow:
+  1. Never call a write tool without explicit user intent
+  2. Always look up the target with a read tool first
+  3. Require a reason
+  4. Confirm in plain English after success with the audit-log reference
+  5. Stop if the role check fails — never retry
+
+#### Verified end-to-end
+- Brain answered *"Are there any fraud anomalies in the last 60 days?"* → called `fraud_anomalies`, returned 2 high-severity flags with mobile, hour, bill counts.
+- Brain handled *"Customer 6000048221 called and said please stop all messages"* → called `unsubscribe_customer(channel=all)` → confirmed in plain English → audit log captured `via: fundle_brain`.
+- Brain answered *"Show me the last 5 support desk actions from this week"* → called `support_desk_audit_log(days=7, limit=5)` → rendered a markdown list with actor / timestamp / metadata.
+- Brain refused an ambiguous resubscribe request and asked the user for explicit confirmation — perfect adherence to the protocol.
+
+#### Files added/changed
+- New: `/app/backend/routes/ai_extended_tools.py` (21 handlers + schemas, role guard, audit logger)
+- Modified: `/app/backend/routes/ai_tools.py` (merges `EXTRA_TOOL_SCHEMAS`+`EXTRA_TOOL_HANDLERS`; `execute_tool` now accepts `user`)
+- Modified: `/app/backend/routes/ai_routes.py` (`_run_tool_loop` accepts `user`; both `/api/ai/chat` and `/api/ai/chat-stream` thread `user` through; SYSTEM_PROMPT extended with Write-tool protocol)
+
 ### Iteration 28 (Feb 2026) — 🛟 Support Desk + 📊 Legacy Reports (24-report parity with newu.fundlezone.com)
 
 User: *"Lets build support desk. Lets build all reports as it is with all filters in a new section on our end. Rt now lets do this only."*

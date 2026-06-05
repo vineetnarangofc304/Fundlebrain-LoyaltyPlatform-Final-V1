@@ -440,13 +440,27 @@ TOOL_HANDLERS = {
     "rfm_segments": _tool_rfm_segments,
 }
 
+# Merge in extended tools (Support Desk writes + 16 more reads)
+from routes.ai_extended_tools import EXTRA_TOOL_SCHEMAS, EXTRA_TOOL_HANDLERS  # noqa: E402
+TOOL_SCHEMAS.extend(EXTRA_TOOL_SCHEMAS)
+TOOL_HANDLERS.update(EXTRA_TOOL_HANDLERS)
 
-async def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute a tool by name with the given JSON args. Returns dict."""
+
+async def execute_tool(name: str, args: Dict[str, Any], user: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Execute a tool by name with the given JSON args. Returns dict.
+
+    `user` is required for any WRITE tool (role enforcement + audit logging).
+    Read-only tools simply ignore it.
+    """
     handler = TOOL_HANDLERS.get(name)
     if not handler:
         return {"error": f"Unknown tool '{name}'"}
     try:
+        # Inspect if handler accepts a `user` keyword
+        import inspect
+        sig = inspect.signature(handler)
+        if "user" in sig.parameters:
+            return await handler(**(args or {}), user=user)
         return await handler(**(args or {}))
     except TypeError as e:
         return {"error": f"Bad arguments for {name}: {e}"}
