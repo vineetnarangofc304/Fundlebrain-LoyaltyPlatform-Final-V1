@@ -31,6 +31,40 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 30 (Feb 2026) — ⚙️ Loyalty Logic Editor (Fundle parity + significant extensions)
+
+User: *"Logic editor — Compare with what we have and enhance ours to ensure all is covered plus we have more."*
+
+Compared our existing Loyalty Configurator against `newu.fundlezone.com /settings/logicconfig/` and rebuilt the editor to match every Fundle capability + add ten new ones. 19/19 backend pytest pass, full frontend flow verified.
+
+#### What Fundle has → what we now match
+- ✅ Earn-mode toggle: **Points per ₹** vs **% of Spend** (Fundle's two-tab tier system).
+- ✅ Tier table with Display Name, Min ₹, Max ₹, Earn Multiplier, Tier Type (entry / standard / premium / vip / partner), Active toggle, Edit, Delete.
+- ✅ Add custom tiers beyond the 4 default ones (Founders Club, etc.) with all per-tier fields.
+- ✅ Tier soft-deactivate (instead of hard delete) — frontend dims inactive rows.
+
+#### What WE added beyond Fundle
+1. **Per-tier perks**: anniversary bonus · auto coupon discount % · free-shipping min bill · point-expiry override · visit-based promotion threshold · color badge.
+2. **Tier reset cadence**: never / annual (with anchor date) / rolling 12 months.
+3. **Category earn multipliers** — keyed `{ "Kurtas": 2.0, "Sarees": 1.5 }` etc., applied on bill items.
+4. **Store-type earn multipliers** — `{ "online": 1.0, "offline": 1.5 }`.
+5. **Festival boosters** — date-ranged earn multipliers (Diwali, Republic Day) scoped to all / a tier / a category.
+6. **Live earn simulator** — POST `/api/loyalty/simulate { bill_amount, tier, store_type?, category?, bill_date? }` returns step-by-step breakdown (Base earn → Tier multiplier → Store-type → Category → Festival booster) plus final points and English explanation.
+7. **Max redeem % of bill** cap (legacy didn't have this).
+8. **Block earn on returns** toggle.
+9. **Tier ordering validation** on save — no overlap between active bands, max > min.
+10. **Three new write endpoints** for tier CRUD: `POST /api/loyalty/tiers`, `PATCH /api/loyalty/tiers/{slug}/toggle`, `DELETE /api/loyalty/tiers/{slug}` (with last-tier guard).
+
+#### Backend files changed
+- `/app/backend/models.py` — `TierRule` extended with 9 new fields; `LoyaltyConfig` extended with 8 new fields. `tier` slug is now free string (no enum constraint) so custom tiers work.
+- `/app/backend/routes/loyalty_routes.py` — 7 new endpoints, validated PUT, new DEFAULT_CONFIG with 4 seeded tiers + sensible defaults for all new fields. Backfills missing top-level keys on GET.
+
+#### Frontend file rebuilt
+- `/app/frontend/src/pages/admin/LoyaltyConfigurator.jsx` — full rewrite (~600 lines). 10 sections (Distribution · Earn Engine · Tier Management · Tier Reset · Multipliers · Festival Boosters · Global Bonuses · Redeem Engine · Compliance · Earn Simulator). Add-tier modal, Add-booster modal, multiplier editor sub-component, live simulator.
+
+#### One-time backfill applied
+The 4 pre-existing seeded tiers (silver/gold/platinum/diamond) didn't have the new per-tier fields populated. Ran a one-shot backfill — all 5 tiers (including the new "Founders Club") now have name, max_lifetime_spend, tier_type, color, anniversary_bonus, coupon_discount_pct, free_shipping_min_bill, and (for diamond) point_expiry_override_days populated.
+
 ### Iteration 29 (Feb 2026) — 🧠 Fundle Brain expanded from 12 → 33 tools
 
 User: *"Yes pls wire support functions into brain fully. Also any other such things that brain can do should be wired."*
