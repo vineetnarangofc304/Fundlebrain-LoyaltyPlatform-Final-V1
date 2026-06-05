@@ -31,6 +31,18 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 31 (Jun 2026) — 🐛 Legacy Reports Hub broken links (bounced to public landing)
+
+User: *"Legacy reports.. if we click on anything, it brings us back to the main landing page public website.. What's happening"*
+
+**Root cause**: `LegacyReportsHub.jsx` SUMMARY cards linked to non-existent sub-routes (`/admin/raw-reports/customer`, `/transaction`, `/repeat`, `/earn-redeem`, `/customer-by-visit`) and CAMPAIGN ROI cards linked to a non-existent `/admin/dashboards/campaign-performance`. `RawReportsPage` is a single `/admin/raw-reports` route with internal `useState` tabs (no sub-paths). React Router's catch-all `<Route path="*" element={<Navigate to="/" replace />} />` therefore redirected every click to the public landing page. The DETAILED section worked because `/admin/legacy-reports/*` routes do exist.
+
+**Fix**:
+- `RawReportsPage.jsx` — replaced `useState` tab state with `useSearchParams`; reads `?tab=` (validated against TABS keys, defaults to `customer-data`), tab clicks now `setSearchParams({tab})` so the page is deep-linkable.
+- `LegacyReportsHub.jsx` — SUMMARY cards now link to `/admin/raw-reports?tab=<key>` with correct keys; CAMPAIGN ROI cards point to existing `/admin/dashboards/campaigns` (Campaign Performance) instead of the missing `campaign-performance` route.
+
+**Verified**: Logged in, opened the hub, clicked "Customer Data Summary" → landed on `/admin/raw-reports?tab=customer-data` with the report rendered (no bounce). Lint clean. NOTE: This is a code bug present on production too — user must redeploy to fix it on https://kazoloyalty.fundlebrain.ai.
+
 ### Iteration 30 (Feb 2026) — ⚙️ Loyalty Logic Editor (Fundle parity + significant extensions)
 
 User: *"Logic editor — Compare with what we have and enhance ours to ensure all is covered plus we have more."*

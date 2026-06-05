@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "./_shared";
 import { BarChart3, Users, Receipt, Repeat, Coins, TrendingUp } from "lucide-react";
 import CustomerDataReport from "./raw_reports/_customer_data_report";
@@ -16,7 +16,9 @@ const TABS = [
 ];
 
 export default function RawReportsPage() {
-  const [activeTab, setActiveTab] = useState("customer-data");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const activeTab = TABS.some((t) => t.key === requestedTab) ? requestedTab : "customer-data";
   const tab = TABS.find((t) => t.key === activeTab);
   const Comp = tab.Comp;
 
@@ -34,7 +36,7 @@ export default function RawReportsPage() {
             return (
               <button
                 key={t.key}
-                onClick={() => setActiveTab(t.key)}
+                onClick={() => setSearchParams({ tab: t.key })}
                 data-testid={`tab-${t.key}`}
                 className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium border-b-2 transition whitespace-nowrap ${
                   isActive
