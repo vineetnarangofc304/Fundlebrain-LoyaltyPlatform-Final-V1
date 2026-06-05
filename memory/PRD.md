@@ -31,7 +31,75 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
-### Iteration 27 (Feb 2026) — 📐 Numbers-fit-in-boxes Pass + Dashboard Crash Fixes
+### Iteration 28 (Feb 2026) — 🛟 Support Desk + 📊 Legacy Reports (24-report parity with newu.fundlezone.com)
+
+User: *"Lets build support desk. Lets build all reports as it is with all filters in a new section on our end. Rt now lets do this only."*
+
+This iteration closes the two biggest gaps identified in `/app/GAP_ANALYSIS_vs_fundlezone.md` between our system and the legacy NewU Fundle production app — Support Desk operations and the Analytics → Detailed reports section. Backend tests 28/28 pass, frontend 100% verified by testing_agent_v3_fork.
+
+#### A) Support Desk module (8 pages + 14 endpoints)
+Mirrors `newu.fundlezone.com/supportdesk/` exactly:
+
+**Backend** (`/app/backend/routes/support_desk_routes.py`):
+- `GET /api/support-desk/redeem-points-otp` — audit search for OTP sessions (purpose=redeem_points). Filters: mobile, otp_id, bill_number, date range. OTP value masked in display.
+- `GET /api/support-desk/redeem-coupon-otp` — same for purpose=redeem_coupon.
+- `GET /api/support-desk/redeemed-coupons` — recently redeemed coupons. Filters: mobile, coupon_code, date.
+- `POST /api/support-desk/reactivate-coupon` `{redemption_id, reason}` — reverses a coupon redemption, sets `reversed=true`, decrements `coupons.uses_count`, logs audit.
+- `GET /api/support-desk/redeemed-points` — recent kind=redeem ledger entries.
+- `POST /api/support-desk/reactivate-redeem-points` `{ledger_id, reason}` — inserts a compensating ledger entry, restores points to customer balance, sets `reversed=true` on the original.
+- `POST /api/support-desk/customer-deactivate` `{mobile, reason}` — sets `is_active=false`.
+- `POST /api/support-desk/customer-reactivate` `{mobile, reason}` — sets `is_active=true`.
+- `GET /api/support-desk/deactivated-customers` and `/reactivated-customers` — lists.
+- `POST /api/support-desk/unsubscribe` `{mobile, channel, reason}` — opt-out per channel (sms/whatsapp/rcs/email/all).
+- `POST /api/support-desk/resubscribe` — clear opt-outs.
+- `GET /api/support-desk/unsubscribed` — opt-out list with `unsub_channels` summary.
+- `GET /api/support-desk/audit-log` — every support_desk action with filters on action/actor/date.
+
+Roles: write actions gated to `super_admin | brand_admin | support_agent`. Read actions also allow `crm_manager`. Mobile normalisation accepts 7+ digit strings to support legacy 9-digit seed data.
+
+**Frontend** (`/app/frontend/src/pages/admin/support_desk/`):
+- `SearchRedeemPointsOTP.jsx` — 5-filter search + masked OTP table.
+- `SearchRedeemCouponOTP.jsx` — equivalent for coupons.
+- `ReactivateCoupon.jsx` — list + per-row Reactivate button → ConfirmReasonModal.
+- `ReactivateRedeemPoints.jsx` — equivalent for points.
+- `CustomerDeactivate.jsx` — search + deactivate + "Currently Deactivated" list.
+- `CustomerReactivate.jsx` — deactivated list + reactivate + recent reactivations list.
+- `UnsubscribeCustomer.jsx` — opt-out form + opt-out list with channel filter + resubscribe.
+- `SupportDeskAuditLog.jsx` — full audit trail with action/actor/date filters.
+- Shared `_shared.jsx` — `MobileSearchBar`, `Pill`, `ConfirmReasonModal` components.
+- Sidebar: new "SUPPORT DESK" section in `AdminLayout.jsx` with all 8 nav items.
+
+#### B) Legacy Reports section — hub + 11 detailed reports + 11 endpoints
+Mirrors `newu.fundlezone.com/analytics/` Detailed section:
+
+**Backend** (`/app/backend/routes/legacy_reports_routes.py`):
+- `GET /api/legacy-reports/customer-data` — raw customer list. Filters: q (name/mobile/email), tier, location_id/city/state/zone, date range, limit/offset. CSV export via `?export=csv`.
+- `GET /api/legacy-reports/transaction-data` — raw bill list. Same filter pattern.
+- `GET /api/legacy-reports/repeat-customers?min_visits=2` — customers with 2+ visits sorted by visit_count.
+- `GET /api/legacy-reports/top-customers?by=purchase|visits|points` — top N by chosen metric, with tier/location filters.
+- `GET /api/legacy-reports/fraud-report` — anomaly flags: rapid-fire bills (3+ in same hour from same mobile) and large redemptions (>10,000 points). Returns severity high/medium plus mobile, bill list, store count.
+- `GET /api/legacy-reports/pending-bills` — bills with `points_earned in [0, null]`.
+- `GET /api/legacy-reports/feedback-data` — `nps_responses` with bucket / has_comment filters.
+- `GET /api/legacy-reports/missed-calls` — surface ready for IVR integration (currently empty + `note` field).
+- `GET /api/legacy-reports/location-wise-customers` — store-grouped customer counts joined to `stores_col` with state/zone post-filters.
+- `GET /api/legacy-reports/expiry-points?days_ahead=60` — customers whose `points_ledger.expires_at` falls inside the window.
+- `GET /api/legacy-reports/active-coupons` — `is_active=true` coupons with code_prefix / customer_mobile / expiring_within_days filters.
+
+Every endpoint supports `?export=csv` for CSV download.
+
+**Frontend** (`/app/frontend/src/pages/admin/legacy_reports/`):
+- `LegacyReportsHub.jsx` — single landing page at `/admin/legacy-reports` showing 3 sections (SUMMARY x5 cards linking to existing `/admin/raw-reports/*` pages, DETAILED x12 cards, CAMPAIGN ROI x7 cards linking to existing dashboards + the new detailed reports).
+- `_shell.jsx` — `LegacyReportShell` component takes endpoint, columns, filters and renders a filter bar (Apply + CSV export) + data table. `useReportParams` hook + `DatePair` filter helper.
+- 11 page components, each ~30-40 lines, declaring just the columns + filters they need.
+- Sidebar `REPORTS` section now includes a "Reports (Legacy)" link to the hub.
+
+#### C) Verified
+- 28/28 backend pytest tests pass (write flow e2e: deactivate → list → reactivate → list; unsubscribe sms → resubscribe all).
+- All 8 SD pages and 11 LR pages render with real seeded data (57 customers, 41 transactions, 5 coupon redemptions, 3 fraud flags detected from rapid-fire seed).
+- CSV export verified to return text/csv content.
+- Audit log captures every write action with actor email, action type, entity, metadata.
+
+
 
 User: *"some figures are going out of boxes.. pls adjust font etc to manage this all over..."*
 
