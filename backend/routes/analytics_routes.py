@@ -36,12 +36,22 @@ async def transaction_detail(txn_id: str, user: dict = Depends(get_current_user)
 
 # Sales dashboard - hourly + weekday + payment breakdown
 @router.get("/sales-dashboard")
-async def sales_dashboard(period_days: int = 30, user: dict = Depends(get_current_user)):
-    start = _start(period_days)
+async def sales_dashboard(
+    period_days: int = 30,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    from ._date_range import parse_date_range
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    start = start_iso or _start(period_days)
+    bill_filter: Dict[str, Any] = {"$gte": start}
+    if end_iso:
+        bill_filter["$lt"] = end_iso
 
     # Hourly distribution
     hourly_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
+        {"$match": loyalty_match({"bill_date": bill_filter})},
         {"$project": {"hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}}, "net_amount": 1}},
         {"$group": {"_id": "$hour", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
@@ -97,16 +107,22 @@ async def sales_dashboard(period_days: int = 30, user: dict = Depends(get_curren
 @router.get("/customer-dashboard")
 async def customer_dashboard(
     period_days: int = Query(0, ge=0, le=3650),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    from ._date_range import parse_date_range
     now = datetime.now(timezone.utc)
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
 
     # R1: New customer trend uses first_purchase_at (actual first bill date), not created_at.
     # R5: loyalty members only (must have mobile)
-    # period_days=0 → all time. >0 → constrain to customers with last_visit_at in window.
     loyalty_q = {"mobile": {"$nin": [None, ""]}}
-    if period_days > 0:
-        loyalty_q["last_visit_at"] = {"$gte": (now - timedelta(days=period_days)).isoformat()}
+    if start_iso:
+        rng = {"$gte": start_iso}
+        if end_iso:
+            rng["$lt"] = end_iso
+        loyalty_q["last_visit_at"] = rng
     start = (now - timedelta(days=90)).isoformat()
     new_pipe = [
         {"$match": {**loyalty_q, "first_purchase_at": {"$gte": start}}},
@@ -289,13 +305,19 @@ async def campaign_dashboard(user: dict = Depends(get_current_user)):
 @router.get("/loyalty-dashboard")
 async def loyalty_dashboard(
     period_days: int = Query(0, ge=0, le=3650),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    from ._date_range import parse_date_range
     # R5: loyalty members only (have mobile)
     loyalty_q: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
-    if period_days > 0:
-        now = datetime.now(timezone.utc)
-        loyalty_q["last_visit_at"] = {"$gte": (now - timedelta(days=period_days)).isoformat()}
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    if start_iso:
+        rng = {"$gte": start_iso}
+        if end_iso:
+            rng["$lt"] = end_iso
+        loyalty_q["last_visit_at"] = rng
     tier_pipe = [
         {"$match": loyalty_q},
         {"$group": {"_id": "$tier", "count": {"$sum": 1}, "avg_spend": {"$avg": "$lifetime_spend"},
@@ -393,11 +415,23 @@ async def store_dashboard(period_days: int = 30, user: dict = Depends(get_curren
 
 # NPS dashboard
 @router.get("/nps-dashboard")
-async def nps_dashboard(period_days: int = 60, user: dict = Depends(get_current_user)):
-    start = _start(period_days)
+async def nps_dashboard(
+    period_days: int = 60,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    from ._date_range import parse_date_range
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    if not start_iso:
+        # Default for NPS: last 60 days (the old behaviour)
+        start_iso = _start(60)
+    match: Dict[str, Any] = {"created_at": {"$gte": start_iso}}
+    if end_iso:
+        match["created_at"]["$lt"] = end_iso
     # Daily trend
     trend_pipe = [
-        {"$match": {"created_at": {"$gte": start}}},
+        {"$match": match},
         {"$group": {
             "_id": {"$substr": ["$created_at", 0, 10]},
             "promoters": {"$sum": {"$cond": [{"$gte": ["$score", 9]}, 1, 0]}},

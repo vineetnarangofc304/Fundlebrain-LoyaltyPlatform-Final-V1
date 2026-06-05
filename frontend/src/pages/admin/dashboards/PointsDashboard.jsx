@@ -8,6 +8,7 @@ import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
 import { RefreshCw, Download } from "lucide-react";
 import { downloadCsv } from "@/lib/csv_export";
+import DateRangePicker from "../_date_range_picker";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   Legend, Cell,
@@ -15,7 +16,7 @@ import {
 
 export default function PointsDashboard() {
   const navigate = useNavigate();
-  const [period, setPeriod] = useState(0);   // 0 = All time (default)
+  const [range, setRange] = useState({ preset: "0", period_days: 90, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drill, setDrill] = useState(null);
@@ -23,17 +24,22 @@ export default function PointsDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/dashboard/points-economics", { params: { period_days: period } });
+      const params = { period_days: range.period_days };
+      if (range.start_date && range.end_date) {
+        params.start_date = range.start_date;
+        params.end_date = range.end_date;
+      }
+      const r = await api.get("/dashboard/points-economics", { params });
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading points economics…</div>;
   if (!data) return null;
 
   const aiPayload = {
-    period_days: period,
+    period_days: range.period_days,
     window_earn: data.window.earn_points,
     window_burn: data.window.burn_points,
     burn_to_earn_pct: data.window.burn_to_earn_pct,
@@ -53,13 +59,7 @@ export default function PointsDashboard() {
         subtitle="EARN · BURN · LIABILITY · BREAKAGE · LIVE"
         actions={
           <>
-            <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="pe-period">
-              <option value={0}>All time</option>
-              <option value={30}>Last 30 days</option>
-              <option value={90}>Last 90 days</option>
-              <option value={180}>Last 180 days</option>
-              <option value={365}>Last 365 days</option>
-            </select>
+            <DateRangePicker value={range} onChange={setRange} testid="pe-date-range" />
             <button className="k-btn k-btn-outline k-btn-sm" onClick={() => {
               if (!data) return;
               const sections = [];
@@ -151,7 +151,7 @@ export default function PointsDashboard() {
 
         {/* Top redeemers */}
         <div className="bg-white border border-black/10 p-5">
-          <SectionHeading eyebrow="REDEMPTION CHAMPIONS" title={`Top redeemers · last ${period} days`} accent="amber" />
+          <SectionHeading eyebrow="REDEMPTION CHAMPIONS" title={`Top redeemers · ${range.label || `last ${range.period_days} days`}`} accent="amber" />
           <table className="data-table">
             <thead><tr><th>Rank</th><th>Customer</th><th>City</th><th>Tier</th><th className="text-right">Points burned</th><th className="text-right">INR value</th><th className="text-right">Events</th></tr></thead>
             <tbody>

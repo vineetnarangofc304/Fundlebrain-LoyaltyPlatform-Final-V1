@@ -18,12 +18,14 @@ import { PageHeader, KPICard } from "../_shared";
 import { RefreshCw, AlertTriangle, AlertCircle, ChevronRight } from "lucide-react";
 import DrillDownModal from "../DrillDownModal";
 import AIInsightStrip from "../AIInsightStrip";
+import DateRangePicker from "../_date_range_picker";
 
 const COHORT_COLORS = { today: "#0F172A", last_7d: "#571326", last_30d: "#94A3B8", last_90d: "#C7A76D", older: "#cbd5e1" };
 
 export default function CommandCenter() {
   const navigate = useNavigate();
-  const [period, setPeriod] = useState("all");   // Default to All time so historical CSV uploads are visible immediately
+  const [period, setPeriod] = useState("all");   // legacy preset string for backend
+  const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [storeId, setStoreId] = useState("");
   const [city, setCity] = useState("");
   const [filterOpts, setFilterOpts] = useState({ cities: [], stores: [] });
@@ -46,6 +48,11 @@ export default function CommandCenter() {
     setLoading(true);
     try {
       const params = { period };
+      // Override with explicit dates when user picked a custom range
+      if (range.start_date && range.end_date) {
+        params.start_date = range.start_date;
+        params.end_date = range.end_date;
+      }
       if (storeId) params.store_id = storeId;
       if (city && !storeId) params.city = city;
       const res = await api.get("/dashboard/command-center", { params });
@@ -55,12 +62,12 @@ export default function CommandCenter() {
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period, storeId, city]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period, range, storeId, city]);
   useEffect(() => {
     const id = setInterval(load, 30000);
     return () => clearInterval(id);
     // eslint-disable-next-line
-  }, [period, storeId, city]);
+  }, [period, range, storeId, city]);
 
   const windowStartISO = useMemo(() => {
     if (!data) return null;
@@ -230,21 +237,24 @@ export default function CommandCenter() {
                 <option key={s.id} value={s.id}>{s.code} · {s.name}</option>
               ))}
             </select>
-            <select
-              className="k-input !w-auto !py-1.5"
-              value={period}
-              onChange={(e) => setPeriod(e.target.value)}
-              data-testid="cc-period"
-            >
-              <option value="today">Today</option>
-              <option value="7d">Last 7 days</option>
-              <option value="30d">Last 30 days</option>
-              <option value="90d">Last 90 days</option>
-              <option value="mtd">Month to date</option>
-              <option value="ytd">Year to date</option>
-              <option value="1y">Last 1 year</option>
-              <option value="all">All time</option>
-            </select>
+            <DateRangePicker
+              value={range}
+              onChange={(r) => {
+                setRange(r);
+                // Sync legacy `period` for backwards-compatibility (command-center
+                // backend still keys window math off `period` when no explicit dates)
+                if (r.start_date && r.end_date) setPeriod("custom");
+                else if (r.period_days === 0) setPeriod("all");
+                else if (r.period_days === 7) setPeriod("7d");
+                else if (r.period_days === 30) setPeriod("30d");
+                else if (r.period_days === 90) setPeriod("90d");
+                else if (r.period_days === 365) setPeriod("1y");
+                else if (r.preset === "mtd") setPeriod("mtd");
+                else if (r.preset === "ytd") setPeriod("ytd");
+                else setPeriod("all");
+              }}
+              testid="cc-date-range"
+            />
             <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="cc-refresh">
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
             </button>

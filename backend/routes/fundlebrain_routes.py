@@ -633,15 +633,19 @@ async def store_performance_v2(
 @router.get("/rfm")
 async def rfm_dashboard(
     period_days: int = Query(0, ge=0, le=3650),
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     user: dict = Depends(get_current_user),
 ):
+    from ._date_range import parse_date_range
     now = datetime.now(timezone.utc)
-    # period_days=0 → all time. Otherwise restrict to customers whose last_visit
-    # is within the window. This trims the cohort to the recently-active universe.
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
     base_query: Dict[str, Any] = {}
-    if period_days > 0:
-        cutoff = (now - timedelta(days=period_days)).isoformat()
-        base_query["last_visit_at"] = {"$gte": cutoff}
+    if start_iso:
+        rng = {"$gte": start_iso}
+        if end_iso:
+            rng["$lt"] = end_iso
+        base_query["last_visit_at"] = rng
 
     customers = await customers_col.find(
         base_query, {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1,
@@ -772,14 +776,20 @@ SPEND_BANDS = [
 @router.get("/cohorts-segmentation")
 async def cohorts_segmentation(
     period_days: int = Query(0, ge=0, le=3650),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
     """Live cohorts + segmentation: one-timers, frequency bands, ATV, retention triangle."""
+    from ._date_range import parse_date_range
     now = datetime.now(timezone.utc)
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
     cohort_query: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
-    if period_days > 0:
-        cutoff = (now - timedelta(days=period_days)).isoformat()
-        cohort_query["last_visit_at"] = {"$gte": cutoff}
+    if start_iso:
+        rng = {"$gte": start_iso}
+        if end_iso:
+            rng["$lt"] = end_iso
+        cohort_query["last_visit_at"] = rng
 
     # ---- One pass over transactions: per-customer aggregates (R4: by mobile; R5: loyalty only) ----
     cust_pipe = [
@@ -1058,11 +1068,19 @@ async def cohorts_segmentation(
 # Points Economics v2 — earn-burn gauge, liability, monthly flow, top redeemers
 # ============================================================
 @router.get("/points-economics")
-async def points_economics(period_days: int = 90, user: dict = Depends(get_current_user)):
+async def points_economics(
+    period_days: int = 90,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
     """Live loyalty economics: earn/burn ratio, liability, monthly flow, top redeemers."""
+    from ._date_range import parse_date_range
     period_days = _norm_period_days(period_days)
     now = datetime.now(timezone.utc)
-    start = (now - timedelta(days=period_days)).isoformat()
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    # Fallback to legacy "last N days" when no custom range supplied
+    start = start_iso or (now - timedelta(days=period_days)).isoformat()
 
     config = await loyalty_config_col.find_one({}, {"_id": 0}) or {}
     earn_ratio = float(config.get("earn_ratio", 1.0))

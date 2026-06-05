@@ -3,18 +3,29 @@ import api from "@/lib/api";
 import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "../_shared";
 import { fmtINR, fmtNum } from "@/lib/format";
 import { LineChart, Line, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
+import DateRangePicker from "../_date_range_picker";
 
 export default function SalesDashboard() {
-  const [period, setPeriod] = useState(0);   // 0 = All time (default, includes historical CSV uploads)
+  const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [trend, setTrend] = useState([]);
 
   useEffect(() => {
+    const params = { period_days: range.period_days };
+    if (range.start_date && range.end_date) {
+      params.start_date = range.start_date;
+      params.end_date = range.end_date;
+    }
+    const trendParams = { period: range.period_days === 0 ? "all" : `${range.period_days}d` };
+    if (range.start_date && range.end_date) {
+      trendParams.start_date = range.start_date;
+      trendParams.end_date = range.end_date;
+    }
     Promise.all([
-      api.get("/analytics/sales-dashboard", { params: { period_days: period } }),
-      api.get("/dashboard/sales-trend", { params: { period: period === 0 ? "all" : `${period}d` } }),
+      api.get("/analytics/sales-dashboard", { params }),
+      api.get("/dashboard/sales-trend", { params: trendParams }),
     ]).then(([d, t]) => { setData(d.data); setTrend(t.data); });
-  }, [period]);
+  }, [range]);
 
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
 
@@ -26,9 +37,7 @@ export default function SalesDashboard() {
     <div data-testid="sales-dashboard">
       <PageHeader title="Sales Dashboard" subtitle="REVENUE INTELLIGENCE · LIVE"
         actions={
-          <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="sales-period">
-            <option value={0}>All time</option><option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>365 days</option>
-          </select>
+          <DateRangePicker value={range} onChange={setRange} testid="sales-date-range" />
         } />
       <div className="p-8 space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -39,7 +48,7 @@ export default function SalesDashboard() {
         </div>
 
         <div className="chart-card p-5" data-accent="burgundy">
-          <SectionHeading eyebrow="REVENUE TREND" title={`Daily net revenue · ${period === 0 ? "all time" : `last ${period} days`}`} accent="burgundy" />
+          <SectionHeading eyebrow="REVENUE TREND" title={`Daily net revenue · ${range.label || (range.period_days === 0 ? "all time" : `last ${range.period_days} days`)}`} accent="burgundy" />
           <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={trend}>
               <defs>

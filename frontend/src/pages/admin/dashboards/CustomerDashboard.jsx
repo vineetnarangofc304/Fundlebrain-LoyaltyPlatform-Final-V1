@@ -5,6 +5,7 @@ import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "../_shared";
 import { fmtINR, fmtNum, tierClass } from "@/lib/format";
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
 import { RefreshCw } from "lucide-react";
+import DateRangePicker from "../_date_range_picker";
 
 const RISK_COLOR = { low: "#047857", medium: "#B45309", high: "#9F1239" };
 const HEALTH_COLOR = {
@@ -16,17 +17,22 @@ const HEALTH_COLOR = {
 };
 
 export default function CustomerDashboard() {
-  const [period, setPeriod] = useState(0);
+  const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/analytics/customer-dashboard", { params: { period_days: period } });
+      const params = { period_days: range.period_days };
+      if (range.start_date && range.end_date) {
+        params.start_date = range.start_date;
+        params.end_date = range.end_date;
+      }
+      const r = await api.get("/analytics/customer-dashboard", { params });
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
   const totalCust = data.churn_distribution.reduce((s, r) => s + r.count, 0);
   const life = data.lifecycle_split || { one_timer: { count: 0, lifetime_spend: 0 }, repeat: { count: 0, lifetime_spend: 0 } };

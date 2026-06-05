@@ -9,6 +9,7 @@ import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
 import { RefreshCw, Users, TrendingDown, Download } from "lucide-react";
 import { downloadCsv } from "@/lib/csv_export";
+import DateRangePicker from "../_date_range_picker";
 
 // Colour scale for the 5x5 heatmap — burgundy-to-indigo by health
 const SEG_COLORS = {
@@ -106,13 +107,7 @@ export default function RFMDashboard() {
         subtitle="11-SEGMENT CUSTOMER INTELLIGENCE · LIVE"
         actions={
           <>
-            <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="rfm-period">
-              <option value={0}>All time</option>
-              <option value={30}>Last 30 days</option>
-              <option value={90}>Last 90 days</option>
-              <option value={180}>Last 180 days</option>
-              <option value={365}>Last 365 days</option>
-            </select>
+            <DateRangePicker value={range} onChange={setRange} testid="rfm-date-range" />
             <button className="k-btn k-btn-outline k-btn-sm" onClick={exportSegmentsCsv} data-testid="rfm-export-csv">
               <Download className="w-3.5 h-3.5" /> Export CSV
             </button>
@@ -135,7 +130,7 @@ export default function RFMDashboard() {
           <div>
             <div className="text-[10px] uppercase tracking-[0.3em] text-white/60 mb-1">TOTAL CUSTOMERS IN COHORT</div>
             <div className="font-display text-6xl tracking-tight tabular-nums">{fmtNum(data.total_customers)}</div>
-            <div className="text-xs text-white/50 mt-1">{period === 0 ? "All-time loyalty members" : `Active in last ${period} days`}</div>
+            <div className="text-xs text-white/50 mt-1">{range.period_days === 0 && !range.start_date ? "All-time loyalty members" : `Active in ${range.label || `last ${range.period_days} days`}`}</div>
           </div>
           <div className="flex-1 grid grid-cols-3 gap-4 text-right">
             <div>

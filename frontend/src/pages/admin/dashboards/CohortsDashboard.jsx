@@ -9,6 +9,7 @@ import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
 import { RefreshCw, AlertTriangle, Users, TrendingUp, Download } from "lucide-react";
 import { downloadCsv } from "@/lib/csv_export";
+import DateRangePicker from "../_date_range_picker";
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip,
   CartesianGrid, Cell, PieChart, Pie, Legend, ComposedChart, Area,
@@ -24,7 +25,7 @@ const TIER_COLOR = {
 
 export default function CohortsDashboard() {
   const navigate = useNavigate();
-  const [period, setPeriod] = useState(0);
+  const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drill, setDrill] = useState(null);
@@ -32,11 +33,16 @@ export default function CohortsDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/dashboard/cohorts-segmentation", { params: { period_days: period } });
+      const params = { period_days: range.period_days };
+      if (range.start_date && range.end_date) {
+        params.start_date = range.start_date;
+        params.end_date = range.end_date;
+      }
+      const r = await api.get("/dashboard/cohorts-segmentation", { params });
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
 
   const exportCsv = () => {
     if (!data) return;
@@ -112,13 +118,7 @@ export default function CohortsDashboard() {
         subtitle="ONE-TIMERS · REPEAT BANDS · ATV · RETENTION · LIVE"
         actions={
           <>
-            <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="cohorts-period">
-              <option value={0}>All time</option>
-              <option value={30}>Last 30 days</option>
-              <option value={90}>Last 90 days</option>
-              <option value={180}>Last 180 days</option>
-              <option value={365}>Last 365 days</option>
-            </select>
+            <DateRangePicker value={range} onChange={setRange} testid="cohorts-date-range" />
             <button className="k-btn k-btn-outline k-btn-sm" onClick={exportCsv} data-testid="cohorts-export-csv">
               <Download className="w-3.5 h-3.5" /> Export CSV
             </button>

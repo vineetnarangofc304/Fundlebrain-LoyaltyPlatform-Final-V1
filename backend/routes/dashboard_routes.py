@@ -39,8 +39,22 @@ def _date_range(period: str = "30d"):
 
 
 @router.get("/kpis")
-async def kpis(period: str = "30d", store_id: Optional[str] = None, user: dict = Depends(get_current_user)):
-    start, end = _date_range(period)
+async def kpis(
+    period: str = "30d",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    store_id: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    # Custom date range takes precedence over preset period
+    if start_date and end_date:
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        except ValueError:
+            start, end = _date_range(period)
+    else:
+        start, end = _date_range(period)
     prev_start = start - (end - start)
 
     # R5: loyalty data only — bills must have customer_mobile attached
@@ -360,6 +374,8 @@ async def filter_options(user: dict = Depends(get_current_user)):
 @router.get("/command-center")
 async def command_center(
     period: str = "30d",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     store_id: Optional[str] = None,
     city: Optional[str] = None,
     user: dict = Depends(get_current_user),
@@ -367,11 +383,20 @@ async def command_center(
     """Live Command Center KPIs + sparkline + cohort distribution + alerts.
 
     Filters (all real-time, no snapshots):
-      - period: today | 7d | 30d | 90d | mtd | ytd
+      - period: today | 7d | 30d | 90d | mtd | ytd | all  (legacy)
+      - start_date / end_date: explicit YYYY-MM-DD override (takes precedence)
       - store_id: limit to a single store
       - city: limit to stores in this city (resolves to a store_id list)
     """
-    start, end = _date_range(period)
+    # Custom date range takes precedence over preset period
+    if start_date and end_date:
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        except ValueError:
+            start, end = _date_range(period)
+    else:
+        start, end = _date_range(period)
     prev_start = start - (end - start)
     now = datetime.now(timezone.utc)
 
