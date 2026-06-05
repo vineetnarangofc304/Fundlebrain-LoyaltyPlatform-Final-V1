@@ -10,7 +10,7 @@ import time
 import uuid
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-crm-preview.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://loyalty-hub-118.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
 SUPERADMIN = {"email": "superadmin@fundle.io", "password": "Fundle@2026"}
