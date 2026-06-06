@@ -31,6 +31,20 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 33 (Jun 2026) — 📥 Real KAZO data ingestion alignment (Customer / Billwise / SKU-wise)
+
+Client shared the real export headers (Customer_Master_Data, Kazo_Billwise_Data, Kazo_SKU_Master_Data) to load years of history via the Historical Upload UI. Aligned the parser to all three formats. *"The store code is referred to as Customer_Key, which is a combination of merchant_id and customer_key."*
+
+**Backend** (`/app/backend/routes/historic_routes.py`):
+- **Customer Master** — already matched (Mobile, Total Billing, DOA/DOB, Registred Account typo, etc.); added `Days Since Last Visit`.
+- **Billwise (transactions)** — now reads the **`Store master` K-code** (e.g. `K00055`) as the canonical store identity. Stores are created/linked by this code and tagged `pos_customer_key` + `pos_merchant_id` so they align 1:1 with live POS bill ingestion (the merchant_id+customer_key combo). `store_code` is persisted on each transaction; store_id backfilled by code. Falls back to outlet-name matching when no code is present.
+- **SKU-wise / line items** — NEW `sku_transactions` dataset. Each row is one item line; lines are grouped by **`Transaction Id`** (the `000000PK…` value that equals the billwise Bill Number) and attached to the matching transaction's `items[]` (+ `units_count`), powering UPT / units-sold / category analytics. Distinct items also upsert the **Item Master** (`Item Id` → name, category, season, rate). Recommended order: upload Billwise first, then SKU-wise.
+- Extended item-master aliases (`Item Id`, `Item Master Category`, `Rate`). Updated `/schema/*` endpoint for all three. `sku_transactions` added to `ALLOWED_DATASETS`.
+
+**Frontend** (`HistoricDataPage.jsx`): new "SKU / Line Items" dataset tile; Transactions tile copy updated to "Store master K-code = store identity".
+
+**Verified**: curl end-to-end on the real files (customers/transactions/SKU all 0 errors; K00055/K00058 stores created with POS combo; SKU line attached to a matching bill with `units_count`) + pytest `tests/iteration18_kazo_real_data_ingest_test.py` (3/3 pass). Lint clean (Python). ⚠️ Redeploy required for production.
+
 ### Iteration 32 (Jun 2026) — 🏬 POS ingestion: (merchant_id + customer_key) decides the store
 
 User: *"Customer_key is the store code... pls align api ingestion accordingly... this will help identify the store. Customer key plus merchant ID combo should decide the store code. And if you get a bill which comes without an existing store code, then you can create that as a new store code and add that bill there. And also update the master. Whatever name and other things we can populate manually later on."*

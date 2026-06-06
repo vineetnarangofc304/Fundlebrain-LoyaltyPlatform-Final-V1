@@ -12,9 +12,10 @@ import {
 
 const DATASETS = [
   { key: "customers", label: "Customers", desc: "CRM master — mobile, points, lifetime billing.", accent: "#571326" },
-  { key: "transactions", label: "Transactions", desc: "Bill-level history with outlet + tax + revenue.", accent: "#1E3A8A" },
+  { key: "transactions", label: "Transactions", desc: "Bill-level history. Store master K-code = store identity.", accent: "#1E3A8A" },
+  { key: "sku_transactions", label: "SKU / Line Items", desc: "Item-wise bill lines — attaches to bills by Transaction Id.", accent: "#9D174D" },
   { key: "stores", label: "Stores", desc: "Outlet master (auto-created from transaction uploads).", accent: "#0E7C7B" },
-  { key: "items", label: "Items / SKUs", desc: "SKU master · MRP, color, size, category, HSN.", accent: "#B45309" },
+  { key: "items", label: "Items / SKUs", desc: "SKU master · name, category, season, MRP, HSN.", accent: "#B45309" },
   { key: "points_ledger", label: "Points Ledger", desc: "Raw earn / redeem / bonus history (idempotent).", accent: "#7C3AED" },
 ];
 

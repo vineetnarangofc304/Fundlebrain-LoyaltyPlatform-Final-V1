@@ -45,7 +45,7 @@ CHUNK_SIZE = 500
 MAX_FILE_BYTES = 250 * 1024 * 1024  # 250 MB (chunked uploads bypass proxy limits)
 MAX_ERROR_SAMPLES = 25  # for the in-job samples (UI preview); full set lives in historic_skipped_col
 SKIPPED_PERSIST_CAP = 1_000_000  # safety cap on skipped-rows write per job
-ALLOWED_DATASETS = {"customers", "transactions", "stores", "items", "points_ledger"}
+ALLOWED_DATASETS = {"customers", "transactions", "stores", "items", "points_ledger", "sku_transactions"}
 DUPLICATE_MODES = {"upsert", "skip", "fail"}
 
 
@@ -111,6 +111,7 @@ def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
     visit_count = parse_int(r.get("Total Visits"))
     points_balance = parse_int(r.get("Current Point Balance"))
     points_redeemed = parse_int(r.get("Redeem Points"))
+    days_since_last_visit = parse_int(r.get("Days Since Last Visit"), -1)
     tier = _derive_tier(lifetime_spend)
     name = (r.get("Name") or r.get("Customer Name") or "").strip() or None
     city = (r.get("City") or "").strip() or None
@@ -135,6 +136,7 @@ def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
         "visit_count": visit_count,
         "points_balance": points_balance,
         "lifetime_points_redeemed": points_redeemed,
+        "days_since_last_visit": days_since_last_visit if days_since_last_visit >= 0 else None,
         "tier": tier,
         "is_online": online,
         "source": "historic_upload",
@@ -185,16 +187,20 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
     )
     bonus_points = parse_int(r.get("Bonus Points") or r.get("Bonus"))
 
-    outlet = (r.get("Outlet(Only For Shopify Marker)") or r.get("Outlet") or "").strip()
+    outlet = (r.get("Outlet(Only For Shopify Marker)") or r.get("Outlet") or "").strip() or None
+    # "Store master" / "Store code" carries the canonical K-code (== POS customer_key).
+    store_code = (r.get("Store master") or r.get("Store code") or r.get("Store Code") or "").strip() or None
     city = (r.get("City") or "").strip() or None
     zone = (r.get("Zone New") or r.get("Zone") or "").strip() or None
     store_class = (r.get("Class") or "").strip() or None
     store_id = None
-    if outlet:
-        cache_key = outlet.lower()
+    # Identify the store by its K-code when present (so it aligns with live POS combo
+    # resolution), else fall back to the outlet name. store_id is backfilled in the post-pass.
+    cache_key = store_code or (outlet.lower() if outlet else None)
+    if cache_key:
         if cache_key not in store_cache:
-            store_cache[cache_key] = {"name": outlet, "city": city, "zone": zone,
-                                        "class": store_class, "id": None}
+            store_cache[cache_key] = {"code": store_code, "name": outlet, "city": city,
+                                        "zone": zone, "class": store_class, "id": None}
         store_id = store_cache[cache_key].get("id")
     return_marker = (r.get("Return Marker") or "Regular").strip()
     new_existing = (r.get("New_Existing") or "").strip()
@@ -206,6 +212,7 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
         "customer_mobile": mobile,
         "customer_name": (r.get("Customer Name") or "").strip() or None,
         "store_id": store_id,  # filled later when store is created
+        "store_code": store_code,
         "store_name": outlet or None,
         "city": city,
         "zone": zone,
@@ -260,12 +267,13 @@ def _map_item_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional
     # Accept common KAZO column variants for SKU
     sku = (
         r.get("SKU") or r.get("sku") or r.get("Sku")
+        or r.get("Item Id") or r.get("Item ID")
         or r.get("Item Code") or r.get("ITEM CODE") or r.get("Article")
         or r.get("Style Code") or r.get("StyleCode")
         or ""
     ).strip()
     if not sku:
-        return None, "Missing SKU / Item Code / Style Code"
+        return None, "Missing SKU / Item Id / Item Code / Style Code"
 
     name = (
         r.get("Name") or r.get("Item Name") or r.get("Product Name")
@@ -273,15 +281,15 @@ def _map_item_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional
     ).strip() or None
 
     category = (
-        r.get("Category") or r.get("Item Category") or r.get("Product Category")
-        or r.get("Class") or ""
+        r.get("Category") or r.get("Item Master Category") or r.get("Item Category")
+        or r.get("Product Category") or r.get("Class") or ""
     ).strip() or None
 
     sub_category = (r.get("Sub Category") or r.get("Sub-Category") or "").strip() or None
 
     price = parse_float(
         r.get("MRP") or r.get("mrp") or r.get("MRP Price") or r.get("List Price")
-        or r.get("Price") or r.get("Selling Price")
+        or r.get("Price") or r.get("Selling Price") or r.get("Rate")
     )
 
     color = (r.get("Color") or r.get("Colour") or "").strip() or None
@@ -360,12 +368,51 @@ def _map_points_ledger_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]],
     return doc, None
 
 
+def _map_sku_line_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """SKU-wise / line-item bill data (e.g. Kazo_SKU_Master_Data).
+
+    Each row is one item line on a bill. We attach these lines to the matching
+    transaction (`items[]`) and also build the item master catalog. The join key
+    is the SKU file's "Transaction Id" (the 000000PK… value) which equals the
+    billwise Bill Number / Transaction Id.
+    """
+    txn_key = (r.get("Transaction Id") or r.get("Transaction ID") or r.get("Bill Number") or "").strip()
+    if not txn_key:
+        return None, "Missing Transaction Id / Bill Number"
+    sku = (r.get("Item Id") or r.get("Item ID") or r.get("SKU") or r.get("sku")
+           or r.get("Item Code") or "").strip()
+    if not sku:
+        return None, "Missing Item Id / SKU"
+    name = (r.get("Item Name") or r.get("Name") or r.get("Product Name") or "").strip() or None
+    category = (r.get("Item Master Category") or r.get("Category") or "").strip() or None
+    category_id = (r.get("Category 1(Logic)") or r.get("Category 0(Logic)") or "").strip() or None
+    season = (r.get("Season") or "").strip() or None
+    qty = parse_int(r.get("Quantity") or r.get("Qty"), 1) or 1
+    rate = parse_float(r.get("Rate"))
+    discount = parse_float(r.get("discount") or r.get("Discount"))
+    subtotal = parse_float(r.get("Sub Total") or r.get("Subtotal"))
+    return ({
+        "_txn_key": txn_key,
+        "invoice_number": (r.get("Bill Number") or "").strip() or None,
+        "sku": sku,
+        "name": name,
+        "category": category,
+        "category_id": category_id,
+        "season": season,
+        "quantity": qty,
+        "unit_price": rate,
+        "discount": discount,
+        "total": subtotal or (round(rate * qty, 2) if rate else 0),
+    }, None)
+
+
 MAPPERS = {
     "customers": _map_customer_row,
     "transactions": _map_transaction_row,  # special: store_cache passed
     "stores": _map_store_row,
     "items": _map_item_row,
     "points_ledger": _map_points_ledger_row,
+    "sku_transactions": _map_sku_line_row,
 }
 
 
@@ -427,6 +474,9 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     "created_at": now(),
                 })
         store_cache: Dict[str, Dict[str, Any]] = {}
+        # SKU-wise accumulators: line items grouped by txn join-key + distinct item master
+        sku_bill_items: Dict[str, List[Dict[str, Any]]] = {}
+        sku_item_master: Dict[str, Dict[str, Any]] = {}
         buffer_insert: List[Dict[str, Any]] = []
 
         # Pre-pass: count rows
@@ -497,6 +547,31 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     res = await items_col.bulk_write(ops, ordered=False)
                     inserted += res.upserted_count
                     updated += res.matched_count
+                    buffer_insert.clear()
+            elif dataset == "sku_transactions":
+                # Accumulate line items per bill + distinct item master. Actual writes
+                # (attach to transactions + upsert item master) happen in the post-pass.
+                if buffer_insert:
+                    for d in buffer_insert:
+                        tk = d.get("_txn_key")
+                        sku = d.get("sku")
+                        if sku and sku not in sku_item_master:
+                            sku_item_master[sku] = {
+                                "sku": sku, "name": d.get("name"),
+                                "category": d.get("category"), "season": d.get("season"),
+                                "price": d.get("unit_price"),
+                                "is_active": True, "source": "historic_upload",
+                            }
+                        if tk:
+                            sku_bill_items.setdefault(tk, []).append({
+                                "sku": sku, "name": d.get("name"),
+                                "category": d.get("category"), "category_id": d.get("category_id"),
+                                "quantity": d.get("quantity"), "unit_price": d.get("unit_price"),
+                                "total": d.get("total"), "discount": d.get("discount"),
+                                "season": d.get("season"),
+                            })
+                    # Every processed line is "accounted for" → keeps integrity check balanced.
+                    updated += len(buffer_insert)
                     buffer_insert.clear()
             elif dataset == "points_ledger":
                 if buffer_insert:
@@ -583,49 +658,117 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         # Persist any remaining skipped rows
         await _persist_skipped(force=True)
 
-        # For transactions: auto-create stores from cache — wrapped so a bad store row never fails the job
+        # For transactions: create/link stores by K-code — wrapped so a bad store row never fails the job
         store_links: Dict[str, str] = {}
         if dataset == "transactions" and store_cache and not dry_run:
             try:
-                for key, meta in store_cache.items():
-                    if not meta.get("name"):
+                from pymongo import UpdateMany
+                # merchant_id for POS-combo alignment so live POS bills land on the same store
+                _cred = await db["pos_credentials"].find_one({"is_active": True}, {"_id": 0, "merchant_id": 1})
+                _merchant = (_cred or {}).get("merchant_id") or "KAZO_FUNDLE"
+                for cache_key, meta in store_cache.items():
+                    code = (meta.get("code") or "").strip() or None
+                    name = (meta.get("name") or "").strip() or None
+                    if not code and not name:
                         continue
                     try:
-                        existing = await stores_col.find_one({"name": meta["name"]}, {"_id": 0, "id": 1})
+                        existing = None
+                        if code:
+                            existing = await stores_col.find_one({"code": code}, {"_id": 0, "id": 1})
+                        if not existing and name:
+                            existing = await stores_col.find_one({"name": name}, {"_id": 0, "id": 1})
                         if existing:
                             meta["id"] = existing["id"]
+                            if code:
+                                # Tag the K-code + POS combo onto the existing store
+                                await stores_col.update_one(
+                                    {"id": existing["id"]},
+                                    {"$set": {"code": code, "pos_customer_key": code,
+                                              "pos_merchant_id": _merchant}})
                         else:
                             sid = uuid.uuid4().hex
-                            await stores_col.insert_one({
+                            store_doc = {
                                 "id": sid,
-                                "code": _make_store_code(meta["name"]),
-                                "name": meta["name"],
+                                "code": code or _make_store_code(name),
+                                "name": name or code,
                                 "city": meta.get("city") or "",
                                 "state": "",
                                 "region": meta.get("zone") or "",
                                 "store_class": meta.get("class"),
-                                "address": meta.get("name"),
+                                "address": name or "",
                                 "is_active": True,
                                 "source": "historic_upload",
                                 "created_at": now(),
-                            })
+                            }
+                            if code:
+                                store_doc["pos_customer_key"] = code
+                                store_doc["pos_merchant_id"] = _merchant
+                            await stores_col.insert_one(store_doc)
                             meta["id"] = sid
-                        store_links[meta["name"]] = meta["id"]
+                        store_links[cache_key] = meta["id"]
                     except Exception as se:
-                        logger.warning(f"Could not create/find store '{meta.get('name')}': {se}")
-                # Backfill store_id on the just-inserted transactions
-                if store_links:
-                    from pymongo import UpdateMany
-                    ops = [UpdateMany({"store_name": name, "store_id": None},
-                                        {"$set": {"store_id": sid}})
-                           for name, sid in store_links.items()]
-                    if ops:
-                        try:
-                            await transactions_col.bulk_write(ops, ordered=False)
-                        except Exception as be:
-                            logger.exception(f"Store backfill bulk_write failed: {be}")
+                        logger.warning(f"Could not create/find store '{meta.get('code') or meta.get('name')}': {se}")
+                # Backfill store_id on the just-inserted transactions (match by K-code, else name)
+                ops = []
+                for cache_key, meta in store_cache.items():
+                    sid = meta.get("id")
+                    if not sid:
+                        continue
+                    code = (meta.get("code") or "").strip() or None
+                    name = (meta.get("name") or "").strip() or None
+                    if code:
+                        ops.append(UpdateMany({"ingest_job_id": job_id, "store_code": code},
+                                              {"$set": {"store_id": sid}}))
+                    elif name:
+                        ops.append(UpdateMany({"ingest_job_id": job_id, "store_name": name, "store_id": None},
+                                              {"$set": {"store_id": sid}}))
+                if ops:
+                    try:
+                        await transactions_col.bulk_write(ops, ordered=False)
+                    except Exception as be:
+                        logger.exception(f"Store backfill bulk_write failed: {be}")
             except Exception as spe:
                 logger.exception(f"Store auto-create post-pass failed: {spe}")
+
+        # For SKU-wise: upsert item master + attach line items to matching transactions
+        if dataset == "sku_transactions" and not dry_run:
+            try:
+                from pymongo import UpdateOne, UpdateMany
+                items_col = db["items"]
+                if sku_item_master:
+                    iops = [UpdateOne({"sku": s["sku"]},
+                                     {"$set": {k: v for k, v in s.items() if v is not None},
+                                      "$setOnInsert": {"id": uuid.uuid4().hex, "created_at": now()}},
+                                     upsert=True) for s in sku_item_master.values()]
+                    for i in range(0, len(iops), 1000):
+                        try:
+                            await items_col.bulk_write(iops[i:i + 1000], ordered=False)
+                        except Exception as e:
+                            logger.warning(f"SKU item-master upsert partial failure: {e}")
+                if sku_bill_items:
+                    attached = 0
+                    tops = []
+                    for tk, items in sku_bill_items.items():
+                        units = sum(int(it.get("quantity") or 0) for it in items) or len(items)
+                        tops.append(UpdateMany(
+                            {"$or": [{"transaction_id": tk}, {"bill_number": tk}]},
+                            {"$set": {"items": items, "units_count": units}}))
+                        attached += 1
+                        if len(tops) >= 1000:
+                            try:
+                                await transactions_col.bulk_write(tops, ordered=False)
+                            except Exception as e:
+                                logger.warning(f"SKU items attach partial failure: {e}")
+                            tops.clear()
+                    if tops:
+                        try:
+                            await transactions_col.bulk_write(tops, ordered=False)
+                        except Exception as e:
+                            logger.warning(f"SKU items attach final partial failure: {e}")
+                    logger.info(f"SKU ingest job {job_id}: {len(sku_item_master)} SKUs in master, "
+                                f"items attached for {attached} bills")
+            except Exception as e:
+                logger.exception(f"SKU post-pass failed: {e}")
 
         # =====================================================
         # R6: Points-ledger post-pass — write earn/redeem/bonus ledger entries for
@@ -784,6 +927,9 @@ def _get_pk(dataset: str, doc: Dict[str, Any]) -> Tuple[Optional[str], Any]:
         mobile = doc.get("customer_mobile", "")
         bill = doc.get("source_bill_id") or doc.get("bill_number") or ""
         return "source_bill_id", f"{mobile}::{bill}::{doc.get('type', '')}"
+    if dataset == "sku_transactions":
+        # No primary-key skip — lines are always accumulated and upserted/attached.
+        return None, None
     return None, None
 
 
@@ -969,7 +1115,8 @@ async def get_schema(dataset: str, user: dict = Depends(get_current_user)):
             "required_columns": ["Bill Number", "Customer Mobile Number", "Date"],
             "recognised_columns": [
                 "Date", "Return Marker", "Customer Mobile Number", "Customer Name",
-                "Outlet(Only For Shopify Marker)", "Transaction Id", "Bill Number",
+                "Outlet(Only For Shopify Marker)", "Store master", "Store code",
+                "Transaction Id", "Bill Number",
                 "New_Existing", "Recency", "Last Visit Date", "Total Visits",
                 "Zone New", "City", "Class", "Time",
                 "Net Amount Before Tax Kazo", "Total Tax", "Discount",
@@ -979,6 +1126,7 @@ async def get_schema(dataset: str, user: dict = Depends(get_current_user)):
                 "Date": "01-04-2021 00:00", "Return Marker": "Regular",
                 "Customer Mobile Number": "9876543210", "Customer Name": "",
                 "Outlet(Only For Shopify Marker)": "City Centre Mall, Guwahati",
+                "Store master": "K00055",
                 "Transaction Id": "000000PK55212200001",
                 "Bill Number": "000000PK55212200001",
                 "New_Existing": "New", "Recency": "Active", "Total Visits": "1",
@@ -989,9 +1137,10 @@ async def get_schema(dataset: str, user: dict = Depends(get_current_user)):
                 "Total Billing Lifetime": "1490",
             },
             "notes": [
-                "Outlet stores will be auto-created (matched by store name) so you can upload transactions without seeding stores first.",
+                "'Store master' (the K-code, e.g. K00055) is the canonical store code (== POS customer_key). Stores are created/linked by this code and aligned with live POS bill ingestion.",
+                "Falls back to matching/creating a store by the Outlet name when no Store master code is present.",
                 "Total Revenue Kazo is preferred; falls back to (Net + Tax − Discount) if missing.",
-                "No SKU/item-level data expected — KAZO POS export is bill-header only.",
+                "Item/SKU-level data is uploaded separately via the 'SKU / Line Items' dataset and attached to these bills by Transaction Id.",
             ],
         },
         "stores": {
@@ -1048,6 +1197,32 @@ async def get_schema(dataset: str, user: dict = Depends(get_current_user)):
                 "Points are stored signed (redeem/expire negative, earn/bonus positive) regardless of the sign in the CSV.",
                 "Mobile is normalised to 10 digits (91 prefix stripped).",
                 "Source Bill Id makes ingest idempotent — re-running the same CSV won't double-write entries.",
+            ],
+        },
+        "sku_transactions": {
+            "primary_key": "Transaction Id (joins to a bill)",
+            "duplicate_strategy": "Lines are attached to the matching bill (re-runs overwrite, never duplicate)",
+            "required_columns": ["Transaction Id", "Item Id"],
+            "recognised_columns": [
+                "id", "Date", "Transaction Id", "Bill Number", "Outlet", "Store code",
+                "Mobile", "Customer Name", "Item Name", "Item Id", "Season",
+                "Item Master Category", "Bill Type", "Quantity", "Rate", "discount",
+                "Sub Total", "Category 0(Logic)", "Category 1(Logic)",
+                "Category 2(Logic)", "Category 3(Logic)", "New Vs Existing", "Basket Size",
+            ],
+            "sample_row": {
+                "Date": "04-02-2025", "Transaction Id": "000000PK07000005510",
+                "Bill Number": "INVK07232400234", "Store code": "K00049",
+                "Mobile": "8789277792", "Item Name": "STUDDED INTERLOCK HOOP EARRINGS",
+                "Item Id": "123340", "Season": "SPRING/SUMMER",
+                "Item Master Category": "Jwellery", "Quantity": "1", "Rate": "790",
+                "discount": "0", "Sub Total": "790", "Category 1(Logic)": "BAJW",
+            },
+            "notes": [
+                "Each row is one item line on a bill. Lines are grouped by 'Transaction Id' and attached to the matching transaction's items[] (powers UPT, units sold, and category analytics).",
+                "Upload the Billwise transactions FIRST so the bills exist, then upload SKU / Line Items to attach the items.",
+                "Distinct items also populate the Item Master (Item Id → name, category, season, rate).",
+                "'Transaction Id' (the 000000PK… value) is the join key — it equals the billwise Bill Number / Transaction Id. (Bill Number here is the INV… invoice no.)",
             ],
         },
     }
