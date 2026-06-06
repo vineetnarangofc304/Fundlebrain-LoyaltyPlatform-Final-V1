@@ -31,6 +31,20 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 32 (Jun 2026) — 🏬 POS ingestion: (merchant_id + customer_key) decides the store
+
+User: *"Customer_key is the store code... pls align api ingestion accordingly... this will help identify the store. Customer key plus merchant ID combo should decide the store code. And if you get a bill which comes without an existing store code, then you can create that as a new store code and add that bill there. And also update the master. Whatever name and other things we can populate manually later on."*
+
+**Change** (`/app/backend/routes/pos_ewards_routes.py`):
+- `_validate_creds` — `customer_key` is no longer treated as a secret. It is the per-outlet **store code**; the 32-char `x-api-key` (+ `merchant_id`) remain the real auth. customer_key is no longer rejected on mismatch with the master credential.
+- `_get_or_create_store_from_payload` — rewritten. On every bill the (merchant_id + customer_key) combo identifies the store:
+  1. Match a store already provisioned for the exact (`pos_merchant_id`, `pos_customer_key`) combo.
+  2. Else link to an existing store whose `code` already equals customer_key (seeded / historic stores) and backfill `pos_merchant_id`/`pos_customer_key` onto it.
+  3. Else **auto-create a new store** (`code = customer_key`, `source = pos_auto_customer_key`) — name/city/state left blank for manual fill later — and attach the bill to it.
+  - Legacy fallback (outlet name / store_code / cred.store_id) only kicks in when the payload carries no customer_key.
+
+**Verified** (curl + pytest `tests/iteration17_store_resolution_test.py`, 3/3 pass): new customer_key auto-creates the store and links the txn; repeat customer_key reuses the same store (no dupes); a customer_key matching an existing store code links + backfills the combo; a non-master customer_key returns 200 (not 403). Lint clean. ⚠️ Present on production too — **redeploy** required.
+
 ### Iteration 31 (Jun 2026) — 🐛 Legacy Reports Hub broken links (bounced to public landing)
 
 User: *"Legacy reports.. if we click on anything, it brings us back to the main landing page public website.. What's happening"*

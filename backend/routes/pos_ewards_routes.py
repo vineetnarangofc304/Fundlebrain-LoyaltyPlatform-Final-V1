@@ -21,9 +21,11 @@ Endpoints (all POST):
   /api/pos/getWalletRedemptionStatus   — wallet redemption status
 
 Auth: ALL endpoints require:
-  - Header  `x-api-key` matching pos_credentials.api_key
+  - Header  `x-api-key` matching pos_credentials.api_key   (the real secret)
   - Body    `merchant_id` matching pos_credentials.merchant_id
-  - Body    `customer_key` matching pos_credentials.customer_key (per-outlet key)
+  - Body    `customer_key` — the per-outlet STORE CODE. The (merchant_id + customer_key)
+            combo identifies the store on every bill; an unseen combo auto-creates a new
+            store master row. customer_key is NOT a secret and is not rejected on mismatch.
 
 Logging: every request + response captured in `api_logs` for Live Monitor.
 """
@@ -150,11 +152,11 @@ async def _validate_creds(x_api_key: Optional[str], merchant_id: Optional[str],
             403,
             f"merchant_id mismatch — expected '{cred.get('merchant_id')}', received '{merchant_id}'",
         )
-    if customer_key and cred.get("customer_key") != customer_key:
-        raise HTTPException(
-            403,
-            f"customer_key mismatch — expected '{cred.get('customer_key')}', received '{customer_key}'",
-        )
+    # NOTE: customer_key is NOT validated as a secret. Per the KAZO POS contract it is
+    # the per-outlet STORE CODE — the (merchant_id + customer_key) combo identifies the
+    # store on every bill (see _get_or_create_store_from_payload). The real authentication
+    # secret is the 32-char x-api-key (+ merchant_id). customer_key therefore varies per
+    # outlet and must not be rejected when it differs from the master credential's value.
     return cred
 
 
@@ -183,15 +185,69 @@ def _parse_float(value: Any, default: float = 0.0) -> float:
 
 
 async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Resolve store from transaction.outlet / store_code / cred.store_id."""
+    """Resolve the store for a bill.
+
+    CANONICAL RULE (KAZO): the (merchant_id + customer_key) combo from the POS payload
+    identifies the store — `customer_key` IS the store code. Resolution order:
+      1. Match a store already provisioned for this exact (merchant_id, customer_key) combo.
+      2. Else link to an existing store whose `code` already equals customer_key
+         (seeded / historic stores) and backfill the combo onto it.
+      3. Else auto-create a brand-new store with code=customer_key and add the bill there.
+         Name / city / state are left blank to be filled in manually later from the UI.
+
+    Legacy fallback (only when the payload carries NO customer_key): resolve from
+    transaction.outlet / store_code / the credential's linked store_id.
+    """
     txn = payload.get("transaction") or {}
-    outlet_name = None
-    store_code = None
-    # eWards-style hints
-    if isinstance(txn.get("outlet"), str):
-        outlet_name = txn.get("outlet")
-    if isinstance(txn.get("store_code"), str):
-        store_code = txn.get("store_code")
+    merchant_id = (payload.get("merchant_id") or cred.get("merchant_id") or "").strip()
+    customer_key = str(payload.get("customer_key") or "").strip()
+
+    # ---- Primary path: (merchant_id + customer_key) combo decides the store ----
+    if customer_key:
+        combo_match = await stores_col.find_one(
+            {"pos_merchant_id": merchant_id, "pos_customer_key": customer_key}, {"_id": 0}
+        )
+        if combo_match:
+            return combo_match
+        # Link to an existing store whose code already equals the customer_key and
+        # backfill the POS combo so subsequent bills match path 1 directly.
+        code_match = await stores_col.find_one({"code": customer_key}, {"_id": 0})
+        if code_match:
+            await stores_col.update_one(
+                {"id": code_match["id"]},
+                {"$set": {"pos_merchant_id": merchant_id, "pos_customer_key": customer_key}},
+            )
+            code_match["pos_merchant_id"] = merchant_id
+            code_match["pos_customer_key"] = customer_key
+            return code_match
+        # Auto-create a new store master row for this combo (details filled in later).
+        outlet_name = txn.get("outlet") if isinstance(txn.get("outlet"), str) else None
+        sid = uuid.uuid4().hex
+        doc = {
+            "id": sid,
+            "code": customer_key,
+            "name": outlet_name or customer_key,
+            "city": "",
+            "state": "",
+            "region": "",
+            "address": outlet_name or "",
+            "is_active": True,
+            "source": "pos_auto_customer_key",
+            "pos_merchant_id": merchant_id,
+            "pos_customer_key": customer_key,
+            "created_at": _now_iso(),
+        }
+        await stores_col.insert_one(doc)
+        doc.pop("_id", None)
+        logger.info(
+            f"Auto-created store from POS combo merchant_id={merchant_id} "
+            f"customer_key={customer_key} (store_id={sid})"
+        )
+        return doc
+
+    # ---- Legacy fallback: outlet name / store_code / cred.store_id ----
+    outlet_name = txn.get("outlet") if isinstance(txn.get("outlet"), str) else None
+    store_code = txn.get("store_code") if isinstance(txn.get("store_code"), str) else None
     if isinstance(txn.get("channel"), list) and txn["channel"]:
         outlet_name = outlet_name or (txn["channel"][0] or {}).get("name")
     if not outlet_name and not store_code and cred.get("store_id"):
@@ -221,6 +277,7 @@ async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[
         "created_at": _now_iso(),
     }
     await stores_col.insert_one(doc)
+    doc.pop("_id", None)
     return doc
 
 
