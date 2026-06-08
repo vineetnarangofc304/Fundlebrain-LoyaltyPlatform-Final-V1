@@ -83,7 +83,11 @@ async def _ai_narrative(prompt: str) -> str:
     key = os.environ.get("EMERGENT_LLM_KEY")
     if not key:
         return ""
-    try:
+
+    def _blocking_call() -> str:
+        # Runs in a worker thread with its own event loop so the ~25s gpt-5 call
+        # NEVER freezes the main server event loop (critical during live POS + big ingests).
+        import asyncio as _asyncio
         from emergentintegrations.llm.chat import LlmChat, UserMessage  # type: ignore
         llm = LlmChat(api_key=key, session_id=f"ingest-narr-{datetime.now(timezone.utc).timestamp()}",
                        system_message=(
@@ -93,8 +97,12 @@ async def _ai_narrative(prompt: str) -> str:
                            "Lead with the bottom-line outcome. Include 3 specific numbers from "
                            "the data provided. End with 2 concrete recommended actions."
                        )).with_model("openai", "gpt-5")
-        resp = await llm.send_message(UserMessage(text=prompt))
+        resp = _asyncio.run(llm.send_message(UserMessage(text=prompt)))
         return (resp or "").strip()
+
+    try:
+        import asyncio
+        return await asyncio.to_thread(_blocking_call)
     except Exception as e:
         logger.warning(f"AI narrative failed, falling back to template: {e}")
         return ""

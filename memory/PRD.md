@@ -32,6 +32,28 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 44 (Jun 2026) — 🚀 Production data-load prep + 2 critical launch blockers fixed
+
+User is about to **purge production & bulk-load 3 eWards files** (CRM Report ~133MB / Billing Report ~267MB / SKU Wise Billing ~176MB), then start **live POS ingestion at 12 PM IST tomorrow**. Rules: opening balances valid till **31 Dec 2026**; live POS points valid **1 yr from bill date**; **all dates IST**.
+
+**🔴 CRITICAL FIX 1 — POS no longer blocks on SMS.** `posAddPoint`/`_create_otp` were `await`-ing `fire_event` (4 active "purchase" SMS templates → 4 sequential Karix HTTP calls, 12s timeout each) BEFORE responding → ~30s/bill. Would have crippled live POS. Now comms are fire-and-forget (`_fire_and_forget` → `asyncio.create_task`). posAddPoint: **30s → 0.02s**. `fire_event` made fully exception-safe.
+
+**🔴 CRITICAL FIX 2 — post-ingest AI narrative froze the whole server.** After every ingest, `build_and_store_narrative` ran a synchronous gpt-5 call (~26s) that **blocked the event loop** (verified: requests during the window timed out at 30s). With live POS + 3 huge ingests this would stall everything. Fixed: the LLM call now runs in a worker thread via `asyncio.to_thread`+`asyncio.run` (`ingest_narrative._ai_narrative`). Verified: requests stay at ~3ms during narrative.
+
+**Data-load infra (all tested):**
+- Upload cap **250→350 MB** (`historic_routes.MAX_FILE_BYTES`) + UI text → the 267MB file is accepted. Chunked at 1.5MB.
+- **IST everywhere**: `lib/format.js` fmtDate/fmtDateTime forced to `Asia/Kolkata`.
+- **Live POS points expire 1yr from bill date**: POS earn/bonus ledger now set `expires_at = order_time + point_expiry_days(365)` + `customer_mobile` (so they appear in reports). Verified bill 08-Jun-2026 → 08-Jun-2027.
+- **Opening-balance ledger**: CRM/customer ingest tags rows with `ingest_job_id`; new `_write_opening_balance_ledger_for_job` writes one `type:"opening"` ledger entry per customer (= Current Point Balance) `expires_at = 31 Dec 2026 23:59 IST` (`OPENING_BALANCE_EXPIRY_ISO`). Idempotent per mobile.
+- **Tier now rebuilt for ALL customers** from bill history: `_recompute_customer_aggregates` moved `lifetime_spend`+`tier` from `$setOnInsert` to `$set` (CRM file has no spend column → previously everyone stayed Silver).
+- **Expiry Points report bug fixed**: queried wrong field `kind` → now `type` (`["earn","bonus","opening"]`); large-redemption fraud query `kind`→`type` too.
+- **Billing Report parser aliases** for new eWards headers: net (`Net Amount Before Tax`), tax (`Tax Total`, never `Tax Rate`), revenue (`Total Revenue KAZO`), gross (`Total Billing KAZO`→`bill_amount`), `Zone Name`, `New Existing`, store K-code (`Store master`/`Store Master`/`Customer Key`), return detection from `Return Reason`. **Store = `Store master` K-code = POS `customer_key`** → historical stores tagged `pos_customer_key`+`pos_merchant_id` so they merge with live-POS stores.
+
+**Verified:** `tests/iteration24_historic_load_e2e_test.py` (full CRM→Billing→Expiry e2e) + iteration22/23 → **20/20 pass**. Loop-block + posAddPoint latency manually confirmed fixed.
+
+**⏳ STILL OPEN (need user):** exact **SKU Wise Billing** headers (OCR garbled) to finalize the SKU parser; confirm Billing Report contains the `Store master` K-code column (else store name→code mapping); confirm tier spend basis (Total Revenue vs Total Billing). ⚠️ All changes need a **production redeploy** before the load.
+
+
 ### Iteration 43 (Jun 2026) — ⏯️ Loyalty Earn/Burn ON-OFF + scheduled pause windows · 🔁 Live Monitor RETURN type + receive time
 
 User: "in Type We require return if bill type is return"; "Need Bill receive time"; "brands want to turn off/on points for date ranges — need a provision in loyalty rules to stop earning/burning and a start option."

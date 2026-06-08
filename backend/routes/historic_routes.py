@@ -177,10 +177,18 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
             bill_date = bill_date.replace(hour=int(hh) % 24, minute=int(mm) % 60)
         except (ValueError, IndexError):
             pass
-    net = parse_float(r.get("Net Amount Before Tax Kazo") or r.get("Net Amount"))
-    tax = parse_float(r.get("Total Tax"))
+    net = parse_float(r.get("Net Amount Before Tax Kazo") or r.get("Net Amount Before Tax")
+                      or r.get("Net Amount Before Tax KAZO") or r.get("Net Amount"))
+    # Tax AMOUNT only (never "Tax Rate", which is a percentage).
+    tax = parse_float(r.get("Total Tax") or r.get("Tax Total") or r.get("Total Tax Kazo")
+                      or r.get("Tax Amount") or r.get("Tax Amt"))
     discount = parse_float(r.get("Discount"))
-    total = parse_float(r.get("Total Revenue Kazo") or r.get("Total Revenue") or r.get("Total"))
+    total = parse_float(r.get("Total Revenue Kazo") or r.get("Total Revenue KAZO")
+                        or r.get("Total Revenue") or r.get("Total"))
+    # Gross billing (MRP before discount) — used as the loyalty/spend base for history.
+    bill_amount = parse_float(r.get("Total Billing KAZO") or r.get("Total Billing Kazo")
+                              or r.get("Total Billing") or r.get("Total Billing Lifetime")
+                              or r.get("Bill Amount") or r.get("Bill Amt"))
     if total == 0 and net:
         total = net + tax - discount
 
@@ -193,11 +201,15 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
     )
     bonus_points = parse_int(r.get("Bonus Points") or r.get("Bonus"))
 
-    outlet = (r.get("Outlet(Only For Shopify Marker)") or r.get("Outlet") or "").strip() or None
-    # "Store master" / "Store code" carries the canonical K-code (== POS customer_key).
-    store_code = (r.get("Store master") or r.get("Store code") or r.get("Store Code") or "").strip() or None
+    outlet = (r.get("Outlet(Only For Shopify Marker)") or r.get("Outlet")
+              or r.get("Store Name") or r.get("Outlet Name") or "").strip() or None
+    # "Store master" / "Store code" carries the canonical K-code (== POS customer_key),
+    # so historical bills align with live POS bills on the same store.
+    store_code = (r.get("Store master") or r.get("Store Master") or r.get("Store code")
+                  or r.get("Store Code") or r.get("Loc Code") or r.get("Customer Key")
+                  or r.get("customer_key") or "").strip() or None
     city = (r.get("City") or "").strip() or None
-    zone = (r.get("Zone New") or r.get("Zone") or "").strip() or None
+    zone = (r.get("Zone New") or r.get("Zone Name") or r.get("Zone") or "").strip() or None
     store_class = (r.get("Class") or "").strip() or None
     store_id = None
     # Identify the store by its K-code when present (so it aligns with live POS combo
@@ -209,7 +221,10 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
                                         "zone": zone, "class": store_class, "id": None}
         store_id = store_cache[cache_key].get("id")
     return_marker = (r.get("Return Marker") or "Regular").strip()
-    new_existing = (r.get("New_Existing") or "").strip()
+    return_reason = (r.get("Return Reason") or "").strip()
+    # A non-empty Return Reason (new Billing Report) marks a return even without a marker.
+    is_return = return_marker.lower() == "return" or bool(return_reason) or (total or 0) < 0
+    new_existing = (r.get("New_Existing") or r.get("New Existing") or r.get("New/Existing") or "").strip()
     recency = (r.get("Recency") or "").strip()
 
     return ({
@@ -228,9 +243,11 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
         "net_amount_before_tax": net,
         "tax_amount": tax,
         "discount_amount": discount,
-        "gross_amount": (net or 0) + (tax or 0),
-        "is_return": return_marker.lower() == "return",
-        "return_marker": return_marker,
+        "gross_amount": bill_amount or ((net or 0) + (tax or 0)),
+        "bill_amount": bill_amount or None,
+        "is_return": is_return,
+        "return_marker": "Return" if is_return else (return_marker or "Regular"),
+        "return_reason": return_reason or None,
         "new_or_existing": new_existing or None,
         "recency": recency or None,
         "items": [],  # KAZO export has no line-item breakdown
@@ -1111,6 +1128,10 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
             "last_visit_at": r["last_visit_at"],
             "home_store_id": r["first_store_id"],
             "visit_count": len(r["unique_bills"]),
+            # Spend + tier are rebuilt from the FULL bill history for EVERY customer
+            # (incl. those loaded from the CRM Report, which carries no spend column).
+            "lifetime_spend": round(r.get("total_spend") or 0, 2),
+            "tier": _derive_tier(r.get("total_spend") or 0),
         }
         update_set_on_insert = {
             "id": uuid.uuid4().hex,
@@ -1118,8 +1139,6 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
             "name": None,
             "city": None,
             "state": None,
-            "tier": _derive_tier(r.get("total_spend") or 0),
-            "lifetime_spend": round(r.get("total_spend") or 0, 2),
             "points_balance": 0,
             "lifetime_points_earned": 0,
             "lifetime_points_redeemed": 0,
