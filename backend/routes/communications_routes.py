@@ -26,7 +26,7 @@ from routes.ai_routes import EMERGENT_LLM_KEY, SYSTEM_PROMPT
 router = APIRouter(tags=["communications"])
 
 CHANNELS = {"sms", "whatsapp", "rcs"}
-EVENTS = {"none", "purchase", "coupon_issued", "points_earned", "tier_upgrade", "birthday",
+EVENTS = {"none", "otp", "purchase", "coupon_issued", "points_earned", "tier_upgrade", "birthday",
           "win_back", "abandoned_visit", "campaign_bulk"}
 
 
