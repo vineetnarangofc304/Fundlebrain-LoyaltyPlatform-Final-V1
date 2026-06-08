@@ -62,6 +62,10 @@ DEFAULT_CONFIG = {
     "allow_coupon_stacking": False,
     "min_bill_for_earn": 500.0,
     "block_earn_on_returns": True,
+    # Earn & Burn control — master switches + scheduled pause windows (blackout dates)
+    "earn_enabled": True,
+    "burn_enabled": True,
+    "earn_burn_pauses": [],
 }
 
 
@@ -238,6 +242,94 @@ async def delete_festival_booster(booster_id: str,
                                                    "updated_at": _now_iso()}})
     await log_audit(user, "delete_festival_booster", "loyalty", booster_id, {})
     return {"ok": True, "boosters": boosters}
+
+
+# ============================================================
+# Earn & Burn control — master switches + scheduled pause windows
+# ============================================================
+class EarnBurnControlPayload(BaseModel):
+    earn_enabled: Optional[bool] = None
+    burn_enabled: Optional[bool] = None
+
+
+@router.put("/earn-burn-control")
+async def set_earn_burn_control(payload: EarnBurnControlPayload,
+                                user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    """Immediate master ON/OFF for earning and/or burning of points."""
+    upd: Dict[str, Any] = {"updated_at": _now_iso()}
+    if payload.earn_enabled is not None:
+        upd["earn_enabled"] = payload.earn_enabled
+    if payload.burn_enabled is not None:
+        upd["burn_enabled"] = payload.burn_enabled
+    await loyalty_config_col.update_one({"id": "default"}, {"$set": upd}, upsert=True)
+    await log_audit(user, "set_earn_burn_control", "loyalty", "default", upd)
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0})
+    return {"ok": True, "earn_enabled": cfg.get("earn_enabled", True),
+            "burn_enabled": cfg.get("burn_enabled", True)}
+
+
+class PauseWindowPayload(BaseModel):
+    label: str = ""
+    start_date: str  # YYYY-MM-DD
+    end_date: str
+    pause_earn: bool = True
+    pause_burn: bool = False
+
+
+@router.post("/pauses")
+async def add_pause_window(payload: PauseWindowPayload,
+                           user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    if payload.start_date > payload.end_date:
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date")
+    if not (payload.pause_earn or payload.pause_burn):
+        raise HTTPException(status_code=400, detail="Select at least one of pause earn / pause burn")
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or dict(DEFAULT_CONFIG)
+    pauses = cfg.get("earn_burn_pauses") or []
+    item = payload.model_dump()
+    item["id"] = f"pause_{int(datetime.now(timezone.utc).timestamp())}"
+    item["active"] = True
+    pauses.append(item)
+    await loyalty_config_col.update_one({"id": "default"},
+                                         {"$set": {"earn_burn_pauses": pauses,
+                                                   "updated_at": _now_iso()}}, upsert=True)
+    await log_audit(user, "add_pause_window", "loyalty", item["id"], item)
+    return {"ok": True, "pauses": pauses}
+
+
+@router.patch("/pauses/{pause_id}/toggle")
+async def toggle_pause_window(pause_id: str,
+                              user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0})
+    if not cfg:
+        raise HTTPException(status_code=404, detail="No config")
+    pauses = cfg.get("earn_burn_pauses") or []
+    found = False
+    for p in pauses:
+        if p.get("id") == pause_id:
+            p["active"] = not p.get("active", True)
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Pause window not found")
+    await loyalty_config_col.update_one({"id": "default"},
+                                         {"$set": {"earn_burn_pauses": pauses,
+                                                   "updated_at": _now_iso()}})
+    await log_audit(user, "toggle_pause_window", "loyalty", pause_id, {})
+    return {"ok": True, "pauses": pauses}
+
+
+@router.delete("/pauses/{pause_id}")
+async def delete_pause_window(pause_id: str,
+                              user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0})
+    if not cfg:
+        raise HTTPException(status_code=404, detail="No config")
+    pauses = [p for p in (cfg.get("earn_burn_pauses") or []) if p.get("id") != pause_id]
+    await loyalty_config_col.update_one({"id": "default"},
+                                         {"$set": {"earn_burn_pauses": pauses,
+                                                   "updated_at": _now_iso()}})
+    await log_audit(user, "delete_pause_window", "loyalty", pause_id, {})
+    return {"ok": True, "pauses": pauses}
 
 
 @router.get("/tier-stats")

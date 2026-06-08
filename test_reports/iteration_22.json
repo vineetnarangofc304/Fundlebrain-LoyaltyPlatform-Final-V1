@@ -1,0 +1,37 @@
+{
+  "summary": "Frontend-only verification of (1) Earn & Burn Control on /admin/loyalty and (2) Live Bill Monitor RETURN pill + 'Recd' ingestion time. All 8 acceptance criteria from the review_request passed. Global loyalty config restored to ACTIVE/no pause windows after testing.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_results_detail": {
+    "login": "PASS — superadmin@fundle.io logs into CRM and lands on /admin (Command Center).",
+    "ebc_section_visible": "PASS — EARN & BURN CONTROL section rendered above COMPLIANCE. Both master switches present with state 'Currently ACTIVE' and 'Stop' button.",
+    "earn_master_toggle": "PASS — Click Stop → state 'Currently STOPPED', label 'Start', toast 'Earning stopped'. Click Start → 'Currently ACTIVE', label 'Stop', toast 'Earning resumed'.",
+    "add_pause_modal_open": "PASS — Add Pause Window button opens modal (data-testid=pause-modal) with label/start/end/earn/burn fields.",
+    "validation_empty_dates": "PASS — Submitting empty form shows toast 'Start and end dates are required'.",
+    "validation_no_checkbox": "PASS — Submitting with both checkboxes unchecked shows toast 'Select Earn and/or Burn to pause'.",
+    "add_pause_valid": "PASS — Valid submission (TEST_pause, 2026-12-01 → 2026-12-05, earn checked) adds row to pauses-table with columns Label/Start/End/Pauses(Earn)/Status(Active). Toast 'Pause window added'.",
+    "pause_toggle": "PASS — pause-toggle-<id> click flips status badge from 'Active' to 'Inactive'.",
+    "pause_delete": "PASS — pause-del-<id> click removes the row, toast 'Pause window removed', empty-state message restored.",
+    "live_monitor_filter": "PASS — lm-fil-start-date=2026-05-01, lm-fil-end-date=2026-06-30 loads 18 bills (Bills KPI=18, Returns KPI=6).",
+    "return_pill_type_column": "PASS — Exactly 6 RETURN pills found with data-testid starting lm-type-return- (RET-INVK31232400005-79942f, RET-RETSRC-ea4749e5-ed7f04, RET-RETSRC-97ec3e79-995fe1, RET-RETSRC-4a004f5b-3caec8, RET-RETSRC-96fa5cd1-c57f49, +1). Non-return bills continue to show REPEAT/NEW/WALK-IN text in TYPE column.",
+    "recd_subline": "PASS — 18 'Recd <date, time>' sublines rendered under Bill Date column (one per row).",
+    "bill_drawer_fields": "PASS — Clicking a RET- row opens Bill Detail drawer showing both 'BILL DATE' (e.g. '01 Jun 2026, 07:38 am') and 'RECEIVED' (e.g. '01 Jun 2026, 07:38 am') fields, plus 'RETURN: YES' indicator."
+  },
+  "critical_code_review_comments": [
+    "Minor: non-RETURN TYPE cells (NEW/REPEAT/WALK-IN) do not expose a data-testid like lm-type-new-/lm-type-repeat-/lm-type-walkin-, only RETURN does. Consider adding consistent testids for all type pills for future-proof automation. NOT blocking.",
+    "Console warning (pre-existing, unrelated to this iteration): React hydration warning '<span> cannot be a child of <option>' inside CommandCenter store/city dropdowns (data-testid=cc-store). Should be cleaned up by main agent."
+  ],
+  "test_report_links": [],
+  "action_items": [],
+  "updated_files": [],
+  "success_rate": { "backend": "skipped", "frontend": "100%" },
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (CRM portal)",
+  "seed_data_creation": "Temporary pause window 'TEST_pause' (2026-12-01 → 2026-12-05, earn-only) was created and then DELETED. Earn & Burn master switches were toggled Stop→Start and finally LEFT ACTIVE. Loyalty global config restored to pre-test state.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All EBC + Live Monitor UI flows pass end-to-end. The lm-type-return- testids are present only for return bills (intentional per spec). The pause window endpoints (POST/PATCH/DELETE /api/loyalty/pauses) all return 200 from the UI's perspective."
+}

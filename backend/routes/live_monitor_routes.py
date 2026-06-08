@@ -135,6 +135,7 @@ async def live_transactions(
             "id": r.get("id"),
             "bill_number": r.get("bill_number"),
             "bill_date": r.get("bill_date"),
+            "received_at": r.get("created_at"),
             "store_id": r.get("store_id"),
             "store_name": r.get("store_name"),
             "store_code": r.get("store_code"),

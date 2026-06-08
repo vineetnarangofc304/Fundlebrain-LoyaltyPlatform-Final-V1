@@ -342,6 +342,9 @@ export default function LoyaltyConfigurator() {
           </div>
         </SectionCard>
 
+        {/* Earn & Burn control */}
+        <EarnBurnControl cfg={cfg} reload={load} />
+
         {/* Compliance */}
         <SectionCard title="COMPLIANCE & RESTRICTIONS" subtitle="Operational guards" icon={ShieldCheck}>
           <div className="grid lg:grid-cols-2 md:grid-cols-2 gap-4">
@@ -551,6 +554,150 @@ function AddFestivalBooster({ onAdd }) {
         <div className="flex justify-end gap-2 mt-4">
           <button onClick={() => setOpen(false)} className="k-btn k-btn-outline">Cancel</button>
           <button onClick={submit} className="k-btn kazo-bg-burgundy text-white" data-testid="newfb-submit">Add Booster</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============= Earn & Burn control =============
+function EarnBurnControl({ cfg, reload }) {
+  const [busy, setBusy] = useState(false);
+  const pauses = cfg.earn_burn_pauses || [];
+
+  const setMaster = async (kind, val) => {
+    setBusy(true);
+    try {
+      await api.put("/loyalty/earn-burn-control", { [`${kind}_enabled`]: val });
+      toast.success(`${kind === "earn" ? "Earning" : "Redemption"} ${val ? "resumed" : "stopped"}`);
+      reload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    } finally { setBusy(false); }
+  };
+
+  const togglePause = async (id) => {
+    try { await api.patch(`/loyalty/pauses/${id}/toggle`); reload(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+  const delPause = async (id) => {
+    try { await api.delete(`/loyalty/pauses/${id}`); toast.success("Pause window removed"); reload(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+
+  return (
+    <SectionCard
+      title="EARN & BURN CONTROL"
+      subtitle="Turn points earning / redemption on or off — instantly, or for scheduled date ranges (blackout periods)"
+      icon={Power}
+      actions={<AddPauseWindow onAdd={reload} />}
+    >
+      <div className="grid md:grid-cols-2 gap-4 mb-5">
+        <MasterSwitch label="Earning of points" enabled={cfg.earn_enabled !== false} busy={busy}
+                      onToggle={(v) => setMaster("earn", v)} testid="ebc-earn-master" />
+        <MasterSwitch label="Redemption (burning) of points" enabled={cfg.burn_enabled !== false} busy={busy}
+                      onToggle={(v) => setMaster("burn", v)} testid="ebc-burn-master" />
+      </div>
+
+      <Label>Scheduled pause windows (blackout dates)</Label>
+      {pauses.length === 0 ? (
+        <div className="text-sm text-neutral-500 py-3">No scheduled pause windows. A bill dated inside an active window earns no points; redemptions are blocked during it.</div>
+      ) : (
+        <table className="w-full text-sm mt-2" data-testid="pauses-table">
+          <thead className="border-b border-black/10 text-left">
+            <tr>
+              {["Label", "Start", "End", "Pauses", "Status", ""].map((h) => (
+                <th key={h} className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {pauses.map((p) => (
+              <tr key={p.id} className={`border-b border-black/5 ${p.active === false ? "opacity-50" : ""}`} data-testid={`pause-row-${p.id}`}>
+                <td className="py-2 px-2 font-medium">{p.label || "—"}</td>
+                <td className="py-2 px-2 font-mono text-xs">{p.start_date}</td>
+                <td className="py-2 px-2 font-mono text-xs">{p.end_date}</td>
+                <td className="py-2 px-2 text-xs">
+                  {p.pause_earn && <span className="pill pill-warning mr-1">Earn</span>}
+                  {p.pause_burn && <span className="pill" style={{ background: "#E0E7FF", color: "#3730A3", border: "1px solid #C7D2FE" }}>Burn</span>}
+                </td>
+                <td className="py-2 px-2">
+                  <button onClick={() => togglePause(p.id)} className={`text-xs px-2 py-1 border ${p.active === false ? "border-neutral-300 text-neutral-500" : "border-emerald-300 text-emerald-700 bg-emerald-50"}`} data-testid={`pause-toggle-${p.id}`}>
+                    {p.active === false ? "Inactive" : "Active"}
+                  </button>
+                </td>
+                <td className="py-2 px-2">
+                  <button onClick={() => delPause(p.id)} className="text-rose-600 hover:bg-rose-50 p-1" data-testid={`pause-del-${p.id}`}>
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </SectionCard>
+  );
+}
+
+function MasterSwitch({ label, enabled, onToggle, busy, testid }) {
+  return (
+    <div className={`border p-4 flex items-center justify-between ${enabled ? "border-emerald-200 bg-emerald-50/40" : "border-rose-200 bg-rose-50/40"}`}>
+      <div>
+        <div className="font-medium text-sm">{label}</div>
+        <div className={`text-xs ${enabled ? "text-emerald-700" : "text-rose-700"}`} data-testid={`${testid}-state`}>
+          {enabled ? "Currently ACTIVE" : "Currently STOPPED"}
+        </div>
+      </div>
+      <button type="button" disabled={busy} onClick={() => onToggle(!enabled)}
+              className={`k-btn ${enabled ? "k-btn-outline" : "kazo-bg-burgundy text-white"}`} data-testid={testid}>
+        {enabled ? "Stop" : "Start"}
+      </button>
+    </div>
+  );
+}
+
+function AddPauseWindow({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ label: "", start_date: "", end_date: "", pause_earn: true, pause_burn: false });
+  if (!open) return <button onClick={() => setOpen(true)} className="k-btn k-btn-outline" data-testid="add-pause-btn"><Plus className="w-3.5 h-3.5" /> Add Pause Window</button>;
+  const submit = async () => {
+    if (!form.start_date || !form.end_date) return toast.error("Start and end dates are required");
+    if (form.start_date > form.end_date) return toast.error("Start date must be on or before end date");
+    if (!form.pause_earn && !form.pause_burn) return toast.error("Select Earn and/or Burn to pause");
+    try {
+      await api.post("/loyalty/pauses", form);
+      toast.success("Pause window added");
+      setOpen(false);
+      onAdd?.();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    }
+  };
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white shadow-2xl max-w-lg w-full p-6 border border-black/10" data-testid="pause-modal">
+        <h3 className="font-display text-xl mb-3">Add pause window</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <Mini label="Label (e.g. System upgrade, Sale blackout)" v={form.label} onChange={(v) => setForm({ ...form, label: v })} testid="newpause-label" />
+          </div>
+          <Mini label="Start date" v={form.start_date} type="date" onChange={(v) => setForm({ ...form, start_date: v })} testid="newpause-start" />
+          <Mini label="End date" v={form.end_date} type="date" onChange={(v) => setForm({ ...form, end_date: v })} testid="newpause-end" />
+        </div>
+        <div className="flex items-center gap-6 mt-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={form.pause_earn} onChange={(e) => setForm({ ...form, pause_earn: e.target.checked })} data-testid="newpause-earn" />
+            Stop earning
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={form.pause_burn} onChange={(e) => setForm({ ...form, pause_burn: e.target.checked })} data-testid="newpause-burn" />
+            Stop burning (redemption)
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={() => setOpen(false)} className="k-btn k-btn-outline">Cancel</button>
+          <button onClick={submit} className="k-btn kazo-bg-burgundy text-white" data-testid="newpause-submit">Add Window</button>
         </div>
       </div>
     </div>

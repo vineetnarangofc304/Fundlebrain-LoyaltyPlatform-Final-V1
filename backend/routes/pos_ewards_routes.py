@@ -221,6 +221,30 @@ def _compute_earn_points(base: float, cfg: Dict[str, Any], multiplier: float = 1
     return int(round(base * rate * (multiplier or 1.0)))
 
 
+def _loyalty_paused(cfg: Dict[str, Any], kind: str, when_iso: Optional[str] = None) -> tuple:
+    """Is earning / burning currently suspended?
+
+    `kind` is 'earn' or 'burn'. Returns (paused: bool, reason: str).
+    Suspended when EITHER the master switch (earn_enabled / burn_enabled) is off,
+    OR the relevant date (bill date for earn, today for burn) falls inside an active
+    pause window (earn_burn_pauses) flagged to pause this kind.
+    """
+    if cfg.get(f"{kind}_enabled", True) is False:
+        return True, f"{kind.capitalize()} is currently turned OFF in Loyalty Rules"
+    day = (when_iso or _now_iso())[:10]
+    for w in (cfg.get("earn_burn_pauses") or []):
+        if not w.get("active", True):
+            continue
+        if not w.get(f"pause_{kind}", False):
+            continue
+        start = (w.get("start_date") or "")[:10]
+        end = (w.get("end_date") or "")[:10]
+        if start and end and start <= day <= end:
+            label = w.get("label") or "scheduled pause"
+            return True, f"{kind.capitalize()} paused — {label} ({start} to {end})"
+    return False, ""
+
+
 async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Resolve the store for a bill.
 
@@ -750,6 +774,14 @@ async def pos_redeem_point_request(payload: Dict[str, Any], request: Request,
         return resp
 
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
+    burn_paused, burn_reason = _loyalty_paused(cfg, "burn")
+    if burn_paused:
+        resp = _err(400, f"Point redemption is currently unavailable. {burn_reason}.")
+        await _log_api(endpoint=endpoint, method="POST", status=400,
+                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                       bill_number=bill_number, error="burn paused",
+                       payload=payload, response=resp, api_key_label=cred.get("label"))
+        return resp
     burn_ratio = cfg.get("burn_ratio", 0.25)
     require_otp = bool(cfg.get("require_otp_for_redeem", True))
     points_value = round(points_requested * burn_ratio, 2)
@@ -1079,7 +1111,8 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             break
 
     points_earned = 0
-    if loyalty_flag and loyalty_base >= min_bill_for_earn:
+    earn_paused, earn_pause_reason = _loyalty_paused(cfg, "earn", order_time)
+    if loyalty_flag and not earn_paused and loyalty_base >= min_bill_for_earn:
         points_earned = _compute_earn_points(loyalty_base, cfg, multiplier)
 
     redemption = txn.get("redemption") or {}
@@ -1139,6 +1172,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         "redemption_value": _parse_float(redemption.get("redeemed_amount")),
         "coupon_code": coupon_code,
         "loyalty_flag": loyalty_flag,
+        "earn_pause_reason": earn_pause_reason or None,
         "is_return": False,
         "source": "pos_ewards",
         "created_at": _now_iso(),

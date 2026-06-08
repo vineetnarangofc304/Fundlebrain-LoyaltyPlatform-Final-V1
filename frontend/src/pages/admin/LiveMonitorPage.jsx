@@ -247,7 +247,14 @@ export default function LiveMonitorPage() {
                         ? <span className="inline-flex items-center" title="Mobile attached"><CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /></span>
                         : <span className="inline-flex items-center" title="LOST OPPORTUNITY — no customer mobile"><AlertTriangle className="w-3.5 h-3.5 text-rose-600" /></span>}
                     </td>
-                    <td className="text-[11px] whitespace-nowrap">{fmtDateTime(r.bill_date)}</td>
+                    <td className="text-[11px] whitespace-nowrap">
+                      <div>{fmtDateTime(r.bill_date)}</div>
+                      {r.received_at && (
+                        <div className="text-[10px] text-neutral-400" title="When Fundle received this bill">
+                          Recd {fmtDateTime(r.received_at)}
+                        </div>
+                      )}
+                    </td>
                     <td className="text-[12px]">
                       <div className="font-medium truncate max-w-[200px]" title={r.store_name}>{r.store_name || "—"}</div>
                       {r.city && <div className="text-[10px] text-neutral-500">{r.city}{r.zone ? ` · ${r.zone}` : ""}</div>}
@@ -265,11 +272,13 @@ export default function LiveMonitorPage() {
                       {r.tier && <div className="text-[10px] text-neutral-500 uppercase tracking-widest">{r.tier}</div>}
                     </td>
                     <td className="text-[10px] uppercase tracking-widest">
-                      {!r.has_mobile
-                        ? <span className="pill pill-danger">Walk-in</span>
-                        : r.customer_status === "new"
-                          ? <span className="pill" style={{ background: "#FDE68A", color: "#92400E", border: "1px solid #FBBF24" }}>New</span>
-                          : <span className="pill pill-success">Repeat</span>}
+                      {r.is_return
+                        ? <span className="pill pill-warning" data-testid={`lm-type-return-${r.bill_number}`}>Return</span>
+                        : !r.has_mobile
+                          ? <span className="pill pill-danger">Walk-in</span>
+                          : r.customer_status === "new"
+                            ? <span className="pill" style={{ background: "#FDE68A", color: "#92400E", border: "1px solid #FBBF24" }}>New</span>
+                            : <span className="pill pill-success">Repeat</span>}
                     </td>
                     <td className="font-mono text-[12px]">
                       {r.customer_mobile ? (
@@ -377,7 +386,8 @@ function BillDrillModal({ row, onClose }) {
           <button onClick={onClose} className="k-btn k-btn-ghost k-btn-sm" data-testid="bill-drill-close"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-5 grid grid-cols-2 gap-3 text-sm">
-          <Field label="Date" value={fmtDateTime(row.bill_date)} />
+          <Field label="Bill Date" value={fmtDateTime(row.bill_date)} />
+          <Field label="Received" value={row.received_at ? fmtDateTime(row.received_at) : "—"} />
           <Field label="Store" value={row.store_name} />
           <Field label="Customer" value={row.customer_name || (row.has_mobile ? "Name unknown" : "LOST OPP.")} />
           <Field label="Mobile" value={row.customer_mobile || "—"} valueClass={row.has_mobile ? "text-emerald-700" : "text-rose-700 font-medium"} />
