@@ -3,9 +3,25 @@ import api from "@/lib/api";
 import { PageHeader, KPICard, StatusPill, SectionHeading, CHART_SERIES } from "../_shared";
 import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Cell } from "recharts";
+import DrillDownModal from "../DrillDownModal";
 
 export default function CampaignDashboard() {
   const [data, setData] = useState(null);
+  const [drill, setDrill] = useState(null);
+  const openCampaigns = () => setDrill({
+    title: "All Campaigns",
+    subtitle: "Campaign records",
+    collection: "campaigns",
+    sort: [["created_at", -1]],
+    columns: [
+      { key: "name", label: "Name" },
+      { key: "status", label: "Status" },
+      { key: "channels", label: "Channels", render: (v) => (Array.isArray(v) ? v.join(", ") : "—") },
+      { key: "sent", label: "Sent", align: "right" },
+      { key: "redeemed", label: "Redeemed", align: "right" },
+      { key: "revenue_generated", label: "Revenue ₹", align: "right", render: (v) => fmtINR(v) },
+    ],
+  });
   useEffect(() => { api.get("/analytics/campaign-dashboard").then((r) => setData(r.data)); }, []);
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
 
@@ -19,7 +35,7 @@ export default function CampaignDashboard() {
       <PageHeader title="Campaign Performance" subtitle="CHANNEL & ROI ANALYTICS · LIVE" />
       <div className="p-8 space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard label="Total Campaigns" value={fmtNum(data.all.length)} accent="indigo" testid="kpi-camp-total" />
+          <KPICard label="Total Campaigns" value={fmtNum(data.all.length)} accent="indigo" testid="kpi-camp-total" onClick={openCampaigns} />
           <KPICard label="Total Sent" value={fmtNum(totalSent)} accent="teal" testid="kpi-camp-sent" />
           <KPICard label="Redeemed" value={fmtNum(totalRedeemed)} accent="emerald" testid="kpi-camp-redeemed" />
           <KPICard label="Revenue Generated" value={fmtINR(totalRev)} hint={`ROI ~${overallROI}x`} accent="burgundy" testid="kpi-camp-rev" />
@@ -83,6 +99,8 @@ export default function CampaignDashboard() {
           </table>
         </div>
       </div>
+      <DrillDownModal open={!!drill} onClose={() => setDrill(null)} {...(drill || {})} />
+
     </div>
   );
 }

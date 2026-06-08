@@ -125,12 +125,42 @@ export default function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [collapsed, setCollapsed] = useState({});
+
+  // Which section owns the current route? (longest matching item `to` wins)
+  const sectionForPath = (pathname) => {
+    let best = null, bestLen = -1;
+    for (const s of SECTIONS) {
+      for (const it of (s.items || [])) {
+        const exact = pathname === it.to;
+        const prefix = !it.end && pathname.startsWith(it.to + "/");
+        if ((exact || prefix) && it.to.length > bestLen) {
+          bestLen = it.to.length;
+          best = s.label;
+        }
+      }
+    }
+    return best;
+  };
+
+  // Accordion: collapse every section by default, expand only the active one.
+  const [collapsed, setCollapsed] = useState(() => {
+    const active = sectionForPath(location.pathname);
+    const init = {};
+    for (const s of SECTIONS) init[s.label] = s.label !== active;
+    return init;
+  });
   // Mobile sidebar drawer state — closed by default on small screens
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Close drawer whenever route changes (so a nav-click on mobile dismisses it)
   useEffect(() => { setDrawerOpen(false); }, [location.pathname]);
+
+  // Auto-expand the section that owns the active route on navigation
+  useEffect(() => {
+    const active = sectionForPath(location.pathname);
+    if (active) setCollapsed((c) => (c[active] ? { ...c, [active]: false } : c));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
 
   const toggleSection = (label) => setCollapsed((c) => ({ ...c, [label]: !c[label] }));
 
@@ -168,8 +198,9 @@ export default function AdminLayout() {
         <div className="p-5 border-b border-white/10 flex items-start justify-between">
           <div>
             <div className="font-display text-2xl tracking-tight text-white">{BRAND.name}</div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-white/40 mt-1 flex items-center gap-1">
-              <Sparkles className="w-3 h-3" /> {BRAND.poweredBy}
+            <div className="mt-2 flex items-center gap-1.5">
+              <span className="text-[9px] uppercase tracking-[0.18em] text-white/35">Powered by</span>
+              <img src={BRAND.platformLogoUrl} alt={BRAND.platform} className="h-3.5 w-auto opacity-90" />
             </div>
           </div>
           {/* Close button — mobile only */}

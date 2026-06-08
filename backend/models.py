@@ -184,6 +184,7 @@ class TierRule(BaseModel):
     welcome_bonus: int = 0
     birthday_bonus: int = 0
     anniversary_bonus: int = 0
+    upgrade_bonus: int = 0  # One-time bonus points awarded when a customer is promoted INTO this tier (slab)
     tier_type: str = "standard"  # entry | standard | premium | vip | partner
     is_active: bool = True
     # Per-tier perks

@@ -34,6 +34,8 @@ export const BRAND = {
   platform: "Fundle",
   poweredBy: "Powered by Fundle",
   aiAssistant: "Fundle Brain",
+  // Real Fundle wordmark (white/light — shows on dark surfaces). Lives in /public.
+  platformLogoUrl: "/fundle-logo.png",
 
   // -- Loyalty programme branding -------------------------------------
   loyaltyProgramName: "KAZO Rewards",

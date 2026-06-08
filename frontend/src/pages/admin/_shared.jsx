@@ -1,5 +1,19 @@
 import { Link } from "react-router-dom";
 
+/* Build a Mongo date filter fragment for drilldowns from a DateRangePicker range
+   (or a numeric period_days). Returns {} for "all time". */
+export function mongoDateFilter(field, range = {}) {
+  const { period_days, start_date, end_date } = range;
+  if (start_date && end_date) {
+    return { [field]: { $gte: start_date, $lte: end_date + "T23:59:59.999Z" } };
+  }
+  if (period_days && period_days > 0) {
+    const cutoff = new Date(Date.now() - period_days * 86400000).toISOString();
+    return { [field]: { $gte: cutoff } };
+  }
+  return {};
+}
+
 export function PageHeader({ title, subtitle, actions }) {
   return (
     <div className="border-b border-black/10 px-8 py-6 flex items-center justify-between bg-white">
@@ -16,7 +30,7 @@ export function KPICard({ label, value, delta, hint, info, onClick, mono = true,
   const deltaColor = delta == null ? "" : delta >= 0 ? "text-emerald-700" : "text-rose-700";
   return (
     <div
-      className="kpi-card"
+      className={`kpi-card ${onClick ? "cursor-pointer hover:shadow-md transition-shadow" : ""}`}
       data-accent={accent}
       onClick={onClick}
       data-testid={testid}

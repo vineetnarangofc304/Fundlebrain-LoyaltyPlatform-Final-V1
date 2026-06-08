@@ -1,11 +1,22 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "../_shared";
 import { fmtINR, fmtNum, tierClass } from "@/lib/format";
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
 import { RefreshCw } from "lucide-react";
 import DateRangePicker from "../_date_range_picker";
+import DrillDownModal from "../DrillDownModal";
+
+const CUST_COLUMNS = [
+  { key: "name", label: "Name" },
+  { key: "mobile", label: "Mobile", mono: true },
+  { key: "city", label: "City" },
+  { key: "tier", label: "Tier" },
+  { key: "lifetime_spend", label: "Lifetime ₹", align: "right", render: (v) => fmtINR(v) },
+  { key: "visit_count", label: "Visits", align: "right" },
+  { key: "points_balance", label: "Points", align: "right" },
+];
 
 const RISK_COLOR = { low: "#047857", medium: "#B45309", high: "#9F1239" };
 const HEALTH_COLOR = {
@@ -17,9 +28,16 @@ const HEALTH_COLOR = {
 };
 
 export default function CustomerDashboard() {
+  const navigate = useNavigate();
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [drill, setDrill] = useState(null);
+  const openCustomers = (title, filter) => setDrill({
+    title, subtitle: "Customers", collection: "customers", filter,
+    sort: [["lifetime_spend", -1]], columns: CUST_COLUMNS,
+    onRowClick: (r) => { setDrill(null); navigate(`/admin/customers/${r.id}`); },
+  });
   const load = async () => {
     setLoading(true);
     try {
@@ -54,11 +72,12 @@ export default function CustomerDashboard() {
       />
       <div className="p-8 space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard label="Total Customers" value={fmtNum(totalCust)} accent="indigo" testid="kpi-total-cust" />
-          <KPICard label="High-Risk Churn" value={fmtNum(data.churn_distribution.find(c => c.risk === "high")?.count || 0)} accent="rose" testid="kpi-high-risk" />
+          <KPICard label="Total Customers" value={fmtNum(totalCust)} accent="indigo" testid="kpi-total-cust" onClick={() => openCustomers("All Customers", {})} />
+          <KPICard label="High-Risk Churn" value={fmtNum(data.churn_distribution.find(c => c.risk === "high")?.count || 0)} accent="rose" testid="kpi-high-risk" onClick={() => openCustomers("High-Risk Churn", { churn_risk: "high" })} />
           <KPICard label="One-Time Buyers" value={fmtNum(life.one_timer.count)} hint={`${lifePct(life.one_timer.count).toFixed(1)}% of base · ${fmtINR(life.one_timer.lifetime_spend)} spend`} accent="amber" testid="kpi-one-time"
+            onClick={() => openCustomers("One-Time Buyers", { visit_count: 1 })}
             info="ONE-TIME BUYERS — loyalty customers who have placed exactly 1 bill in their lifetime. The unconverted majority — best targets for the second-purchase nudge." />
-          <KPICard label="Top City" value={data.city_distribution[0]?.city || "—"} hint={fmtINR(data.city_distribution[0]?.spend)} accent="teal" testid="kpi-top-city" />
+          <KPICard label="Top City" value={data.city_distribution[0]?.city || "—"} hint={fmtINR(data.city_distribution[0]?.spend)} accent="teal" testid="kpi-top-city" onClick={() => data.city_distribution[0]?.city && openCustomers(`Customers · ${data.city_distribution[0].city}`, { city: data.city_distribution[0].city })} />
         </div>
 
         {/* Lifecycle split — One-timer vs Repeat (docx #11) */}
@@ -194,6 +213,8 @@ export default function CustomerDashboard() {
           </table>
         </div>
       </div>
+      <DrillDownModal open={!!drill} onClose={() => setDrill(null)} {...(drill || {})} />
+
     </div>
   );
 }

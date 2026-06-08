@@ -42,7 +42,10 @@ export default function LoginShell({ title, subtitle, portal, allowedRoles, redi
             <h2 className="editorial-headline text-5xl xl:text-6xl mb-4">Command<br /><em className="font-light kazo-text-champagne">your kingdom.</em></h2>
             <p className="text-white/60 max-w-md leading-relaxed">{BRAND.loginCopy.descriptor}</p>
           </div>
-          <div className="text-[11px] uppercase tracking-[0.2em] text-white/40 mt-12">{BRAND.poweredBy.toUpperCase()}</div>
+          <div className="mt-12 flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-[0.2em] text-white/40">Powered by</span>
+            <img src={BRAND.platformLogoUrl} alt={BRAND.platform} className="h-4 w-auto opacity-90" />
+          </div>
         </div>
       </div>
       <div className="flex items-center justify-center p-8 bg-[#F9F8F6]">

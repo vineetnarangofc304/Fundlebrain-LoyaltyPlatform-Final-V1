@@ -70,6 +70,15 @@ TEST_MODE_RETURN_OTP = os.environ.get("POS_RETURN_OTP_IN_RESPONSE", "true").lowe
 ALLOW_TEST_OTP = os.environ.get("ALLOW_TEST_OTP", "true").lower() == "true"
 TEST_OTP = os.environ.get("TEST_OTP", "123456")
 
+# ---- Strict store validation ----------------------------------------
+# When true (default), a bill whose (merchant_id + customer_key) store code is
+# NOT already provisioned in the store master is REJECTED with a 400 instead of
+# silently auto-creating a new store. This enforces canonical store integrity:
+# only configured outlets can post bills. Every rejection is logged in the API
+# Monitor so admins can see which unknown store codes are being attempted.
+# Set STRICT_STORE_VALIDATION=false to restore the legacy auto-create behaviour.
+STRICT_STORE_VALIDATION = os.environ.get("STRICT_STORE_VALIDATION", "true").lower() == "true"
+
 DEFAULT_MERCHANT_ID = "KAZO_FUNDLE"
 DEFAULT_CUSTOMER_KEY = "KAZO_MASTER_OUTLET"
 
@@ -192,8 +201,9 @@ async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[
       1. Match a store already provisioned for this exact (merchant_id, customer_key) combo.
       2. Else link to an existing store whose `code` already equals customer_key
          (seeded / historic stores) and backfill the combo onto it.
-      3. Else auto-create a brand-new store with code=customer_key and add the bill there.
-         Name / city / state are left blank to be filled in manually later from the UI.
+      3. Else (STRICT_STORE_VALIDATION=true, default) REJECT the bill with a 400 —
+         the outlet is not provisioned. When STRICT_STORE_VALIDATION=false, auto-create
+         a brand-new store with code=customer_key (legacy behaviour).
 
     Legacy fallback (only when the payload carries NO customer_key): resolve from
     transaction.outlet / store_code / the credential's linked store_id.
@@ -220,7 +230,17 @@ async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[
             code_match["pos_merchant_id"] = merchant_id
             code_match["pos_customer_key"] = customer_key
             return code_match
-        # Auto-create a new store master row for this combo (details filled in later).
+        # No store provisioned for this (merchant_id + customer_key) combo.
+        if STRICT_STORE_VALIDATION:
+            raise HTTPException(
+                400,
+                f"Unknown store code '{customer_key}'"
+                + (f" for merchant_id '{merchant_id}'" if merchant_id else "")
+                + " — this outlet is not provisioned in the KAZO store master. "
+                "Add the store (Operations › Stores) before sending bills.",
+            )
+        # Non-strict (legacy) fallback: auto-create a new store master row for this
+        # combo (details filled in manually later).
         outlet_name = txn.get("outlet") if isinstance(txn.get("outlet"), str) else None
         sid = uuid.uuid4().hex
         doc = {
@@ -251,18 +271,40 @@ async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[
     if isinstance(txn.get("channel"), list) and txn["channel"]:
         outlet_name = outlet_name or (txn["channel"][0] or {}).get("name")
     if not outlet_name and not store_code and cred.get("store_id"):
-        return await stores_col.find_one({"id": cred["store_id"]}, {"_id": 0})
+        linked = await stores_col.find_one({"id": cred["store_id"]}, {"_id": 0})
+        if linked:
+            return linked
+        if STRICT_STORE_VALIDATION:
+            raise HTTPException(
+                400,
+                "Store could not be identified — no customer_key (store code) was sent "
+                "and the credential is not linked to a provisioned store.",
+            )
+        return None
     fil = {}
     if store_code:
         fil["code"] = store_code
     elif outlet_name:
         fil["name"] = outlet_name
     if not fil:
+        if STRICT_STORE_VALIDATION:
+            raise HTTPException(
+                400,
+                "Store could not be identified — the bill carried no customer_key "
+                "(store code), outlet name or store_code.",
+            )
         return None
     existing = await stores_col.find_one(fil, {"_id": 0})
     if existing:
         return existing
-    # Auto-create
+    if STRICT_STORE_VALIDATION:
+        ident = store_code or outlet_name or ""
+        raise HTTPException(
+            400,
+            f"Unknown store '{ident}' — not found in the KAZO store master. "
+            "Provision the store (Operations › Stores) before sending bills.",
+        )
+    # Non-strict (legacy) fallback: auto-create.
     sid = uuid.uuid4().hex
     doc = {
         "id": sid,
@@ -931,8 +973,16 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
-    # Resolve / auto-create store
-    store = await _get_or_create_store_from_payload(payload, cred)
+    # Resolve store — STRICT: reject bills for unprovisioned store codes
+    try:
+        store = await _get_or_create_store_from_payload(payload, cred)
+    except HTTPException as e:
+        resp = _err(e.status_code, e.detail)
+        await _log_api(endpoint=endpoint, method="POST", status=e.status_code,
+                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                       bill_number=bill_number, error=e.detail,
+                       payload=payload, response=resp, api_key_label=cred.get("label"))
+        return resp
     store_id = store["id"] if store else None
     store_name = store.get("name") if store else None
 
@@ -1051,10 +1101,22 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     await transactions_col.insert_one(txn_doc)
 
     # Customer aggregates
-    new_balance = int(cust.get("points_balance") or 0) + points_earned - points_redeemed
     new_lifetime_spend = float(cust.get("lifetime_spend") or 0) + final_amount
     new_visit_count = int(cust.get("visit_count") or 0) + 1
+    old_tier = (cust.get("tier") or "silver")
     new_tier = _derive_tier(new_lifetime_spend)
+
+    # Slab-wise tier-upgrade bonus — awarded ONCE when a customer crosses UP into a
+    # higher tier (slab). Each tier defines its own `upgrade_bonus` in the loyalty config.
+    upgrade_bonus_points = 0
+    if new_tier != old_tier:
+        ranked = sorted((cfg.get("tier_rules") or []), key=lambda x: x.get("min_lifetime_spend", 0))
+        rank = {t.get("tier"): i for i, t in enumerate(ranked)}
+        if rank.get(new_tier, 0) > rank.get(old_tier, 0):
+            nt = next((t for t in ranked if t.get("tier") == new_tier), None)
+            upgrade_bonus_points = int((nt or {}).get("upgrade_bonus", 0) or 0)
+
+    new_balance = int(cust.get("points_balance") or 0) + points_earned + upgrade_bonus_points - points_redeemed
     await customers_col.update_one(
         {"id": cust["id"]},
         {"$set": {
@@ -1065,7 +1127,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "tier": new_tier,
         },
          "$inc": {
-            "lifetime_points_earned": points_earned,
+            "lifetime_points_earned": points_earned + upgrade_bonus_points,
             "lifetime_points_redeemed": points_redeemed,
         }},
     )
@@ -1080,6 +1142,17 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "reference_type": "transaction",
             "reference_id": txn_id,
             "note": f"Bill {bill_number}",
+            "created_at": _now_iso(),
+        })
+    if upgrade_bonus_points > 0:
+        await points_ledger_col.insert_one({
+            "id": uuid.uuid4().hex,
+            "customer_id": cust["id"],
+            "type": "bonus",
+            "points": upgrade_bonus_points,
+            "reference_type": "tier_upgrade",
+            "reference_id": txn_id,
+            "note": f"Tier upgrade bonus: {old_tier} → {new_tier}",
             "created_at": _now_iso(),
         })
     if points_redeemed > 0:

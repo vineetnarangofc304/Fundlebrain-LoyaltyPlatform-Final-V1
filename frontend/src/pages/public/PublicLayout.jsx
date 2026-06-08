@@ -19,7 +19,6 @@ export default function PublicLayout() {
   useEffect(() => { api.get("/cms/content").then((r) => setCms(r.data)).catch(() => {}); }, []);
   const topbar = cms?.home?.topbar_text || "EXCLUSIVE LOYALTY PROGRAM · EARN ON EVERY PURCHASE · BIRTHDAY PRIVILEGES INSIDE";
   const tagline = cms?.footer?.tagline || BRAND.footerTagline;
-  const poweredBy = cms?.footer?.powered_by || BRAND.poweredBy;
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "var(--kazo-cream)" }}>
@@ -101,7 +100,10 @@ export default function PublicLayout() {
         </div>
         <div className="border-t border-white/10 py-5 px-6 lg:px-12 max-w-[1400px] mx-auto flex flex-col md:flex-row items-center justify-between text-xs text-white/40 gap-2">
           <div>© {new Date().getFullYear()} {BRAND.legalName}. All rights reserved.</div>
-          <div className="tracking-[0.15em] uppercase">{poweredBy}</div>
+          <div className="flex items-center gap-2">
+            <span className="tracking-[0.15em] uppercase">Powered by</span>
+            <img src={BRAND.platformLogoUrl} alt={BRAND.platform} className="h-3.5 w-auto opacity-80" />
+          </div>
         </div>
       </footer>
     </div>

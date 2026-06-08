@@ -1,17 +1,20 @@
-"""Iteration 17 — POS store resolution by (merchant_id + customer_key) combo.
+"""Iteration 17 (updated for strict store validation) — POS store resolution.
 
-Canonical rule: customer_key IS the store code. The (merchant_id + customer_key)
-combo identifies the store on every bill. An unseen combo auto-creates a new store
-master row. customer_key is NOT a secret and must not be rejected on mismatch.
+Canonical rule (REVERSED from earlier auto-create behaviour):
+customer_key IS the store code. The (merchant_id + customer_key) combo identifies
+the store on every bill. STRICT_STORE_VALIDATION=true (default) means an UNKNOWN
+(unprovisioned) store code is REJECTED with a 400 instead of auto-creating a store.
 
 Coverage:
-- A bill with a brand-new customer_key auto-creates a store (code == customer_key).
-- A second bill with the same customer_key reuses the same store (no duplicates).
-- A different customer_key (not the master credential value) is NOT rejected (200, not 403).
-- The created transaction is linked to the resolved store_id.
+- A bill with a customer_key that matches a provisioned store SUCCEEDS (200) and
+  the created transaction is linked to that store's id.
+- A second bill with the same (known) customer_key reuses the same store.
+- A bill with an UNKNOWN customer_key is REJECTED (400 "Unknown store code") and
+  no store is auto-created for it.
 """
 import os
 import time
+import uuid
 import asyncio
 import pytest
 import requests
@@ -51,10 +54,26 @@ def creds():
 
 
 @pytest.fixture(scope="module")
-def new_code():
+def provisioned_code(creds):
+    """Provision a store with a known code + (merchant_id, customer_key) combo."""
     code = f"PYTEST_STORE_{int(time.time())}"
+
+    async def _setup():
+        db = _mongo()
+        await db["stores"].insert_one({
+            "id": uuid.uuid4().hex,
+            "code": code,
+            "name": "Pytest Provisioned Outlet",
+            "city": "", "state": "", "region": "", "address": "",
+            "is_active": True,
+            "source": "pytest_seed",
+            "pos_merchant_id": creds["merchant_id"],
+            "pos_customer_key": code,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        })
+    asyncio.run(_setup())
     yield code
-    # teardown — remove test store + test bills
+
     async def _cleanup():
         db = _mongo()
         await db["stores"].delete_many({"pos_customer_key": code})
@@ -76,46 +95,50 @@ def _add_point(cred, customer_key, bill_number, amount=1200):
     )
 
 
-def test_new_customer_key_autocreates_store_and_links_txn(creds, new_code):
-    bill = f"PYT_{new_code}_A"
-    r = _add_point(creds, new_code, bill)
+def test_known_store_code_accepts_and_links_txn(creds, provisioned_code):
+    bill = f"PYT_{provisioned_code}_A"
+    r = _add_point(creds, provisioned_code, bill)
     assert r.status_code == 200, r.text
     assert r.json()["status_code"] == 200, r.json()
 
     async def _verify():
         db = _mongo()
-        store = await db["stores"].find_one({"pos_customer_key": new_code}, {"_id": 0})
+        store = await db["stores"].find_one({"pos_customer_key": provisioned_code}, {"_id": 0})
         txn = await db["transactions"].find_one({"bill_number": bill}, {"_id": 0})
         return store, txn
     store, txn = asyncio.run(_verify())
-    assert store is not None, "store was not auto-created from customer_key"
-    assert store["code"] == new_code
-    assert store["pos_merchant_id"] == creds["merchant_id"]
-    assert store["source"] == "pos_auto_customer_key"
-    assert txn is not None and txn.get("store_id") == store["id"], "txn not linked to resolved store"
+    assert store is not None
+    assert txn is not None and txn.get("store_id") == store["id"], "txn not linked to provisioned store"
 
 
-def test_repeat_customer_key_reuses_same_store(creds, new_code):
-    bill = f"PYT_{new_code}_B"
-    r = _add_point(creds, new_code, bill)
+def test_repeat_known_store_code_reuses_same_store(creds, provisioned_code):
+    bill = f"PYT_{provisioned_code}_B"
+    r = _add_point(creds, provisioned_code, bill)
     assert r.status_code == 200, r.text
 
     async def _count():
         db = _mongo()
-        return await db["stores"].count_documents({"pos_customer_key": new_code})
+        return await db["stores"].count_documents({"pos_customer_key": provisioned_code})
     assert asyncio.run(_count()) == 1, "duplicate store created for same customer_key"
 
 
-def test_nonmatching_customer_key_not_rejected(creds):
-    # A customer_key different from the master credential value must NOT 403.
-    weird_key = f"PYT_NOTSECRET_{int(time.time())}"
-    bill = f"PYT_{weird_key}_X"
-    r = _add_point(creds, weird_key, bill)
-    assert r.status_code == 200, f"customer_key wrongly rejected: {r.status_code} {r.text}"
-    assert r.json()["status_code"] == 200, r.json()
-    # cleanup
-    async def _cleanup():
+def test_unknown_store_code_is_rejected(creds):
+    # An unprovisioned customer_key must be REJECTED (strict validation) — not auto-created.
+    unknown_key = f"PYT_UNKNOWN_{int(time.time())}"
+    bill = f"PYT_{unknown_key}_X"
+    r = _add_point(creds, unknown_key, bill)
+    # HTTP layer returns 200 envelope with inner status_code, OR raises 400 — accept either shape
+    body = r.json()
+    inner = body.get("status_code", r.status_code)
+    assert inner == 400, f"unknown store code should be rejected: {r.status_code} {r.text}"
+    msg = (body.get("response", {}).get("message") or body.get("detail") or "").lower()
+    assert "unknown store" in msg or "not provisioned" in msg, body
+
+    async def _verify():
         db = _mongo()
-        await db["stores"].delete_many({"pos_customer_key": weird_key})
-        await db["transactions"].delete_many({"bill_number": bill})
-    asyncio.run(_cleanup())
+        store = await db["stores"].find_one({"pos_customer_key": unknown_key}, {"_id": 0})
+        txn = await db["transactions"].find_one({"bill_number": bill}, {"_id": 0})
+        return store, txn
+    store, txn = asyncio.run(_verify())
+    assert store is None, "unknown store code must NOT auto-create a store under strict validation"
+    assert txn is None, "no transaction should be created for a rejected bill"

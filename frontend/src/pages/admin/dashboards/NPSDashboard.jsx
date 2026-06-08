@@ -5,6 +5,15 @@ import { fmtNum } from "@/lib/format";
 import { Area, AreaChart, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
 import { RefreshCw, MessageSquare, Star } from "lucide-react";
 import DateRangePicker from "../_date_range_picker";
+import DrillDownModal from "../DrillDownModal";
+
+const NPS_COLUMNS = [
+  { key: "created_at", label: "Date" },
+  { key: "mobile", label: "Mobile", mono: true },
+  { key: "store_name", label: "Store" },
+  { key: "score", label: "Score", align: "right" },
+  { key: "comment", label: "Feedback" },
+];
 
 export default function NPSDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 60, start_date: "", end_date: "" });
@@ -13,6 +22,11 @@ export default function NPSDashboard() {
   const [recent, setRecent] = useState([]);
   const [trend, setTrend] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [drill, setDrill] = useState(null);
+  const openNps = (title, filter) => setDrill({
+    title, subtitle: "NPS responses", collection: "nps_responses",
+    filter, sort: [["created_at", -1]], columns: NPS_COLUMNS,
+  });
 
   const load = async () => {
     setLoading(true);
@@ -90,10 +104,11 @@ export default function NPSDashboard() {
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <KPICard label="NPS Score" value={summary?.nps_score ?? 0} accent="amber" testid="nps-kpi-score"
+                onClick={() => openNps("All NPS responses", {})}
                 info="NPS = % Promoters minus % Detractors. Industry benchmark for fashion retail is 35-50 (good), 50+ (excellent)." />
-              <KPICard label="Total Responses" value={fmtNum(summary?.total || 0)} accent="indigo" testid="nps-kpi-total" />
-              <KPICard label="Promoters" value={fmtNum(summary?.promoters || 0)} hint={`${summary?.promoter_pct?.toFixed(1) || 0}%`} accent="emerald" testid="nps-kpi-promoters" />
-              <KPICard label="Detractors" value={fmtNum(summary?.detractors || 0)} hint={`${summary?.detractor_pct?.toFixed(1) || 0}%`} accent="rose" testid="nps-kpi-detractors" />
+              <KPICard label="Total Responses" value={fmtNum(summary?.total || 0)} accent="indigo" testid="nps-kpi-total" onClick={() => openNps("All NPS responses", {})} />
+              <KPICard label="Promoters" value={fmtNum(summary?.promoters || 0)} hint={`${summary?.promoter_pct?.toFixed(1) || 0}%`} accent="emerald" testid="nps-kpi-promoters" onClick={() => openNps("Promoters (score 9–10)", { score: { $gte: 9 } })} />
+              <KPICard label="Detractors" value={fmtNum(summary?.detractors || 0)} hint={`${summary?.detractor_pct?.toFixed(1) || 0}%`} accent="rose" testid="nps-kpi-detractors" onClick={() => openNps("Detractors (score 0–6)", { score: { $lte: 6 } })} />
             </div>
 
             {trend.length > 0 && (
@@ -153,6 +168,8 @@ export default function NPSDashboard() {
           </>
         )}
       </div>
+      <DrillDownModal open={!!drill} onClose={() => setDrill(null)} {...(drill || {})} />
+
     </div>
   );
 }

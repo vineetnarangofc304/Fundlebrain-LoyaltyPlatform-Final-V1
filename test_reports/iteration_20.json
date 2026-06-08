@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 20 — Tested (1) POS strict store validation, (2) loyalty config upgrade_bonus GET/PUT + tier-promotion credit, (3) global drill-downs across 6 admin dashboards, (4) Loyalty Configurator slab section, (5) accordion left menu + Fundle logo. Backend 7/7 pytest pass (3 existing iteration17 + 4 new iteration20). Frontend: 12/13 drill-down checks pass — only NPS KPI cards render an educational empty-state instead of clickable KPIs (no NPS responses in seed data → expected, not an error). Loyalty Configurator slab inputs (tier-gold-upgrade-bonus, tier-silver-upgrade-bonus) edit + save + survive reload. Accordion sidebar shows 11 section-* headers, toggle works. Real Fundle logo renders (img alt='Fundle').",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Command Center store filter (cc-store select)",
+        "issues": ["Hydration warning '<span> cannot be a child of <option>' inside <select data-testid=cc-store>. Pre-existing, not part of iter20 — already flagged in iter19 report; CommandCenter.jsx line ~235 wraps option text in a <span>."]
+      },
+      {
+        "screen": "NPS Dashboard /admin/dashboards/nps",
+        "issues": ["Empty-state correctly hides Promoters / Detractors KPI cards when there are zero responses. Not a bug — drill-down testids nps-kpi-promoters / nps-kpi-detractors only exist when data is present. Preview environment currently has 0 NPS responses, so the empty state is shown (educational cards). Validates spec: 'a clean empty state is acceptable, an error is not'."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration20_upgrade_bonus_and_strict_store_test.py",
+    "/app/backend/tests/iteration17_store_resolution_test.py",
+    "/app/test_reports/pytest/iteration20_results.xml"
+  ],
+  "action_items": [
+    "(Optional, pre-existing) Fix Command Center cc-store <select> hydration: remove the wrapping <span> from <option> children. Same issue flagged in iter19.",
+    "(Optional) Seed at least one NPS response in preview so the NPS Promoters/Detractors drill-down KPIs (nps-kpi-promoters/detractors) become visible/clickable for end-to-end UX validation. Today the dashboard correctly shows the empty-state template instead."
+  ],
+  "critical_code_review_comments": [
+    "STRICT_STORE_VALIDATION + _get_or_create_store_from_payload raising HTTPException(400) in pos_ewards_routes.py is implemented cleanly: posAddPoint wraps the resolver in try/except HTTPException and routes rejections through _log_api(status=400). api_logs entry verified end-to-end.",
+    "Upgrade-bonus credit (pos_ewards_routes.py ~line 1100–1157) correctly: (a) detects promotion by comparing old vs new tier rank in tier_rules, (b) reads upgrade_bonus from the new tier's config, (c) adds to both points_balance and lifetime_points_earned in the same $inc, (d) writes points_ledger entry with type='bonus', reference_type='tier_upgrade', reference_id=txn_id. All verified via DB read-back.",
+    "DEFAULT_CONFIG.tier_rules now includes upgrade_bonus per tier and loyalty_routes.py backfills missing upgrade_bonus on every GET — solid defensive default. TierCreatePayload.upgrade_bonus has default 0; persist round-trips correctly via PUT.",
+    "Frontend KPICard accepts onClick and renders cursor-pointer/hover — confirmed working on Sales (kpi-total-rev, kpi-total-txns), Loyalty (tier-gold, tier-silver), Campaign (kpi-camp-total), Customer (kpi-total-cust), Executive Summary (es-kpi-txns, es-kpi-base). All open DrillDownModal with drilldown-close working.",
+    "AdminLayout.jsx accordion (sectionForPath + collapsed state) works: 11 section-* headers visible, only the active section auto-expanded, click toggles open/close. Fundle logo image renders via brand.config.js platformLogoUrl='/fundle-logo.png'."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration20_upgrade_bonus_and_strict_store_test.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (7/7 — 4 new iter20 + 3 existing iter17)",
+    "frontend": "100% on testable surfaces (Sales/Loyalty/Campaign/Customer/ExecSummary drill-downs, Loyalty Configurator slab edit+save+persist, accordion menu toggle, Fundle logo). NPS drill-down not exercisable in preview because there are 0 NPS responses → empty state, not an error."
+  },
+  "test_credentials": "Super admin superadmin@fundle.io / Fundle@2026 (portal=crm). POS API: kazo_default cred from pos_credentials collection (read via Mongo, matches pytest pattern).",
+  "seed_data_creation": "Pytest provisions per-test stores (PYTEST_STORE_*, PYT_PROMO_*) and tears them down in fixture cleanup. Creates a fresh customer (random 9XXXXXXXXX mobile) for the tier-promotion test and deletes after. No persistent test data left behind.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `cd /app/backend && python -m pytest tests/iteration20_upgrade_bonus_and_strict_store_test.py tests/iteration17_store_resolution_test.py -v` for the full iter20 regression (7 tests, ~12s). The upgrade-bonus test temporarily sets gold.upgrade_bonus=4321, posts a big bill against a freshly-provisioned store with a fresh mobile, then restores config + cleans up. If the loyalty config schema changes, update the gold-tier lookup in TestUpgradeBonusCredit. The hydration warning on Command Center cc-store <select> is the only pre-existing console error and is unrelated to iter20.",
+  "rca of the issue": "N/A — no functional issues found in this iteration. Both reversed behaviours (strict store rejection + upgrade-bonus credit on promotion) work end-to-end and are persisted/logged correctly."
+}

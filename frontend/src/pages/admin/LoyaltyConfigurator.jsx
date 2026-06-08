@@ -193,6 +193,40 @@ export default function LoyaltyConfigurator() {
           </p>
         </SectionCard>
 
+        {/* Slab-wise tier-upgrade bonuses */}
+        <SectionCard title="TIER UPGRADE BONUSES (SLAB-WISE)" subtitle="One-time bonus points awarded when a customer crosses UP into each tier (slab)" icon={Sparkles}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="border-b border-black/10 text-left">
+                <tr>
+                  <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Tier (Slab)</th>
+                  <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Spend Band</th>
+                  <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Upgrade Bonus (pts)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cfg.tier_rules.map((t, i) => (
+                  <tr key={t.tier} className={`border-b border-black/5 ${t.is_active === false ? "opacity-50" : ""}`}>
+                    <td className="py-2 px-2 font-mono">
+                      <span className="px-2 py-0.5 text-[11px] uppercase rounded" style={{ background: t.color || "#e5e7eb", color: "#111" }}>{t.name || t.tier}</span>
+                    </td>
+                    <td className="py-2 px-2 text-neutral-600 font-mono text-xs">
+                      ₹{Number(t.min_lifetime_spend ?? 0).toLocaleString("en-IN")} – {t.max_lifetime_spend != null ? `₹${Number(t.max_lifetime_spend).toLocaleString("en-IN")}` : "∞"}
+                    </td>
+                    <td className="py-2 px-2">
+                      <input type="number" min="0" className="k-input k-input-sm w-28 text-right font-mono" value={t.upgrade_bonus ?? 0} onChange={(e) => updTier(i, "upgrade_bonus", parseInt(e.target.value) || 0)} data-testid={`tier-${t.tier}-upgrade-bonus`} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-neutral-500 mt-3">
+            Awarded once when a bill pushes a customer's lifetime spend past this slab's minimum and promotes them into this tier. The entry tier (lowest slab) is usually 0.
+          </p>
+        </SectionCard>
+
+
         {/* Tier reset cadence */}
         <SectionCard title="TIER RESET CADENCE" subtitle="When do customers get re-evaluated against tier bands?" icon={RefreshCcw}>
           <div className="grid md:grid-cols-3 gap-4">

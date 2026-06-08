@@ -31,18 +31,22 @@ DEFAULT_CONFIG = {
     "tier_rules": [
         {"tier": "silver", "name": "Silver", "min_lifetime_spend": 0, "max_lifetime_spend": 25000,
          "earn_multiplier": 1.0, "welcome_bonus": 100, "birthday_bonus": 200, "anniversary_bonus": 100,
+         "upgrade_bonus": 0,
          "tier_type": "entry", "is_active": True, "color": "#9ca3af",
          "coupon_discount_pct": 0, "free_shipping_min_bill": None},
         {"tier": "gold", "name": "Gold", "min_lifetime_spend": 25000, "max_lifetime_spend": 75000,
          "earn_multiplier": 1.25, "welcome_bonus": 200, "birthday_bonus": 500, "anniversary_bonus": 250,
+         "upgrade_bonus": 500,
          "tier_type": "standard", "is_active": True, "color": "#d4af37",
          "coupon_discount_pct": 5, "free_shipping_min_bill": 2000},
         {"tier": "platinum", "name": "Platinum", "min_lifetime_spend": 75000, "max_lifetime_spend": 150000,
          "earn_multiplier": 1.5, "welcome_bonus": 300, "birthday_bonus": 1000, "anniversary_bonus": 500,
+         "upgrade_bonus": 1500,
          "tier_type": "premium", "is_active": True, "color": "#7e7e7e",
          "coupon_discount_pct": 8, "free_shipping_min_bill": 1500},
         {"tier": "diamond", "name": "Diamond", "min_lifetime_spend": 150000, "max_lifetime_spend": None,
          "earn_multiplier": 2.0, "welcome_bonus": 500, "birthday_bonus": 2000, "anniversary_bonus": 1000,
+         "upgrade_bonus": 5000,
          "tier_type": "vip", "is_active": True, "color": "#b9f2ff",
          "coupon_discount_pct": 10, "free_shipping_min_bill": 0,
          "point_expiry_override_days": 730},  # 2 years for diamond
@@ -78,6 +82,11 @@ async def get_config(user: dict = Depends(get_current_user)):
     for k, v in DEFAULT_CONFIG.items():
         if k not in cfg:
             cfg[k] = v
+            changed = True
+    # Backfill newly-added per-tier fields (e.g. upgrade_bonus) onto existing tiers
+    for t in (cfg.get("tier_rules") or []):
+        if "upgrade_bonus" not in t:
+            t["upgrade_bonus"] = 0
             changed = True
     if changed:
         await loyalty_config_col.update_one({"id": "default"}, {"$set": cfg}, upsert=True)
@@ -128,6 +137,7 @@ class TierCreatePayload(BaseModel):
     welcome_bonus: int = 0
     birthday_bonus: int = 0
     anniversary_bonus: int = 0
+    upgrade_bonus: int = 0
     tier_type: str = "standard"
     color: Optional[str] = None
     coupon_discount_pct: float = 0

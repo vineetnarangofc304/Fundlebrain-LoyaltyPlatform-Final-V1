@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader, KPICard, SectionHeading } from "../_shared";
 import { fmtNum, fmtINR } from "@/lib/format";
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend, Area, AreaChart } from "recharts";
 import { RefreshCw } from "lucide-react";
 import DateRangePicker from "../_date_range_picker";
+import DrillDownModal from "../DrillDownModal";
 
 const TIER_ACCENT = {
   silver: "slate",
@@ -14,9 +16,27 @@ const TIER_ACCENT = {
 };
 
 export default function LoyaltyDashboard() {
+  const navigate = useNavigate();
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [drill, setDrill] = useState(null);
+  const openTierCustomers = (tier, name) => setDrill({
+    title: `${(name || tier || "").toUpperCase()} tier customers`,
+    subtitle: "Loyalty tier",
+    collection: "customers",
+    filter: { tier },
+    sort: [["lifetime_spend", -1]],
+    columns: [
+      { key: "name", label: "Name" },
+      { key: "mobile", label: "Mobile", mono: true },
+      { key: "city", label: "City" },
+      { key: "lifetime_spend", label: "Lifetime ₹", align: "right", render: (v) => fmtINR(v) },
+      { key: "points_balance", label: "Points", align: "right" },
+      { key: "visit_count", label: "Visits", align: "right" },
+    ],
+    onRowClick: (r) => { setDrill(null); navigate(`/admin/customers/${r.id}`); },
+  });
   const load = async () => {
     setLoading(true);
     try {
@@ -56,6 +76,7 @@ export default function LoyaltyDashboard() {
               hint={`${fmtINR(t.total_spend)} sales · avg ${fmtINR(t.avg_spend)}`}
               accent={TIER_ACCENT[t.tier?.toLowerCase()] || "slate"}
               testid={`tier-${t.tier}`}
+              onClick={() => openTierCustomers(t.tier, t.name)}
               info={`${t.tier?.toUpperCase()} tier — ${fmtNum(t.count)} customers contributing ${fmtINR(t.total_spend)} in lifetime sales. Average lifetime spend per customer: ${fmtINR(t.avg_spend)}. Total outstanding points in this tier: ${fmtNum(t.total_points)}.`}
             />
           ))}
@@ -75,7 +96,7 @@ export default function LoyaltyDashboard() {
                   const custShare = totalCust ? (t.count / totalCust) * 100 : 0;
                   const salesShare = totalSpend ? ((t.total_spend || 0) / totalSpend) * 100 : 0;
                   return (
-                    <tr key={t.tier}>
+                    <tr key={t.tier} onClick={() => openTierCustomers(t.tier, t.name)} className="cursor-pointer hover:bg-neutral-50" data-testid={`ld-tier-row-${t.tier}`}>
                       <td><span className={`pill pill-${TIER_ACCENT[t.tier?.toLowerCase()] === "burgundy" ? "danger" : (TIER_ACCENT[t.tier?.toLowerCase()] === "amber" ? "warning" : "neutral")}`}>{t.tier?.toUpperCase()}</span></td>
                       <td className="text-right font-mono">{fmtNum(t.count)}</td>
                       <td className="text-right font-mono">{custShare.toFixed(1)}%</td>
@@ -121,6 +142,8 @@ export default function LoyaltyDashboard() {
           </ResponsiveContainer>
         </div>
       </div>
+      <DrillDownModal open={!!drill} onClose={() => setDrill(null)} {...(drill || {})} />
+
     </div>
   );
 }

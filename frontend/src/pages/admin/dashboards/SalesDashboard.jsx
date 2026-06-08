@@ -1,14 +1,34 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, CHART_SERIES, mongoDateFilter } from "../_shared";
 import { fmtINR, fmtNum } from "@/lib/format";
 import { LineChart, Line, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
 import DateRangePicker from "../_date_range_picker";
+import DrillDownModal from "../DrillDownModal";
+
+const TXN_COLUMNS = [
+  { key: "bill_date", label: "Bill Date" },
+  { key: "bill_number", label: "Bill #", mono: true },
+  { key: "customer_mobile", label: "Mobile", mono: true },
+  { key: "store_name", label: "Store" },
+  { key: "net_amount", label: "Net ₹", align: "right", render: (v) => fmtINR(v) },
+  { key: "points_earned", label: "Pts", align: "right" },
+];
 
 export default function SalesDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [trend, setTrend] = useState([]);
+  const [drill, setDrill] = useState(null);
+
+  const openTxnDrill = () => setDrill({
+    title: "Transactions",
+    subtitle: range.label || (range.period_days === 0 ? "All time" : `Last ${range.period_days} days`),
+    collection: "transactions",
+    filter: mongoDateFilter("bill_date", range),
+    sort: [["bill_date", -1]],
+    columns: TXN_COLUMNS,
+  });
 
   useEffect(() => {
     const params = { period_days: range.period_days };
@@ -41,9 +61,9 @@ export default function SalesDashboard() {
         } />
       <div className="p-8 space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard label="Total Revenue" value={fmtINR(totalRevenue)} accent="burgundy" testid="kpi-total-rev" />
-          <KPICard label="Total Transactions" value={fmtNum(totalTxns)} accent="indigo" testid="kpi-total-txns" />
-          <KPICard label="Avg / Day" value={fmtINR(avgPerDay)} accent="teal" testid="kpi-avg-day" />
+          <KPICard label="Total Revenue" value={fmtINR(totalRevenue)} accent="burgundy" testid="kpi-total-rev" onClick={openTxnDrill} />
+          <KPICard label="Total Transactions" value={fmtNum(totalTxns)} accent="indigo" testid="kpi-total-txns" onClick={openTxnDrill} />
+          <KPICard label="Avg / Day" value={fmtINR(avgPerDay)} accent="teal" testid="kpi-avg-day" onClick={openTxnDrill} />
           <KPICard label="Active Days" value={trend.length} accent="slate" testid="kpi-active-days" />
         </div>
 
@@ -137,6 +157,8 @@ export default function SalesDashboard() {
           </div>
         </div>
       </div>
+      <DrillDownModal open={!!drill} onClose={() => setDrill(null)} {...(drill || {})} />
+
     </div>
   );
 }

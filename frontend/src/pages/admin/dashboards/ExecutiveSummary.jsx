@@ -1,16 +1,42 @@
 /* Executive Summary v2 — composite snapshot + branded PDF download. */
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, mongoDateFilter } from "../_shared";
 import { fmtINR, fmtNum } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import { Download, RefreshCw } from "lucide-react";
+import DrillDownModal from "../DrillDownModal";
+
+const ES_TXN_COLUMNS = [
+  { key: "bill_date", label: "Bill Date" },
+  { key: "bill_number", label: "Bill #", mono: true },
+  { key: "customer_mobile", label: "Mobile", mono: true },
+  { key: "store_name", label: "Store" },
+  { key: "net_amount", label: "Net ₹", align: "right", render: (v) => fmtINR(v) },
+];
+const ES_CUST_COLUMNS = [
+  { key: "name", label: "Name" },
+  { key: "mobile", label: "Mobile", mono: true },
+  { key: "tier", label: "Tier" },
+  { key: "lifetime_spend", label: "Lifetime ₹", align: "right", render: (v) => fmtINR(v) },
+  { key: "points_balance", label: "Points", align: "right" },
+];
 
 export default function ExecutiveSummary() {
   const [period, setPeriod] = useState(0);   // 0 = All time (default)
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
+  const [drill, setDrill] = useState(null);
+  const openTxn = () => setDrill({
+    title: "Transactions", subtitle: period === 0 ? "All time" : `Last ${period} days`,
+    collection: "transactions", filter: mongoDateFilter("bill_date", { period_days: period }),
+    sort: [["bill_date", -1]], columns: ES_TXN_COLUMNS,
+  });
+  const openCustomers = (title, filter) => setDrill({
+    title, subtitle: "Customers", collection: "customers", filter,
+    sort: [["lifetime_spend", -1]], columns: ES_CUST_COLUMNS,
+  });
 
   const load = async () => {
     setLoading(true);
@@ -75,13 +101,13 @@ export default function ExecutiveSummary() {
         <AIInsightStrip dashboardKey={`exec_summary_${period}d`} payload={aiPayload} title="Executive Intelligence Brief" />
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard label="Net Sales" value={fmtINR(k.net_sales)} delta={k.net_sales_delta_pct} hint={`vs prev ${period}d`} accent="burgundy" testid="es-kpi-net-sales" />
-          <KPICard label="Transactions" value={fmtNum(k.transactions)} accent="indigo" testid="es-kpi-txns" />
-          <KPICard label="AOV" value={fmtINR(k.aov)} accent="teal" testid="es-kpi-aov" />
-          <KPICard label="Items Sold" value={fmtNum(k.items_sold)} accent="amber" testid="es-kpi-items" />
-          <KPICard label="Active Customers" value={fmtNum(k.active_customers)} hint={`of ${fmtNum(k.total_customers)}`} accent="emerald" testid="es-kpi-active" />
-          <KPICard label="Total Base" value={fmtNum(k.total_customers)} accent="slate" testid="es-kpi-base" />
-          <KPICard label="Liability" value={fmtINR(k.outstanding_liability_inr)} accent="rose" testid="es-kpi-liability" />
+          <KPICard label="Net Sales" value={fmtINR(k.net_sales)} delta={k.net_sales_delta_pct} hint={`vs prev ${period}d`} accent="burgundy" testid="es-kpi-net-sales" onClick={openTxn} />
+          <KPICard label="Transactions" value={fmtNum(k.transactions)} accent="indigo" testid="es-kpi-txns" onClick={openTxn} />
+          <KPICard label="AOV" value={fmtINR(k.aov)} accent="teal" testid="es-kpi-aov" onClick={openTxn} />
+          <KPICard label="Items Sold" value={fmtNum(k.items_sold)} accent="amber" testid="es-kpi-items" onClick={openTxn} />
+          <KPICard label="Active Customers" value={fmtNum(k.active_customers)} hint={`of ${fmtNum(k.total_customers)}`} accent="emerald" testid="es-kpi-active" onClick={() => openCustomers("Active Customers", { visit_count: { $gte: 1 } })} />
+          <KPICard label="Total Base" value={fmtNum(k.total_customers)} accent="slate" testid="es-kpi-base" onClick={() => openCustomers("All Customers", {})} />
+          <KPICard label="Liability" value={fmtINR(k.outstanding_liability_inr)} accent="rose" testid="es-kpi-liability" onClick={() => openCustomers("Customers with outstanding points", { points_balance: { $gt: 0 } })} />
           <KPICard label="Period" value={`${period} days`} accent="slate" testid="es-kpi-period" />
         </div>
 
@@ -123,6 +149,8 @@ export default function ExecutiveSummary() {
           Generated at {data.generated_at} · No snapshots · Live from MongoDB
         </div>
       </div>
+      <DrillDownModal open={!!drill} onClose={() => setDrill(null)} {...(drill || {})} />
+
     </div>
   );
 }
