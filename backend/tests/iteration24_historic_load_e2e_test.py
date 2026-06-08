@@ -43,6 +43,17 @@ BILLING_CSV = (
     f"09-06-2026 10:00,,{M2},Test Beta,KZ Test Outlet,{STORE_CODE},TXNKZ2,BILLKZ2,New,Active,,1,"
     "North,Pathankot,B,10:00:00,3000,5,150,0,3150,3150\n"
 )
+# SKU Wise Billing — exact header set the user confirmed (no "Store code"; store = Outlet).
+SKU_CSV = (
+    "id,pos_billing_dump_foreign_id,pos_billing_dump_new_id,Date,Transaction Id,Bill Number,"
+    "Outlet,Outlet(only for Shopify),Mobile,Customer Name,Item Name,Item Id,Season,"
+    "Item Master Category,Bill Type,Quantity,Rate,discount,Sub Total,Category 0(Logic),"
+    "Category 1(Logic),Category 2(Logic),Category 3(Logic),New Vs Existing,Basket Size\n"
+    f"PK001,INVKFGN1,111,158861661,TXNKZ1,BILLKZ1,KZ Test Outlet,,{M1},Test Alpha,"
+    "STUDDED HOOP EARRINGS,8789277792,SPRING/SUMMER,Jwellery,Regular,2,790,0,1580,1,,,,Existing,\n"
+    f"PK002,INVKFGN1,112,158861661,TXNKZ1,BILLKZ1,KZ Test Outlet,,{M1},Test Alpha,"
+    "TOTE BAG,9711441011,AUTUMN/WINTER,Bags,Regular,1,3490,0,3490,1,,,,Existing,\n"
+)
 
 
 def _mongo():
@@ -66,6 +77,7 @@ def _cleanup():
         await db["customers"].delete_many({"mobile": {"$in": [M1, M2]}})
         await db["points_ledger"].delete_many({"customer_mobile": {"$in": [M1, M2]}})
         await db["stores"].delete_many({"code": STORE_CODE})
+        await db["items"].delete_many({"sku": {"$in": ["8789277792", "9711441011"]}})
     asyncio.run(_c())
 
 
@@ -139,6 +151,23 @@ def test_full_historic_load(headers):
         c2 = await db["customers"].find_one({"mobile": M2}, {"_id": 0})
         assert c2["tier"] == "silver", c2["tier"]
     asyncio.run(checks2())
+
+    # 2b. SKU Wise Billing → line items attach to the bill (join by Bill Number / Transaction Id)
+    sku_job = _ingest(headers, SKU_CSV, "sku_transactions", "SKU_Wise.csv")
+    assert sku_job["status"] == "completed", sku_job
+
+    async def checks_sku():
+        db = _mongo()
+        t1 = await db["transactions"].find_one({"bill_number": "BILLKZ1"}, {"_id": 0})
+        items = t1.get("items") or []
+        assert len(items) == 2, items
+        assert t1.get("units_count") == 3, t1.get("units_count")
+        skus = {it["sku"] for it in items}
+        assert "8789277792" in skus and "9711441011" in skus, skus
+        # item master populated
+        im = await db["items"].count_documents({"sku": {"$in": ["8789277792", "9711441011"]}})
+        assert im >= 2, f"item master not populated ({im})"
+    asyncio.run(checks_sku())
 
     # 3. Expiry report surfaces the opening balance (window covering Dec 2026)
     er = requests.get(f"{BASE_URL}/api/legacy-reports/expiry-points",

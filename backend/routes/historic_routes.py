@@ -406,9 +406,18 @@ def _map_sku_line_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
     is the SKU file's "Transaction Id" (the 000000PK… value) which equals the
     billwise Bill Number / Transaction Id.
     """
-    txn_key = (r.get("Transaction Id") or r.get("Transaction ID") or r.get("Bill Number") or "").strip()
+    txn_key = (r.get("Bill Number") or r.get("Transaction Id") or r.get("Transaction ID")
+               or r.get("pos_billing_dump_foreign_id") or r.get("id") or "").strip()
     if not txn_key:
-        return None, "Missing Transaction Id / Bill Number"
+        return None, "Missing Bill Number / Transaction Id"
+    # All identifiers that could match a transaction's bill_number / transaction_id,
+    # so the SKU→bill join survives the eWards id inconsistencies across exports.
+    alt_keys = [k for k in [
+        (r.get("Bill Number") or "").strip(),
+        (r.get("Transaction Id") or r.get("Transaction ID") or "").strip(),
+        (r.get("pos_billing_dump_foreign_id") or "").strip(),
+        (r.get("id") or "").strip(),
+    ] if k]
     sku = (r.get("Item Id") or r.get("Item ID") or r.get("SKU") or r.get("sku")
            or r.get("Item Code") or "").strip()
     if not sku:
@@ -423,6 +432,7 @@ def _map_sku_line_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
     subtotal = parse_float(r.get("Sub Total") or r.get("Subtotal"))
     return ({
         "_txn_key": txn_key,
+        "_alt_keys": alt_keys,
         "invoice_number": (r.get("Bill Number") or "").strip() or None,
         "sku": sku,
         "name": name,
@@ -506,6 +516,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         store_cache: Dict[str, Dict[str, Any]] = {}
         # SKU-wise accumulators: line items grouped by txn join-key + distinct item master
         sku_bill_items: Dict[str, List[Dict[str, Any]]] = {}
+        sku_bill_keys: Dict[str, set] = {}
         sku_item_master: Dict[str, Dict[str, Any]] = {}
         buffer_insert: List[Dict[str, Any]] = []
 
@@ -600,6 +611,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                 "total": d.get("total"), "discount": d.get("discount"),
                                 "season": d.get("season"),
                             })
+                            sku_bill_keys.setdefault(tk, set()).update(d.get("_alt_keys") or [tk])
                     # Every processed line is "accounted for" → keeps integrity check balanced.
                     updated += len(buffer_insert)
                     buffer_insert.clear()
@@ -794,8 +806,9 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     tops = []
                     for tk, items in sku_bill_items.items():
                         units = sum(int(it.get("quantity") or 0) for it in items) or len(items)
+                        keys = list(sku_bill_keys.get(tk) or {tk})
                         tops.append(UpdateMany(
-                            {"$or": [{"transaction_id": tk}, {"bill_number": tk}]},
+                            {"$or": [{"transaction_id": {"$in": keys}}, {"bill_number": {"$in": keys}}]},
                             {"$set": {"items": items, "units_count": units}}))
                         attached += 1
                         if len(tops) >= 1000:
@@ -1135,7 +1148,7 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
             "unique_bills": {"$addToSet": {"store": "$store_id",
                                             "bill": "$bill_number",
                                             "date": "$bill_date"}},
-            "total_spend": {"$sum": "$net_amount"},
+            "total_spend": {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
         }},
     ]
     rows = await transactions_col.aggregate(agg_pipe).to_list(len(touched_mobiles))
@@ -2103,7 +2116,7 @@ async def backfill_loyalty_model(
             "unique_bills": {"$addToSet": {"store": "$store_id",
                                             "bill": "$bill_number",
                                             "date": "$bill_date"}},
-            "total_spend": {"$sum": "$net_amount"},
+            "total_spend": {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
             "txn_count": {"$sum": 1},
         }},
     ]

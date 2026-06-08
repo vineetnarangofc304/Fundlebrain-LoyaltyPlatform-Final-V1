@@ -51,7 +51,9 @@ User is about to **purge production & bulk-load 3 eWards files** (CRM Report ~13
 
 **Verified:** `tests/iteration24_historic_load_e2e_test.py` (full CRM→Billing→Expiry e2e) + iteration22/23 → **20/20 pass**. Loop-block + posAddPoint latency manually confirmed fixed.
 
-**⏳ STILL OPEN (need user):** exact **SKU Wise Billing** headers (OCR garbled) to finalize the SKU parser; confirm Billing Report contains the `Store master` K-code column (else store name→code mapping); confirm tier spend basis (Total Revenue vs Total Billing). ⚠️ All changes need a **production redeploy** before the load.
+**⏳ STILL OPEN (need user):** confirm tier spend basis (Total Revenue vs Total Billing). ⚠️ All changes need a **production redeploy** before the load.
+
+**SKU Wise Billing parser finalised (Iteration 44b):** Exact headers confirmed by user — `id, pos_billing_dump_foreign_id, pos_billing_dump_new_id, Date, Transaction Id, Bill Number, Outlet, Outlet(only for Shopify), Mobile, Customer Name, Item Name, Item Id, Season, Item Master Category, Bill Type, Quantity, Rate, discount, Sub Total, Category 0-3(Logic), New Vs Existing, Basket Size` (NO Store code → store = Outlet name). Robust **SKU→bill join**: matches a transaction where `bill_number` OR `transaction_id` is in the union of the line's identifiers (Bill Number, Transaction Id, pos_billing_dump_foreign_id, id) — survives eWards id inconsistencies. Verified by `iteration24` (line items attach to BILLKZ1, units_count, item master populated). All 3 files now validated end-to-end.
 
 
 ### Iteration 43 (Jun 2026) — ⏯️ Loyalty Earn/Burn ON-OFF + scheduled pause windows · 🔁 Live Monitor RETURN type + receive time
