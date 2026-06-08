@@ -63,6 +63,8 @@ def _require_write_role(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, An
     """Return None if role OK, otherwise an error dict for the model."""
     if not user:
         return {"error": "User context missing — write actions require an authenticated session."}
+    if user.get("is_demo"):
+        return {"error": "This is a read-only demo account — write actions (deactivate, unsubscribe, reactivate, etc.) are disabled."}
     role = user.get("role") or user.get("primary_role")
     if role not in WRITE_ROLES:
         return {"error": f"Permission denied. Write actions require one of {sorted(WRITE_ROLES)}; your role is '{role}'."}

@@ -2,3 +2,21 @@
   min-height: 100vh;
   background: var(--kazo-cream);
 }
+
+/* ---- Guided demo tour ---- */
+.tour-ring {
+  border: 2px solid var(--kazo-champagne);
+  box-shadow: 0 0 0 4px rgba(199, 167, 109, 0.25), 0 0 22px 4px rgba(199, 167, 109, 0.45);
+  animation: tourPulse 1.8s ease-in-out infinite;
+  transition: top 0.35s ease, left 0.35s ease, width 0.35s ease, height 0.35s ease;
+}
+@keyframes tourPulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(199, 167, 109, 0.2), 0 0 16px 2px rgba(199, 167, 109, 0.35); }
+  50% { box-shadow: 0 0 0 5px rgba(199, 167, 109, 0.35), 0 0 26px 6px rgba(199, 167, 109, 0.55); }
+}
+.tour-eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; }
+.tour-eq i { width: 2px; background: var(--kazo-champagne); animation: tourEq 0.9s ease-in-out infinite; }
+.tour-eq i:nth-child(1) { height: 5px; animation-delay: 0s; }
+.tour-eq i:nth-child(2) { height: 10px; animation-delay: 0.15s; }
+.tour-eq i:nth-child(3) { height: 7px; animation-delay: 0.3s; }
+@keyframes tourEq { 0%, 100% { transform: scaleY(0.5); } 50% { transform: scaleY(1.3); } }

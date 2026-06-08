@@ -13,7 +13,7 @@ export function AuthProvider({ children }) {
     if (token && cached) {
       try {
         setUser(JSON.parse(cached));
-      } catch (e) {}
+      } catch (e) { /* ignore bad cache */ }
       // refresh in background
       api.get("/auth/me").then((r) => {
         setUser(r.data);
@@ -32,15 +32,25 @@ export function AuthProvider({ children }) {
     return r.data.user;
   };
 
+  // Apply a session obtained outside the email/password flow (e.g. the read-only
+  // demo session used by the public guided tour at /demo).
+  const applySession = (token, sessionUser, portal = "crm") => {
+    localStorage.setItem("kazo_token", token);
+    localStorage.setItem("kazo_user", JSON.stringify(sessionUser));
+    localStorage.setItem("kazo_portal", portal);
+    setUser(sessionUser);
+    return sessionUser;
+  };
+
   const logout = async () => {
-    try { await api.post("/auth/logout"); } catch (e) {}
+    try { await api.post("/auth/logout"); } catch (e) { /* ignore */ }
     localStorage.removeItem("kazo_token");
     localStorage.removeItem("kazo_user");
     setUser(null);
   };
 
   return (
-    <AuthCtx.Provider value={{ user, loading, login, logout }}>
+    <AuthCtx.Provider value={{ user, loading, login, applySession, logout }}>
       {children}
     </AuthCtx.Provider>
   );

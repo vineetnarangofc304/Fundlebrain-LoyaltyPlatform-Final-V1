@@ -31,6 +31,20 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 35 (Jun 2026) — 🎬 Self-running Fundle-branded product demo (`/demo`)
+
+User wants a self-running sales demo over the live platform with Fundle branding: a main 5-min guided tour + per-section ~2-min walkthroughs, AI voice narration, to host on demo.fundlebrain.ai. Confirmed choices: live auto-tour (1a), premium OpenAI TTS (2b), dedicated `/demo` page + tutorials (3 custom), full + section tours (4c), interactive walkthroughs as "videos" (1a) + read-only demo account (2a).
+
+**Backend**:
+- `routes/demo_routes.py` (new): `POST /api/demo/session` (public — issues JWT for read-only demo user, no client-side password); `POST /api/demo/tts` (OpenAI TTS `tts-1` voice `nova` via Emergent key, cached in `tts_cache` by content hash, returns audio/mpeg). `ensure_demo_user()` seeds `demo@fundle.io` (brand_admin + `is_demo`).
+- `auth.py`: `get_current_user` now blocks ALL write methods for `is_demo` users, allowlisting read-style POSTs (`/api/demo*`, `/api/auth/logout`, `/api/ai/chat*`, `/api/dashboard/insight`, `/api/dashboard/drilldown`). `ai_extended_tools._require_write_role` also blocks `is_demo`.
+- `server.py`: include demo_router + `ensure_demo_user()` on startup.
+
+**Frontend**:
+- `components/tour/TourProvider.jsx` (new): app-root tour engine — auto-logs into demo session, navigates live routes, spotlights sidebar nav item (animated champagne ring), shows a Fundle-branded caption card (Play/Pause/Prev/Next/Mute + progress), plays cached TTS, auto-advances on audio end (length-based fallback). `lib/demoScript.js`: 18 sections, FULL_TOUR (20 steps ≈ 5 min) + per-section demos. `pages/public/DemoLanding.jsx`: branded hero + "Start the 5-minute Guided Tour" + tutorials grid (per-card optional real-video slot via `VIDEO_URLS`). `lib/auth.jsx`: added `applySession`. Route `/demo` (public) + App-root `TourProvider`. Tour CSS in `App.css`.
+
+**Verified** (screenshots + curl): `/demo` renders (18 tutorial cards); Start → demo/session 200 → demo/tts 200 → tour runs over live screens, branded card narrating, nav-spotlight ring follows steps; AI Intelligence Report renders (insight POST 200); writes blocked (create-user 403). Lint clean on new files. ⚠️ Redeploy + point `demo.fundlebrain.ai` to `/demo` at deploy time. NOTE: tutorials are interactive narrated walkthroughs (not MP4s); per-card `VIDEO_URLS` slot allows swapping in real recordings later.
+
 ### Iteration 34 (Jun 2026) — 🔐 Login failing on live — CRM portal blocked dashboard roles
 
 User: *"login failing on live"* (production).

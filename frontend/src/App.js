@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { useEffect } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { TourProvider } from "@/components/tour/TourProvider";
 import { BRAND } from "@/brand.config";
 import "@/App.css";
 
@@ -89,6 +90,7 @@ import LRLocationWise from "@/pages/admin/legacy_reports/LocationWiseCustomers";
 import LRExpiryPoints from "@/pages/admin/legacy_reports/ExpiryPoints";
 import LRActiveCoupons from "@/pages/admin/legacy_reports/ActiveCoupons";
 import StoreOps from "@/pages/store/StoreOps";
+import DemoLanding from "@/pages/public/DemoLanding";
 
 function ProtectedRoute({ children, roles }) {
   const { user, loading } = useAuth();
@@ -115,10 +117,11 @@ function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <Toaster position="top-right" richColors />
-        <Routes>
-          {/* Public site */}
-          <Route element={<PublicLayout />}>
+        <TourProvider>
+          <Toaster position="top-right" richColors />
+          <Routes>
+            {/* Public site */}
+            <Route element={<PublicLayout />}>
             <Route path="/" element={<Home />} />
             <Route path="/about-program" element={<AboutProgram />} />
             <Route path="/loyalty-benefits" element={<LoyaltyBenefits />} />
@@ -138,6 +141,9 @@ function App() {
           <Route path="/enterprise/login" element={<EnterpriseLogin />} />
           <Route path="/store/login" element={<StoreLogin />} />
           <Route path="/crm/login" element={<CRMLogin />} />
+
+          {/* Public self-running product demo */}
+          <Route path="/demo" element={<DemoLanding />} />
 
           {/* Admin */}
           <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
@@ -213,7 +219,8 @@ function App() {
           <Route path="/store" element={<ProtectedRoute roles={["store_manager","store_staff","super_admin","brand_admin"]}><StoreOps /></ProtectedRoute>} />
 
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+          </Routes>
+        </TourProvider>
       </BrowserRouter>
     </AuthProvider>
   );

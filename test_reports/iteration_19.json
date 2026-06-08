@@ -1,0 +1,51 @@
+{
+  "summary": "Tested the Fundle /demo guided-tour feature end-to-end. Backend: 8/9 pytest cases pass (POST /api/demo/session, demo token GET /api/users, write-block 403 on POST /api/users with read-only-demo detail, POST /api/demo/tts caching with X-Cache=HIT on 2nd call returning audio/mpeg, ai/chat read works, super_admin login + GET regression). 1 failure: Fundle Brain's chat (POST /api/ai/chat) does NOT refuse a deactivate request upfront for demo users — it asks for confirmation+reason and says it will proceed. The underlying tool _require_write_role would block the actual mutation, but the spec requires the assistant to refuse explicitly. Frontend: /demo landing renders with 18 tutorial cards and the hero start button, full-tour click auto-logs the demo session and navigates to /admin, demo-caption-card + demo-step-indicator (1/20) + .tour-ring spotlight appear, next/prev/playpause/mute/exit controls all work, section tutorial (play-tutorial-fundle-brain) launches a focused 2-step tour, AND the AI Intelligence Report on Command Center renders real content with no red read-only error.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/ai/chat (deactivate request for demo user)",
+        "issue": "Assistant does not refuse upfront. It replies 'Before I deactivate anyone, I need to confirm... Once you confirm + share the reason, I'll proceed.' instead of saying it is a read-only demo. The underlying _tool_customer_deactivate would still be blocked by _require_write_role, but the chat layer needs a demo-aware system prompt / pre-check so the assistant declines explicitly (per the spec: 'must REFUSE / report it is a read-only demo').",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Admin sidebar nav (rendered during tour)",
+        "issues": [
+          "React hydration warning in console: 'In HTML, <span> cannot be a child of <option>' inside a <select> somewhere under ProtectedRoute. Non-blocking but should be cleaned up."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration19_demo_test.py",
+    "/app/test_reports/pytest/iter19_results.xml"
+  ],
+  "action_items": [
+    "Make Fundle Brain (POST /api/ai/chat) refuse write requests UPFRONT for is_demo users — e.g. inject a demo-aware system message or short-circuit when the requested intent is a mutation, returning a single sentence like 'This is a read-only demo — deactivate/unsubscribe/reactivate are disabled.' Today the tool refuses, but the chat layer still walks the user toward confirming the action.",
+    "Fix the hydration warning '<span> cannot be a child of <option>' by moving the icon/badge out of the <option> element."
+  ],
+  "critical_code_review_comments": [
+    "demo_routes.py is clean: idempotent ensure_demo_user, role/is_demo self-heal, TTS cache via sha256 of model:voice:text with explicit X-Cache header — good.",
+    "auth.get_current_user demo guard correctly returns 403 for write methods, exposes the message containing 'read-only demo' so clients can render a friendly UI, and the allowlist covers /api/demo*, /api/auth/logout, /api/ai/chat*, /api/dashboard/insight, /api/dashboard/drilldown — confirmed working in tests.",
+    "ai_extended_tools._require_write_role blocks is_demo at the tool layer — defense-in-depth is correct. The missing piece is the LLM system-prompt level refusal, which is what the failing test surfaces."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration19_demo_test.py (new)"
+  ],
+  "success_rate": {
+    "backend": "89% (8/9)",
+    "frontend": "100% (all critical demo flows verified: landing, 18 cards, full tour, caption card, step indicator, next/prev/playpause/mute/exit, .tour-ring spotlight, section tutorial, AI Intelligence Report renders without read-only error)"
+  },
+  "test_credentials": "Demo: auto via POST /api/demo/session (no creds needed) — underlying demo@fundle.io / FundleDemo@2026. Super admin: superadmin@fundle.io / Fundle@2026 (portal=crm). Both verified.",
+  "seed_data_creation": "None. Tests use existing seed data; demo account is self-healed by ensure_demo_user. TTS cache entry seeded with TEST_DEMO_NARRATION_iter19 text (idempotent, persisted in tts_cache collection).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test file /app/backend/tests/iteration19_demo_test.py is the regression suite for the demo feature. Run with `REACT_APP_BACKEND_URL=<preview url> pytest backend/tests/iteration19_demo_test.py -v`. The only expected failure is TestDemoAiChat::test_ai_chat_write_refused — it will start passing once the chat layer refuses demo write intents upfront. The TTS cache test should remain stable (writes once, hits forever). Demo session is idempotent so the suite is rerun-safe.",
+  "rca of the issue": "Root cause of the AI write-refusal failure: the demo guard in auth.get_current_user allowlists /api/ai/chat* (so the user can chat read-only) and the per-tool guard _require_write_role only fires when the LLM actually invokes a mutation tool. Between those two layers the LLM is free to engage conversationally with the deactivate request — collecting reason + confirmation — and only when it would call the tool does it get refused. Reproduction: POST /api/ai/chat with demo token, body {\"message\": \"deactivate customer 9266681235\"}; response asks for confirmation instead of refusing. Mitigation: (a) inject a demo-aware system instruction into the chat when user.is_demo, e.g. 'You are running in a READ-ONLY product demo. If the user asks you to deactivate, reactivate, unsubscribe, send a campaign, change settings, or any mutation, REFUSE in one sentence and explain this is a read-only demo. Do NOT ask for confirmation.'; or (b) detect mutation intent server-side before forwarding to the LLM and short-circuit with a canned refusal."
+}

@@ -67,6 +67,22 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User not found")
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="User inactive")
+    # Read-only demo accounts (public product demo): block every write method.
+    # A tiny allowlist keeps the demo session + AI chat + logout working.
+    if user.get("is_demo"):
+        if request.method.upper() not in ("GET", "HEAD", "OPTIONS"):
+            path = request.url.path
+            # Read-style POSTs the demo must keep: session/tts, logout, AI chat,
+            # and the cached AI insight + drill-down (no business-data writes).
+            allowed = (
+                "/api/demo",
+                "/api/auth/logout",
+                "/api/ai/chat",
+                "/api/dashboard/insight",
+                "/api/dashboard/drilldown",
+            )
+            if not any(path.startswith(p) for p in allowed):
+                raise HTTPException(status_code=403, detail="This is a read-only demo account — changes are disabled.")
     return user
 
 
