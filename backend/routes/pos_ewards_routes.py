@@ -193,6 +193,34 @@ def _parse_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _gst_from_taxes(taxes: Any) -> float:
+    """Sum of tax line-items named 'GST' from the POS `taxes` array.
+       KAZO rule: Tax = taxes.amount (against name = 'GST')."""
+    if not isinstance(taxes, list):
+        return 0.0
+    total = 0.0
+    for t in taxes:
+        if isinstance(t, dict) and str(t.get("name", "")).strip().upper() == "GST":
+            total += _parse_float(t.get("amount"))
+    return total
+
+
+def _compute_earn_points(base: float, cfg: Dict[str, Any], multiplier: float = 1.0) -> int:
+    """Points earned for a loyalty `base` amount, honouring the configured earn mode
+       (set from the Loyalty Logic editor):
+         - points_per_spend : base × earn_ratio
+         - percent_of_spend : base × (percent_of_spend / 100)
+       Then × the customer's tier earn multiplier."""
+    if base <= 0:
+        return 0
+    mode = (cfg.get("earn_mode") or "points_per_spend").strip()
+    if mode == "percent_of_spend":
+        rate = _parse_float(cfg.get("percent_of_spend", 0)) / 100.0
+    else:
+        rate = _parse_float(cfg.get("earn_ratio", 1.0))
+    return int(round(base * rate * (multiplier or 1.0)))
+
+
 async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Resolve the store for a bill.
 
@@ -1025,19 +1053,25 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         await customers_col.update_one({"mobile": mobile}, {"$set": customer_doc_update})
         cust = {**existing, **customer_doc_update}
 
-    # Amounts
-    gross = _parse_float(txn.get("gross_amount"))
-    net = _parse_float(txn.get("net_amount") or gross)
-    final_amount = _parse_float(txn.get("amount") or net)
+    # Amounts — KAZO canonical: `amount` is the PRE-TAX loyalty base; GST comes from
+    # the taxes[] array.  Bill Amount (with tax) = amount + GST.
+    amount = _parse_float(txn.get("amount"))
+    tax_gst = _gst_from_taxes(txn.get("taxes"))
+    bill_with_tax = amount + tax_gst
+    # Back-compat for older payloads that send gross/net explicitly
+    gross = _parse_float(txn.get("gross_amount")) or bill_with_tax
+    net = _parse_float(txn.get("net_amount")) or amount
+    final_amount = amount or net
     discount = _parse_float(txn.get("discount"))
     loyalty_flag = str(txn.get("loyalty_flag", "1")).strip() in {"1", "true", "True"}
-    loyalty_gross = _parse_float(txn.get("loyalty_gross_amount") or net)
+    # Points are earned on `amount` (pre-tax). Fall back to loyalty_gross_amount/net for
+    # legacy payloads that don't send `amount`.
+    loyalty_base = amount or _parse_float(txn.get("loyalty_gross_amount")) or net
     order_time = txn.get("order_time") or _now_iso()
 
     # Loyalty engine
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
-    earn_ratio = cfg.get("earn_ratio", 1.0)
-    min_bill_for_earn = cfg.get("min_bill_for_earn", 0)
+    min_bill_for_earn = _parse_float(cfg.get("min_bill_for_earn", 0))
     multiplier = 1.0
     for tr in cfg.get("tier_rules", []) or []:
         if tr.get("tier") == (cust.get("tier") or "silver"):
@@ -1045,8 +1079,8 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             break
 
     points_earned = 0
-    if loyalty_flag and loyalty_gross >= min_bill_for_earn:
-        points_earned = int(round(loyalty_gross * earn_ratio * multiplier))
+    if loyalty_flag and loyalty_base >= min_bill_for_earn:
+        points_earned = _compute_earn_points(loyalty_base, cfg, multiplier)
 
     redemption = txn.get("redemption") or {}
     points_redeemed = _parse_int(redemption.get("redeemed_points"))
@@ -1088,8 +1122,11 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         "discount_amount": discount,
         "net_amount": net,
         "final_amount": final_amount,
-        "loyalty_gross_amount": loyalty_gross,
-        "loyalty_tax_amount": _parse_float(txn.get("loyalty_tax_amount")),
+        "amount": amount,
+        "tax_amount": tax_gst,
+        "bill_with_tax": bill_with_tax,
+        "loyalty_gross_amount": loyalty_base,
+        "loyalty_tax_amount": _parse_float(txn.get("loyalty_tax_amount")) or tax_gst,
         "loyalty_charge_amount": _parse_float(txn.get("loyalty_charge_amount")),
         "items": items,
         "taxes": txn.get("taxes") or [],
@@ -1466,8 +1503,9 @@ async def return_order(payload: Dict[str, Any], request: Request,
     return_gross = _parse_float(txn.get("return_loyalty_gross_amount") or txn.get("return_gross_amount"))
 
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
-    earn_ratio = cfg.get("earn_ratio", 1.0)
-    points_to_reverse = abs(int(round(return_gross * earn_ratio)))
+    # Reverse the same points the bill would have earned for this gross — honour the
+    # configured earn mode (points_per_spend / percent_of_spend) so it stays symmetric.
+    points_to_reverse = abs(_compute_earn_points(abs(return_gross), cfg, 1.0))
 
     # Reverse customer aggregates
     await customers_col.update_one(

@@ -32,6 +32,22 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 40 (Jun 2026) — 🔴 CRITICAL: Sales bills earning 0 points (earn engine fix)
+
+User (Hardik, LIVE): "sales bills not getting points / earn points not working… return bill did deduct points… loyalty rules already configured from the front end." Plus canonical rules: Sales points base = `amount`; Return base = `return_loyalty_gross_amount`; Bill Amount (with tax) = `amount` + `taxes.amount` (name=GST); Tax = `taxes.amount` (name=GST).
+
+**Root cause (2 bugs in `posAddPoint` earn calc):**
+1. Points base read `loyalty_gross_amount`/`net_amount`, which the real KAZO POS does NOT send (it sends the pre-tax base in **`amount`**). Fallback chain resolved to 0 → `points_earned = round(0 × ratio) = 0`. → **every sales bill earned 0 points.**
+2. The engine always used `earn_ratio` and **ignored the configured `earn_mode`** (`points_per_spend` vs `percent_of_spend`) set in the Loyalty Logic editor.
+
+**Fix (`pos_ewards_routes.py`, backend-only):**
+- New `_gst_from_taxes(taxes)` → sums tax entries with name=="GST". New `_compute_earn_points(base, cfg, multiplier)` → honours `earn_mode` (points_per_spend: base×earn_ratio; percent_of_spend: base×percent/100) × tier multiplier.
+- Sales: `amount` is the pre-tax loyalty base (fallback to loyalty_gross_amount/net for legacy payloads); `bill_with_tax = amount + GST`; stored `amount`, `tax_amount`, `bill_with_tax` on the txn; `loyalty_gross_amount = amount`. Points = `_compute_earn_points(amount, cfg, tier_mult)` gated by `loyalty_flag` & `min_bill_for_earn`.
+- Return: keeps `return_loyalty_gross_amount` base, now via the same `_compute_earn_points` (symmetric; no change under current points_per_spend config).
+
+**Verified (curl + unit):** ₹1000 sales bill (GOLD ×1.25, ratio 1) → **1250 pts** (was 0); stored amount=1000, tax_amount=180, bill_with_tax=1180. percent_of_spend 5% → 50; points_per_spend ratio2×1.25 → 2500; GST parse → 180; amount ₹400 < min_bill ₹500 → 0 pts. Lint clean; test data cleaned up. ⚠️ Redeploy required for production.
+
+
 ### Iteration 39 (Jun 2026) — 🐛 Tier delete persistence · 💬 OTP SMS variable · 📅 Live Monitor date range
 
 User (Hardik, on LIVE): (a) deleted Silver/Gold/Platinum/Diamond/Founders tiers kept reappearing in Loyalty Logic; (b) "Need otp variable in SMS"; (c) "Live Monitor needs a date range filter — date range filter should be everywhere in every report."
