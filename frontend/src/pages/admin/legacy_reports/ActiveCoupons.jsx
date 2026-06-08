@@ -1,5 +1,5 @@
 /* Active Coupon Report */
-import { LegacyReportShell, useReportParams } from "./_shell";
+import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
 import { fmtNum } from "@/lib/format";
 
 const cols = [
@@ -24,6 +24,7 @@ export default function ActiveCoupons() {
       endpoint="/legacy-reports/active-coupons"
       paramsState={ps}
       filters={<>
+        <DatePair paramsState={ps} />
         <div>
           <label className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-1 block">Code prefix</label>
           <input value={ps.params.code_prefix || ""} onChange={(e) => ps.set("code_prefix", e.target.value)} className="k-input" />

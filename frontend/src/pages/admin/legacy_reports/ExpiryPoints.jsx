@@ -1,5 +1,5 @@
 /* Expiry Points Report */
-import { LegacyReportShell, useReportParams } from "./_shell";
+import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
 import { fmtNum } from "@/lib/format";
 
 const cols = [
@@ -22,6 +22,7 @@ export default function ExpiryPoints() {
       endpoint="/legacy-reports/expiry-points"
       paramsState={ps}
       filters={<>
+        <DatePair paramsState={ps} />
         <div>
           <label className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-1 block">Days ahead</label>
           <input type="number" min={1} max={365} value={ps.params.days_ahead || 60} onChange={(e) => ps.set("days_ahead", parseInt(e.target.value) || 60)} className="k-input w-24" data-testid="lr-ep-days" />

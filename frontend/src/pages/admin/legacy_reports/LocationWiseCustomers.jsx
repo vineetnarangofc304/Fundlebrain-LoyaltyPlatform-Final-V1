@@ -1,5 +1,5 @@
 /* Location Wise Customer Report */
-import { LegacyReportShell, useReportParams } from "./_shell";
+import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
 import { fmtINR, fmtNum } from "@/lib/format";
 
 const cols = [
@@ -23,6 +23,7 @@ export default function LocationWiseCustomers() {
       endpoint="/legacy-reports/location-wise-customers"
       paramsState={ps}
       filters={<>
+        <DatePair paramsState={ps} />
         <div>
           <label className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-1 block">State</label>
           <input value={ps.params.state || ""} onChange={(e) => ps.set("state", e.target.value)} className="k-input" />

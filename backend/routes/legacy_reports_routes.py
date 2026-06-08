@@ -174,6 +174,8 @@ async def repeat_customers_report(
     state: Optional[str] = None,
     zone: Optional[str] = None,
     min_visits: int = 2,
+    start_date: Optional[str] = None,  # last visit between
+    end_date: Optional[str] = None,
     limit: int = Query(100, le=1000),
     offset: int = 0,
     export: Optional[str] = None,
@@ -183,6 +185,7 @@ async def repeat_customers_report(
     locf = await _location_filter(location_id, city, state, zone)
     if locf.get("store_id"):
         fil["home_store_id"] = locf["store_id"]
+    fil.update(_date_filter(start_date, end_date, "last_visit_at"))
 
     total = await customers_col.count_documents(fil)
     rows = await customers_col.find(fil, {"_id": 0}).sort("visit_count", -1).skip(offset).limit(limit).to_list(limit)
@@ -204,6 +207,8 @@ async def top_customers_report(
     state: Optional[str] = None,
     zone: Optional[str] = None,
     tier: Optional[str] = None,
+    start_date: Optional[str] = None,  # last visit between
+    end_date: Optional[str] = None,
     limit: int = Query(50, le=500),
     export: Optional[str] = None,
     user: dict = Depends(get_current_user),
@@ -214,6 +219,7 @@ async def top_customers_report(
         fil["home_store_id"] = locf["store_id"]
     if tier:
         fil["tier"] = tier
+    fil.update(_date_filter(start_date, end_date, "last_visit_at"))
 
     sort_field = {"purchase": "lifetime_spend", "visits": "visit_count", "points": "points_balance"}.get(by, "lifetime_spend")
     rows = await customers_col.find(fil, {"_id": 0}).sort(sort_field, -1).limit(limit).to_list(limit)
@@ -382,11 +388,15 @@ async def missed_calls_report(
 async def location_wise_customers_report(
     state: Optional[str] = None,
     zone: Optional[str] = None,
+    start_date: Optional[str] = None,  # last visit between
+    end_date: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     """Customer counts grouped by home_store_id."""
+    match: Dict[str, Any] = {"home_store_id": {"$exists": True, "$ne": None}}
+    match.update(_date_filter(start_date, end_date, "last_visit_at"))
     pipeline = [
-        {"$match": {"home_store_id": {"$exists": True, "$ne": None}}},
+        {"$match": match},
         {"$group": {"_id": "$home_store_id", "customer_count": {"$sum": 1},
                     "lifetime_spend": {"$sum": "$lifetime_spend"},
                     "total_visits": {"$sum": "$visit_count"}}},
@@ -421,6 +431,8 @@ async def expiry_points_report(
     days_ahead: int = Query(60, ge=1, le=365),
     location_id: Optional[str] = None,
     tier: Optional[str] = None,
+    start_date: Optional[str] = None,  # expiry window override
+    end_date: Optional[str] = None,
     limit: int = Query(500, le=2000),
     export: Optional[str] = None,
     user: dict = Depends(get_current_user),
@@ -428,15 +440,20 @@ async def expiry_points_report(
     """List customers whose points will expire within N days.
 
     Uses points_ledger entries with expires_at <= now + days_ahead and not yet expired.
+    When start_date/end_date are supplied they override the relative window and match
+    points expiring inside that explicit date range.
     """
     now = datetime.now(timezone.utc)
-    cutoff = (now + timedelta(days=days_ahead)).isoformat()
-    now_iso = now.isoformat()
+    if start_date and end_date:
+        expiry_match = {"$gte": start_date, "$lte": end_date + "T23:59:59Z"}
+    else:
+        cutoff = (now + timedelta(days=days_ahead)).isoformat()
+        expiry_match = {"$lte": cutoff, "$gte": now.isoformat()}
 
     pipeline = [
         {"$match": {
             "kind": {"$in": ["earn", "bonus"]},
-            "expires_at": {"$exists": True, "$ne": None, "$lte": cutoff, "$gte": now_iso},
+            "expires_at": {"$exists": True, "$ne": None, **expiry_match},
             "reversed": {"$ne": True},
         }},
         {"$group": {
@@ -486,6 +503,8 @@ async def active_coupons_report(
     code_prefix: Optional[str] = None,
     customer_mobile: Optional[str] = None,
     expiring_within_days: Optional[int] = None,
+    start_date: Optional[str] = None,  # issued between
+    end_date: Optional[str] = None,
     limit: int = Query(500, le=2000),
     export: Optional[str] = None,
     user: dict = Depends(get_current_user),
@@ -500,6 +519,7 @@ async def active_coupons_report(
     if expiring_within_days:
         cutoff = (datetime.now(timezone.utc) + timedelta(days=expiring_within_days)).isoformat()
         fil["valid_to"] = {"$lte": cutoff}
+    fil.update(_date_filter(start_date, end_date, "created_at"))
 
     total = await coupons_col.count_documents(fil)
     rows = await coupons_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)

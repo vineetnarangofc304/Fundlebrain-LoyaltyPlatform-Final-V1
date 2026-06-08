@@ -1448,55 +1448,41 @@ async def return_order(payload: Dict[str, Any], request: Request,
     mobile = _norm_mobile(payload.get("mobile"))
     txn = payload.get("transaction") or {}
     orig_bill = (txn.get("number") or txn.get("BILL_GUID") or "").strip()
-    if not mobile or not orig_bill:
-        resp = _err(400, "Required fields are missing", {"order_id": 0})
+    # Mobile is the canonical loyalty identifier. The original bill number is no
+    # longer a hard requirement — the POS may issue a return before the original
+    # bill has synced to Fundle, so we never reject solely on a missing/unknown bill.
+    if not mobile:
+        resp = _err(400, "Required fields are missing (mobile is required for a loyalty return)", {"order_id": 0})
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
                        bill_number=orig_bill, payload=payload, response=resp,
                        api_key_label=cred.get("label"))
         return resp
 
-    original = await transactions_col.find_one({"bill_number": orig_bill}, {"_id": 0})
-    if not original:
-        resp = _err(400, "Original bill not found", {"order_id": 0})
-        await _log_api(endpoint=endpoint, method="POST", status=400,
-                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                       bill_number=orig_bill, payload=payload, response=resp,
-                       api_key_label=cred.get("label"))
-        return resp
-    if original.get("customer_mobile") is None or original.get("customer_mobile") == "":
-        # Anonymous walk-in bill (no customer was attached at sale time) — can't
-        # be returned via the loyalty flow because there are no points / loyalty
-        # spend to reverse against any customer.
-        resp = _err(400,
-                     "Original bill is an anonymous walk-in (no loyalty customer was "
-                     "attached at sale time). Return through the standard POS refund "
-                     "flow instead.",
-                     {"order_id": 0})
-        await _log_api(endpoint=endpoint, method="POST", status=400,
-                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                       bill_number=orig_bill, error="anonymous bill", payload=payload,
-                       response=resp, api_key_label=cred.get("label"))
-        return resp
+    # Best-effort lookup of the original bill — used only to enrich the return with
+    # the original store/customer link. Its absence does NOT block the return.
+    original = None
+    if orig_bill:
+        original = await transactions_col.find_one({"bill_number": orig_bill}, {"_id": 0})
 
-    stored_mobile = _norm_mobile(original.get("customer_mobile"))
-    if stored_mobile != mobile:
-        # Normalize-then-compare. If still mismatched, the bill genuinely belongs
-        # to a different customer. Echo the last 4 digits of the stored mobile so
-        # the POS team can self-diagnose (full mobile is masked for privacy).
-        stored_masked = ("******" + stored_mobile[-4:]) if stored_mobile else "<empty>"
+    # Resolve the customer by mobile (canonical). Fall back to the original bill's
+    # customer when the mobile master hasn't been populated yet.
+    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    if not cust and mobile.isdigit():
+        cust = await customers_col.find_one({"mobile": int(mobile)}, {"_id": 0})
+    if not cust and original and original.get("customer_id"):
+        cust = await customers_col.find_one({"id": original["customer_id"]}, {"_id": 0})
+    if not cust:
         resp = _err(400,
-                     f"Incorrect Mobile Number — this bill is registered to "
-                     f"{stored_masked}, not {('******' + mobile[-4:]) if mobile else '<empty>'}. "
-                     f"Please re-initiate the return with the correct customer mobile.",
+                     f"No loyalty customer found for mobile ******{mobile[-4:]}. "
+                     f"Cannot process a loyalty return for an unregistered customer.",
                      {"order_id": 0})
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                       bill_number=orig_bill,
-                       error=f"mobile mismatch: bill={stored_mobile} req={mobile}",
-                       payload=payload, response=resp,
-                       api_key_label=cred.get("label"))
+                       bill_number=orig_bill, error="customer not found",
+                       payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
+    customer_id = cust["id"]
 
     return_amount = _parse_float(txn.get("return_amount"))  # negative figure
     return_net = _parse_float(txn.get("return_net_amount"))
@@ -1509,7 +1495,7 @@ async def return_order(payload: Dict[str, Any], request: Request,
 
     # Reverse customer aggregates
     await customers_col.update_one(
-        {"id": original["customer_id"]},
+        {"id": customer_id},
         {"$inc": {
             "points_balance": -points_to_reverse,
             "lifetime_points_earned": -points_to_reverse,
@@ -1520,12 +1506,12 @@ async def return_order(payload: Dict[str, Any], request: Request,
     return_id = uuid.uuid4().hex
     await transactions_col.insert_one({
         "id": return_id,
-        "customer_id": original["customer_id"],
+        "customer_id": customer_id,
         "customer_mobile": mobile,
-        "store_id": original.get("store_id"),
-        "store_name": original.get("store_name"),
-        "bill_number": f"RET-{orig_bill}-{uuid.uuid4().hex[:6]}",
-        "original_bill_number": orig_bill,
+        "store_id": (original or {}).get("store_id"),
+        "store_name": (original or {}).get("store_name"),
+        "bill_number": f"RET-{orig_bill or 'NOBILL'}-{uuid.uuid4().hex[:6]}",
+        "original_bill_number": orig_bill or None,
         "bill_date": _now_iso(),
         "gross_amount": return_gross,
         "net_amount": return_net,
@@ -1539,19 +1525,19 @@ async def return_order(payload: Dict[str, Any], request: Request,
     })
     await points_ledger_col.insert_one({
         "id": uuid.uuid4().hex,
-        "customer_id": original["customer_id"],
+        "customer_id": customer_id,
         "type": "adjust",
         "points": -points_to_reverse,
         "reference_type": "return",
         "reference_id": return_id,
-        "note": f"Return of bill {orig_bill}",
+        "note": f"Return of bill {orig_bill}" if orig_bill else "Return (no original bill ref)",
         "created_at": _now_iso(),
     })
     resp = _ok({"message": "Transaction details captured by Fundle successfully",
                 "order_id": return_id})
     await _log_api(endpoint=endpoint, method="POST", status=200,
                    ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                   bill_number=orig_bill, store_id=original.get("store_id"),
+                   bill_number=orig_bill, store_id=(original or {}).get("store_id"),
                    payload=payload, response=resp, api_key_label=cred.get("label"))
     return resp
 

@@ -1,5 +1,5 @@
 /* Top Customers Report */
-import { LegacyReportShell, useReportParams } from "./_shell";
+import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
 import { fmtINR, fmtNum } from "@/lib/format";
 
 const cols = [
@@ -22,6 +22,7 @@ export default function TopCustomers() {
       endpoint="/legacy-reports/top-customers"
       paramsState={ps}
       filters={<>
+        <DatePair paramsState={ps} />
         <div>
           <label className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-1 block">Sort by</label>
           <select value={ps.params.by} onChange={(e) => ps.set("by", e.target.value)} className="k-input">

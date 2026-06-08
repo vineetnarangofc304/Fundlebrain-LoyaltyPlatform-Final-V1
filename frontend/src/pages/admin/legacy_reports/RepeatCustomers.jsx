@@ -1,5 +1,5 @@
 /* Repeat Customers Report — customers with >=N visits */
-import { LegacyReportShell, useReportParams } from "./_shell";
+import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
 import { fmtINR, fmtNum } from "@/lib/format";
 
 const cols = [
@@ -22,6 +22,7 @@ export default function RepeatCustomers() {
       endpoint="/legacy-reports/repeat-customers"
       paramsState={ps}
       filters={<>
+        <DatePair paramsState={ps} />
         <div>
           <label className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-1 block">Min visits</label>
           <input type="number" min={2} value={ps.params.min_visits || 2} onChange={(e) => ps.set("min_visits", parseInt(e.target.value) || 2)} className="k-input w-24" />

@@ -32,6 +32,17 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 42 (Jun 2026) — 🔁 returnOrder: drop bill-number requirement · 📅 Legacy Reports date filters
+
+User: "In returnOrder API, We don't need to check bill number." + earlier "date range filter was to be everywhere in every report" (only Live Monitor had it).
+
+**1) returnOrder no longer requires the original bill (`pos_ewards_routes.py::return_order`).** Mobile is now the canonical identifier. Flow: (a) **mobile required** (400 if missing); (b) original bill looked up **best-effort** only to enrich store/customer link — its absence no longer rejects; (c) customer resolved by mobile (then int-mobile, then original bill's customer_id); 400 only if **no registered loyalty customer** found; (d) points reversed via `_compute_earn_points(return_loyalty_gross_amount)` honouring earn mode; customer `points_balance`/`lifetime_points_earned`/`lifetime_spend` decremented; return txn (`is_return`, `original_bill_number` nullable, `bill_number=RET-{bill|NOBILL}-…`) + `points_ledger` adjust entry written. Removed: hard bill-not-found reject, anonymous-bill reject, mobile-mismatch-vs-bill reject.
+
+**2) Date-range filter rolled out to remaining Legacy Reports.** Backend `legacy_reports_routes.py` added `start_date`/`end_date` to: repeat-customers & top-customers & location-wise-customers (filter `last_visit_at`), active-coupons (filter `created_at`), expiry-points (overrides the days_ahead window → matches `expires_at` in range). Frontend: wired the shared `<DatePair>` into all 5 pages (ActiveCoupons, ExpiryPoints, LocationWiseCustomers, RepeatCustomers, TopCustomers). The other LR pages already had it.
+
+**Verified (curl + pytest + screenshot):** `tests/iteration22_return_order_nobill_legacy_datefilter_test.py` 15/15 pass. returnOrder: no-bill → 200 + balance 500→350 over two returns; unknown bill → 200 (mobile fallback); unregistered mobile → 400; missing mobile → 400. Legacy reports: all 5 accept date filters + no-filter regression intact (location-wise 12 rows, repeat 7); future-window narrows to 0. Top Customers page renders Start/End date pickers. Test data cleaned + customer restored. ⚠️ Redeploy required for production.
+
+
 ### Iteration 41 (Jun 2026) — 📊 Live Monitor: Pts-Base/Tax/Discount columns + 🔁 Recalculate-points backfill
 
 User (LIVE): "two previous transactions on live monitor… pls give points"; "in live monitor show also Amount on which u r calculating points and add a tax discount column."
