@@ -286,6 +286,13 @@ def _make_store_code(name: str) -> str:
     return f"K{base}"
 
 
+def _norm_store_name(name: str) -> str:
+    """Normalise an outlet name for robust matching against the Store Master
+    (lowercase, collapse whitespace, drop punctuation) so minor formatting
+    differences between the Billing Report and the Store Master still align."""
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+
+
 def _map_item_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     # Accept common KAZO column variants for SKU
     sku = (
@@ -689,30 +696,41 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                 # merchant_id for POS-combo alignment so live POS bills land on the same store
                 _cred = await db["pos_credentials"].find_one({"is_active": True}, {"_id": 0, "merchant_id": 1})
                 _merchant = (_cred or {}).get("merchant_id") or "KAZO_FUNDLE"
+                # Preload the already-uploaded Store Master once so historical bills MERGE
+                # onto existing stores (by K-code, else by normalised outlet name) rather
+                # than spawning duplicates that wouldn't align with live POS.
+                by_code: Dict[str, str] = {}
+                by_norm_name: Dict[str, str] = {}
+                async for s in stores_col.find({}, {"_id": 0, "id": 1, "code": 1, "name": 1}):
+                    if s.get("code"):
+                        by_code[str(s["code"]).strip()] = s["id"]
+                    if s.get("name"):
+                        by_norm_name[_norm_store_name(s["name"])] = s["id"]
                 for cache_key, meta in store_cache.items():
                     code = (meta.get("code") or "").strip() or None
                     name = (meta.get("name") or "").strip() or None
                     if not code and not name:
                         continue
                     try:
-                        existing = None
-                        if code:
-                            existing = await stores_col.find_one({"code": code}, {"_id": 0, "id": 1})
-                        if not existing and name:
-                            existing = await stores_col.find_one({"name": name}, {"_id": 0, "id": 1})
-                        if existing:
-                            meta["id"] = existing["id"]
+                        existing_id = None
+                        if code and code in by_code:
+                            existing_id = by_code[code]
+                        if not existing_id and name:
+                            existing_id = by_norm_name.get(_norm_store_name(name))
+                        if existing_id:
+                            meta["id"] = existing_id
                             if code:
                                 # Tag the K-code + POS combo onto the existing store
                                 await stores_col.update_one(
-                                    {"id": existing["id"]},
+                                    {"id": existing_id},
                                     {"$set": {"code": code, "pos_customer_key": code,
                                               "pos_merchant_id": _merchant}})
                         else:
                             sid = uuid.uuid4().hex
+                            new_code = code or _make_store_code(name)
                             store_doc = {
                                 "id": sid,
-                                "code": code or _make_store_code(name),
+                                "code": new_code,
                                 "name": name or code,
                                 "city": meta.get("city") or "",
                                 "state": "",
@@ -728,6 +746,9 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                 store_doc["pos_merchant_id"] = _merchant
                             await stores_col.insert_one(store_doc)
                             meta["id"] = sid
+                            by_code[new_code] = sid
+                            if name:
+                                by_norm_name[_norm_store_name(name)] = sid
                         store_links[cache_key] = meta["id"]
                     except Exception as se:
                         logger.warning(f"Could not create/find store '{meta.get('code') or meta.get('name')}': {se}")

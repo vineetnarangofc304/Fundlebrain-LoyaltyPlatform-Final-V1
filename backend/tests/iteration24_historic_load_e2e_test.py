@@ -148,3 +148,57 @@ def test_full_historic_load(headers):
     rows = er.json().get("rows", [])
     mobiles = {str(r.get("customer_mobile") or r.get("mobile")) for r in rows}
     assert M1 in mobiles, f"expiring opening balance for {M1} not in expiry report"
+
+
+# --- store name-match: Billing Report carries the OUTLET NAME (no K-code); it must
+#     MERGE onto the already-uploaded Store Master by normalised name, not duplicate. ---
+M3 = "9000001003"
+EXISTING_STORE_CODE = "KZEXIST9"
+EXISTING_STORE_NAME = "ZZ Test Plaza, Testville Outlet"
+BILLING_NAME_ONLY_CSV = (
+    "Date,Customer Mobile Number,Customer Name,Outlet(Only For Shopify Marker),"
+    "Transaction Id,Bill Number,Zone Name,City,Time,Net Amount Before Tax,Tax Total,"
+    "Discount,Total Revenue KAZO,Total Billing KAZO\n"
+    # NOTE: outlet name differs in case/spacing/punctuation from the Store Master on purpose
+    f"10-06-2026 11:00,{M3},Test Gamma,zz test  plaza  testville outlet,TXNKZ3,BILLKZ3,East,"
+    "Testville,11:00:00,5000,250,0,5250,5250\n"
+)
+
+
+def test_billing_outlet_name_merges_onto_existing_store(headers):
+    db = _mongo()
+
+    async def seed():
+        db = _mongo()
+        await db["stores"].delete_many({"code": EXISTING_STORE_CODE})
+        await db["stores"].insert_one({
+            "id": "store-exist-9", "code": EXISTING_STORE_CODE, "name": EXISTING_STORE_NAME,
+            "city": "Guwahati", "is_active": True, "source": "store_master_test",
+            "pos_customer_key": EXISTING_STORE_CODE, "pos_merchant_id": "KAZO_FUNDLE",
+        })
+    asyncio.run(seed())
+
+    try:
+        job = _ingest(headers, BILLING_NAME_ONLY_CSV, "transactions", "Billing_NameOnly.csv")
+        assert job["status"] == "completed", job
+
+        async def verify():
+            db = _mongo()
+            t = await db["transactions"].find_one({"bill_number": "BILLKZ3"}, {"_id": 0})
+            assert t, "transaction not created"
+            # must have merged onto the existing store (matched by normalised name)
+            assert t["store_id"] == "store-exist-9", (t.get("store_id"), t.get("store_name"))
+            # no duplicate store created for this outlet
+            cnt = await db["stores"].count_documents(
+                {"name": {"$regex": "testville", "$options": "i"}, "source": "historic_upload"})
+            assert cnt == 0, f"duplicate store created ({cnt})"
+        asyncio.run(verify())
+    finally:
+        async def clean():
+            db = _mongo()
+            await db["transactions"].delete_many({"customer_mobile": M3})
+            await db["customers"].delete_many({"mobile": M3})
+            await db["points_ledger"].delete_many({"customer_mobile": M3})
+            await db["stores"].delete_many({"code": EXISTING_STORE_CODE})
+        asyncio.run(clean())
+
