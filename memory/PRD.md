@@ -31,6 +31,16 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### Iteration 34 (Jun 2026) — 🔐 Login failing on live — CRM portal blocked dashboard roles
+
+User: *"login failing on live"* (production).
+
+**Root cause**: `routes/auth_routes.py` login portal-gating allowed the CRM portal only for `{crm_manager, support_agent, super_admin, brand_admin}`. But the app already defines `ALL_DASHBOARD_ROLES` (super_admin, brand_admin, crm_manager, marketing_manager, regional_manager, store_manager, analytics_viewer, readonly_executive, support_agent) as the set meant to use the dashboard. So active production accounts `marketing@kazo.com`, `analytics@kazo.com`, `executive@kazo.com`, `regional.north@kazo.com` (and analytics_viewer test users) hit `403 "This account cannot access the CRM portal"`. Backend auth + superadmin login were fine (verified prod returns 200 for super_admin), which is why it looked intermittent.
+
+**Fix**: CRM portal gate now uses `ALL_DASHBOARD_ROLES`; store portal uses store roles + admins. bcrypt / JWT / cookie unchanged (authorization-only fix, confirmed against the custom-JWT playbook).
+
+**Verified on preview**: marketing_manager CRM login 403→**200**; super_admin 200; wrong password 401; store_staff still 403 on CRM but 200 on Store portal. Lint clean. ⚠️ **Redeploy required** for production. Immediate workaround on live: log in with a super_admin/brand_admin account (superadmin@fundle.io, admin@kazo.com, it@kazo.com).
+
 ### Iteration 33 (Jun 2026) — 📥 Real KAZO data ingestion alignment (Customer / Billwise / SKU-wise)
 
 Client shared the real export headers (Customer_Master_Data, Kazo_Billwise_Data, Kazo_SKU_Master_Data) to load years of history via the Historical Upload UI. Aligned the parser to all three formats. *"The store code is referred to as Customer_Key, which is a combination of merchant_id and customer_key."*

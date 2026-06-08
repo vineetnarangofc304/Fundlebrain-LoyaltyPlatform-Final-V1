@@ -3,9 +3,15 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from database import users_col
 from models import LoginRequest, LoginResponse, User
-from auth import verify_password, create_token, get_current_user, log_audit
+from auth import verify_password, create_token, get_current_user, log_audit, ALL_DASHBOARD_ROLES
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Portal access policy.
+# CRM portal == the admin/analytics dashboard → every dashboard-capable role may enter.
+# Store portal == in-store ops → store roles + admins.
+_CRM_PORTAL_ROLES = {r.value for r in ALL_DASHBOARD_ROLES}
+_STORE_PORTAL_ROLES = {"store_manager", "store_staff", "super_admin", "brand_admin"}
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -16,11 +22,11 @@ async def login(req: LoginRequest, request: Request, response: Response):
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Account is deactivated")
 
-    # Portal-based role gating (light): store portal only allows store roles, crm only crm
+    # Portal-based role gating: store portal = store ops, crm portal = admin dashboard
     role = user["role"]
-    if req.portal == "store" and role not in ("store_manager", "store_staff", "super_admin", "brand_admin"):
+    if req.portal == "store" and role not in _STORE_PORTAL_ROLES:
         raise HTTPException(status_code=403, detail="This account cannot access the Store portal")
-    if req.portal == "crm" and role not in ("crm_manager", "support_agent", "super_admin", "brand_admin"):
+    if req.portal == "crm" and role not in _CRM_PORTAL_ROLES:
         raise HTTPException(status_code=403, detail="This account cannot access the CRM portal")
 
     token = create_token(user["id"], user["role"], user["email"])
