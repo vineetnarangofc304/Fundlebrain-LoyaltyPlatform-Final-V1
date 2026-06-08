@@ -245,6 +245,16 @@ def _loyalty_paused(cfg: Dict[str, Any], kind: str, when_iso: Optional[str] = No
     return False, ""
 
 
+def _expiry_iso(when: Optional[str], days: int) -> str:
+    """Expiry timestamp = transaction time + `days`. Live POS points expire 1 year
+    (point_expiry_days) from the bill/transaction date."""
+    try:
+        base = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+    except Exception:
+        base = datetime.now(timezone.utc)
+    return (base + timedelta(days=int(days or 365))).isoformat()
+
+
 async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Resolve the store for a bill.
 
@@ -1211,27 +1221,33 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         }},
     )
 
-    # Ledger entries
+    # Ledger entries — live POS points expire `point_expiry_days` (default 365)
+    # from the bill/transaction date.
+    earn_expiry = _expiry_iso(order_time, int(cfg.get("point_expiry_days", 365) or 365))
     if points_earned > 0:
         await points_ledger_col.insert_one({
             "id": uuid.uuid4().hex,
             "customer_id": cust["id"],
+            "customer_mobile": mobile,
             "type": "earn",
             "points": points_earned,
             "reference_type": "transaction",
             "reference_id": txn_id,
             "note": f"Bill {bill_number}",
+            "expires_at": earn_expiry,
             "created_at": _now_iso(),
         })
     if upgrade_bonus_points > 0:
         await points_ledger_col.insert_one({
             "id": uuid.uuid4().hex,
             "customer_id": cust["id"],
+            "customer_mobile": mobile,
             "type": "bonus",
             "points": upgrade_bonus_points,
             "reference_type": "tier_upgrade",
             "reference_id": txn_id,
             "note": f"Tier upgrade bonus: {old_tier} → {new_tier}",
+            "expires_at": earn_expiry,
             "created_at": _now_iso(),
         })
     if points_redeemed > 0:
@@ -1240,6 +1256,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         await points_ledger_col.insert_one({
             "id": uuid.uuid4().hex,
             "customer_id": cust["id"],
+            "customer_mobile": mobile,
             "type": "redeem",
             "points": -points_redeemed,
             "reference_type": "transaction",

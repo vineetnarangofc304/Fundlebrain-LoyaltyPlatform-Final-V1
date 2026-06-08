@@ -223,7 +223,7 @@ export default function HistoricDataPage() {
               ) : (
                 <>
                   <div className="text-sm font-medium">Drop your CSV here or click to browse</div>
-                  <div className="text-[11px] text-neutral-500 mt-1">Max 250 MB · UTF-8 · uploaded in 1.5 MB chunks</div>
+                  <div className="text-[11px] text-neutral-500 mt-1">Max 350 MB · UTF-8 · uploaded in 1.5 MB chunks</div>
                 </>
               )}
             </div>

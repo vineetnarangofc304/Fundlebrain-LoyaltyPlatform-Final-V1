@@ -34,11 +34,15 @@ export const fmtPct = (n, digits = 1) => {
   return `${Number(n).toFixed(digits)}%`;
 };
 
+// All date/time rendering is forced to IST (Asia/Kolkata) so the platform shows
+// Indian Standard Time regardless of the viewer's machine timezone.
+const IST_TZ = "Asia/Kolkata";
+
 export const fmtDate = (s) => {
   if (!s) return "—";
   try {
     const d = new Date(s);
-    return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: IST_TZ });
   } catch { return s; }
 };
 
@@ -46,7 +50,7 @@ export const fmtDateTime = (s) => {
   if (!s) return "—";
   try {
     const d = new Date(s);
-    return d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: IST_TZ });
   } catch { return s; }
 };
 

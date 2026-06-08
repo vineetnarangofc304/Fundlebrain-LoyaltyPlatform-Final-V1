@@ -275,7 +275,7 @@ async def fraud_report(
 
     # Large single redemption (>10000)
     async for r in points_ledger_col.find(
-        {"kind": {"$in": ["redeem", "redemption"]}, "points": {"$lte": -10000}},
+        {"type": {"$in": ["redeem", "redemption"]}, "points": {"$lte": -10000}},
         {"_id": 0},
     ).sort("created_at", -1).limit(50):
         flags.append({
@@ -452,7 +452,7 @@ async def expiry_points_report(
 
     pipeline = [
         {"$match": {
-            "kind": {"$in": ["earn", "bonus"]},
+            "type": {"$in": ["earn", "bonus", "opening"]},
             "expires_at": {"$exists": True, "$ne": None, **expiry_match},
             "reversed": {"$ne": True},
         }},

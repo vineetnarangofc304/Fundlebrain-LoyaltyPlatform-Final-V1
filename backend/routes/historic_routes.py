@@ -42,7 +42,13 @@ historic_chunks_col = db["historic_chunks"]  # shared chunk store (works across 
 historic_skipped_col = db["historic_skipped_rows"]  # every parser rejection — reconcilable
 
 CHUNK_SIZE = 500
-MAX_FILE_BYTES = 250 * 1024 * 1024  # 250 MB (chunked uploads bypass proxy limits)
+MAX_FILE_BYTES = 350 * 1024 * 1024  # 350 MB (chunked uploads bypass proxy limits)
+
+# Indian Standard Time + the fixed validity for all historically-loaded opening
+# balances. Per the launch rule, every customer's loaded point balance is valid
+# until end-of-day 31 Dec 2026 IST. Stored as UTC for clean lexical comparison.
+IST = timezone(timedelta(hours=5, minutes=30))
+OPENING_BALANCE_EXPIRY_ISO = datetime(2026, 12, 31, 23, 59, 59, tzinfo=IST).astimezone(timezone.utc).isoformat()
 MAX_ERROR_SAMPLES = 25  # for the in-job samples (UI preview); full set lives in historic_skipped_col
 SKIPPED_PERSIST_CAP = 1_000_000  # safety cap on skipped-rows write per job
 ALLOWED_DATASETS = {"customers", "transactions", "stores", "items", "points_ledger", "sku_transactions"}
@@ -491,7 +497,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     # Use bulk upsert for customers (by mobile)
                     from pymongo import UpdateOne
                     ops = [UpdateOne({"mobile": d["mobile"]},
-                                      {"$set": d, "$setOnInsert": {
+                                      {"$set": {**d, "ingest_job_id": job_id}, "$setOnInsert": {
                                           "id": uuid.uuid4().hex,
                                           "created_at": now(),
                                       }},
@@ -792,6 +798,17 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
             except Exception as cae:
                 logger.exception(f"Customer aggregate recompute failed: {cae}")
 
+        # =====================================================
+        # Opening-balance ledger — for the customer (CRM) dataset, write one
+        # 'opening' ledger entry per customer (= their current point balance)
+        # expiring 31 Dec 2026 IST, so the Expiry report reflects the launch rule.
+        # =====================================================
+        if dataset == "customers" and not dry_run:
+            try:
+                await _write_opening_balance_ledger_for_job(job_id)
+            except Exception as obe:
+                logger.exception(f"Opening-balance ledger post-pass failed: {obe}")
+
         final = {
             "status": "completed" if not dry_run else "previewed",
             "completed_at": now(),
@@ -999,6 +1016,59 @@ async def _write_ledger_for_job(job_id: str) -> Dict[str, int]:
             logger.warning(f"Ledger bulk insert (final) partial failure: {e}")
     logger.info(f"Wrote points-ledger entries for job {job_id}: {counts}")
     return counts
+
+
+async def _write_opening_balance_ledger_for_job(job_id: str) -> int:
+    """For every customer loaded by this CRM/customer job with a positive current
+    point balance, write a single 'opening' points-ledger entry (= their balance)
+    expiring at OPENING_BALANCE_EXPIRY_ISO (31 Dec 2026 IST).
+
+    Idempotent per mobile (keyed on customer_mobile + reference_type), so re-uploads
+    update rather than duplicate. Live POS points (from posAddPoint) carry their own
+    1-year-from-bill-date expiry and are unaffected by this.
+    """
+    from pymongo import UpdateOne
+    cursor = customers_col.find(
+        {"ingest_job_id": job_id, "points_balance": {"$gt": 0}},
+        {"_id": 0, "id": 1, "mobile": 1, "points_balance": 1},
+    )
+    ops: List[Any] = []
+    written = 0
+    BATCH = 1000
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async for c in cursor:
+        bal = int(c.get("points_balance") or 0)
+        if bal <= 0:
+            continue
+        key = {"customer_mobile": c["mobile"], "reference_type": "opening_balance"}
+        doc = {
+            "customer_id": c.get("id"),
+            "customer_mobile": c["mobile"],
+            "type": "opening",
+            "points": bal,
+            "reference_type": "opening_balance",
+            "expires_at": OPENING_BALANCE_EXPIRY_ISO,
+            "reason": "Opening balance (historic load) — valid till 31 Dec 2026",
+            "source": "historic_upload",
+            "created_at": now_iso,
+        }
+        ops.append(UpdateOne(key, {"$set": doc, "$setOnInsert": {"id": uuid.uuid4().hex}}, upsert=True))
+        if len(ops) >= BATCH:
+            try:
+                res = await points_ledger_col.bulk_write(ops, ordered=False)
+                written += res.upserted_count + res.modified_count
+            except Exception as e:
+                logger.warning(f"Opening-balance ledger batch failed: {e}")
+            ops.clear()
+    if ops:
+        try:
+            res = await points_ledger_col.bulk_write(ops, ordered=False)
+            written += res.upserted_count + res.modified_count
+        except Exception as e:
+            logger.warning(f"Opening-balance ledger final batch failed: {e}")
+    logger.info(f"Opening-balance ledger entries written for job {job_id}: {written}")
+    return written
+
 
 
 async def _recompute_customer_aggregates(job_id: str) -> int:
