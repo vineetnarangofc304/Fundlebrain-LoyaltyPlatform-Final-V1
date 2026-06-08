@@ -32,6 +32,19 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 37 (Jun 2026) — 🏬 Store Master UX: S.No, page-size paging, City/State/Zone dropdowns
+
+User (Hardik): *"Need a S.no in store master and paging which user can select from the dropdown (20, 50, 100). City, State and Zone need a dropdown in store master."*
+
+**Frontend only** (`/app/frontend/src/pages/admin/Stores.jsx`) — stores are a bounded list (`GET /stores` returns ≤500), so paging is client-side:
+- **S.No** column (first column) — sequential, continues across pages (`(page-1)*pageSize + i + 1`), testid `store-sno-<code>`.
+- **Rows-per-page** dropdown (20 / 50 / 100, default 20) `stores-page-size`; Prev/Next + "Page X of Y" indicator (`stores-prev`/`stores-next`/`stores-page-indicator`); render-time page clamping (no set-state-in-effect).
+- **City** = combobox (`<input list>` + `<datalist>` seeded from distinct existing cities) — dropdown suggestions but still allows new cities. **State** = `<select>` of all 28 Indian states + 8 UTs (`store-state`). **Zone** = `<select>` North/South/East/West/Central/North-East (mapped to the `region` field, `store-zone`). `withCurrent()` guard always includes the row's current value so legacy/non-standard values (e.g. "Upper North", "Unknown") still display + persist. Table "REGION" column relabelled "ZONE".
+- No backend change; PATCH/POST `/stores` payload shape unchanged.
+
+**Verified**: screenshot — S.No 1–14, page-size dropdown, pagination footer, ZONE column; Edit modal shows City combobox + State select + Zone select (pre-selects "East"). Lint clean.
+
+
 ### Iteration 36 (Jun 2026) — 🔒 POS strict store validation · 🏆 Slab-wise upgrade bonus · 🔎 Global drill-downs · 🎨 Fundle logo · 🧭 Accordion menu
 
 User batch (last prompt): revert POS auto-create (reject unknown store codes), real Fundle logo, twisty/categorized left menu, slab-wise upgrade bonus points. (User confirmed: Priority 1 = POS reversal only; Priority 2 = all of logo + menu + slab bonus + global drill-downs.)
