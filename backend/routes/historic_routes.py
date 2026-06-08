@@ -11,6 +11,7 @@ Strict: NO dummy fallback values. Rows with critical missing fields (mobile for
 customers, bill_number for transactions) are recorded as errors.
 """
 from __future__ import annotations
+import asyncio
 import csv
 import io
 import json
@@ -870,6 +871,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
             "errors_count": skipped,
             "errors_sample": errors[:MAX_ERROR_SAMPLES],
             "total_rows": total_rows,
+            "row_count_estimated": total_rows,
             "stores_auto_created": len(store_links) if dataset == "transactions" else 0,
         }
         await historic_jobs_col.update_one({"id": job_id}, {"$set": final})
@@ -1394,6 +1396,21 @@ def _read_upload_to_csv_text(filename: str, raw_bytes: bytes) -> str:
     raise HTTPException(400, "Only .csv and .xlsx files are supported")
 
 
+def _stitch_and_decode(parts: List[bytes], filename: str) -> str:
+    """CPU-bound: join chunk bytes and decode/convert to CSV text.
+
+    Run via ``asyncio.to_thread`` so that joining + decoding (+ xlsx→csv) of a
+    100MB+ file never blocks the event loop. A blocked loop is exactly what made
+    the origin worker time out / reset the connection → Cloudflare 520.
+    """
+    raw = b"".join(parts)
+    parts.clear()
+    try:
+        return _read_upload_to_csv_text(filename, raw)
+    finally:
+        del raw
+
+
 @router.post("/ingest")
 async def ingest_csv(background_tasks: BackgroundTasks,
                       file: UploadFile = File(...),
@@ -1564,64 +1581,47 @@ async def ingest_finalize(
             f"Chunk count mismatch — expected {expected}, found {found}. Please retry the upload.",
         )
 
-    # Quick stitch to count rows + detect header (kept ephemeral, NOT stored in memory beyond this call)
-    try:
-        cursor = historic_chunks_col.find(
-            {"job_id": body.job_id},
-            {"_id": 0, "chunk_index": 1, "data": 1},
-        ).sort("chunk_index", 1)
-        parts: List[bytes] = []
-        last_index = -1
-        async for doc in cursor:
-            idx = doc["chunk_index"]
-            if idx != last_index + 1:
-                raise HTTPException(400, f"Chunk gap detected at index {last_index + 1}. Please retry the upload.")
-            parts.append(doc["data"])
-            last_index = idx
-        raw = b"".join(parts)
-        parts.clear()
-        # Decode based on file extension (.csv direct, .xlsx via openpyxl)
-        text = _read_upload_to_csv_text(job.get("filename", ""), raw)
-        del raw
-    except HTTPException:
-        raise
-    except Exception as e:
-        await historic_jobs_col.update_one(
-            {"id": body.job_id},
-            {"$set": {"status": "failed", "error": f"Could not stitch/decode chunks: {e}"}},
-        )
-        raise HTTPException(500, f"Failed to read uploaded chunks: {e}")
-
-    reader = csv.DictReader(io.StringIO(text))
-    header = reader.fieldnames or []
-    row_count = sum(1 for _ in reader)
-    # IMPORTANT: for .xlsx files we re-decode in the scheduler tick. Cache the
-    # decoded CSV text on the job so the scheduler doesn't have to re-parse xlsx.
-    is_xlsx = (job.get("filename") or "").lower().endswith(".xlsx")
-    if is_xlsx:
-        # Replace the stored chunks with one synthetic CSV chunk to save memory + re-decode time
+    # ---- Lightweight finalize ----
+    # CRITICAL: we deliberately do NOT stitch / decode / row-count the whole
+    # file here. For large files (100MB+) doing that synchronously inside the
+    # HTTP request spikes memory (~4x file size) and blocks the event loop,
+    # which makes the origin worker crash / reset the connection → Cloudflare
+    # 520 ("origin returned an empty/malformed response"). The scheduler tick
+    # re-stitches in a worker thread and computes the authoritative row count
+    # during the actual ingest. Here we only peek the FIRST chunk (~1.5MB) to
+    # detect the header + estimate the row count for immediate UI feedback.
+    filename = job.get("filename", "") or ""
+    is_xlsx = filename.lower().endswith(".xlsx")
+    header: List[str] = []
+    row_estimate = 0
+    if not is_xlsx:
         try:
-            await historic_chunks_col.delete_many({"job_id": body.job_id})
-            csv_bytes = text.encode("utf-8")
-            await historic_chunks_col.insert_one({
-                "job_id": body.job_id, "chunk_index": 0, "data": csv_bytes,
-            })
-            # Update job's total_chunks so scheduler stitches correctly
-            await historic_jobs_col.update_one(
-                {"id": body.job_id},
-                {"$set": {"total_chunks": 1, "filename_original": job.get("filename"),
-                            "filename": (job.get("filename") or "").replace(".xlsx", ".csv")}},
+            first = await historic_chunks_col.find_one(
+                {"job_id": body.job_id, "chunk_index": 0}, {"_id": 0, "data": 1}
             )
-        except Exception as xe:
-            logger.warning(f"xlsx → csv chunk replacement failed (will retry on scheduler): {xe}")
-    del text  # release memory immediately — scheduler will re-stitch when it picks up the job
+            if first and first.get("data"):
+                sample_bytes = first["data"]
+                sample_text = sample_bytes.decode("utf-8-sig", errors="replace")
+                reader = csv.reader(io.StringIO(sample_text))
+                header = next(reader, []) or []
+                # Estimate total rows by extrapolating the first chunk's row
+                # density across the full file (header line excluded).
+                sample_rows = max(0, sample_text.count("\n") - 1)
+                sample_len = max(1, len(sample_bytes))
+                total_bytes = int(job.get("size_bytes") or 0)
+                if sample_rows > 0 and total_bytes > sample_len:
+                    row_estimate = int(sample_rows * (total_bytes / sample_len))
+                else:
+                    row_estimate = sample_rows
+        except Exception as e:
+            logger.warning(f"finalize header peek failed (non-fatal): {e}")
 
     now = datetime.now(timezone.utc).isoformat()
     await historic_jobs_col.update_one(
         {"id": body.job_id},
         {"$set": {
             "status": "pending_ingest",
-            "row_count_estimated": row_count,
+            "row_count_estimated": row_estimate,
             "columns_detected": header,
             "queued_finalized_at": now,
             "heartbeat": now,
@@ -1629,10 +1629,11 @@ async def ingest_finalize(
     )
 
     # Chunks remain in MongoDB until scheduler completes ingest. Scheduler tick
-    # (every 15s) will claim this job atomically, process it, and clean up.
+    # (every 15s) will claim this job atomically, process it (stitch/decode in a
+    # worker thread), and clean up.
 
     updated = await historic_jobs_col.find_one({"id": body.job_id}, {"_id": 0})
-    return updated or {"id": body.job_id, "status": "pending_ingest", "row_count_estimated": row_count}
+    return updated or {"id": body.job_id, "status": "pending_ingest", "row_count_estimated": row_estimate}
 
 
 # ---------------- Scheduler-driven ingest worker ----------------
@@ -1682,10 +1683,11 @@ async def process_pending_ingests():
         parts: List[bytes] = []
         async for doc in cursor:
             parts.append(doc["data"])
-        raw = b"".join(parts)
-        parts.clear()
-        text = raw.decode("utf-8-sig", errors="replace")
-        del raw
+        # CPU-bound join + decode (+ xlsx→csv) runs in a worker thread so a
+        # 100MB+ file never blocks the event loop (a blocked loop would 520
+        # concurrent chunk uploads / live POS / health checks).
+        text = await asyncio.to_thread(_stitch_and_decode, parts, job.get("filename", ""))
+        parts = []
     except Exception as e:
         logger.exception(f"Failed to stitch chunks for job {job_id}")
         await historic_jobs_col.update_one(

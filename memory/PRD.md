@@ -32,6 +32,20 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 45 (Jun 2026) — 🔴 PROD FIX: large-file upload Cloudflare 520 (finalize loop-block / memory spike)
+
+User (LIVE, https://kazoloyalty.fundlebrain.ai): uploading the 126MB CRM_Report.csv failed with **"Upload failed: The origin web server sent a response that Cloudflare could not parse… origin returned an empty response / malformed HTTP headers"** (Cloudflare **520**).
+
+**Root cause:** `historic_routes.ingest_finalize` synchronously stitched ALL chunks (126MB), decoded the whole blob to a string, then ran `csv.DictReader` + `sum(1 for _ in reader)` over **every row** — inside the HTTP request. For 100MB+ files this spiked memory to ~4× file size and blocked the event loop, so the origin worker crashed / reset the connection → CF 520. (The APScheduler tick also stitched+decoded the full file synchronously, blocking the loop for concurrent chunk uploads / live POS.)
+
+**Fix (`historic_routes.py`, backend-only):**
+- **`ingest_finalize` is now O(first chunk).** It peeks only chunk 0 (~1.5MB) to detect the header and *estimate* total rows by byte-density extrapolation, then marks `pending_ingest` and returns instantly. No full stitch / decode / row-count in the request. (Removed the eager xlsx→csv conversion here too.)
+- **Scheduler stitch+decode offloaded to a worker thread** via new `_stitch_and_decode()` + `asyncio.to_thread(...)` (also routes through `_read_upload_to_csv_text` so xlsx is handled in the worker). The 100MB+ join/decode no longer blocks the event loop.
+- **Post-ingest exact count overrides the estimate**: `_run_ingest_job` completion now also sets `row_count_estimated = total_rows`, so the job table / integrity check stay exact after ingest.
+
+**Verified:** `tests/iteration45_chunked_finalize_perf_test.py` — a 4MB / 70k-row / 3-chunk dry-run upload: **finalize 0.173s** (asserts <5s), header detected from chunk 0, estimate 70,337 vs actual 70,000 (<0.5%), scheduler ingests via thread → `previewed`, `total_rows`/`row_count_estimated` both exactly 70,000. Test data cleaned up (dry_run wrote nothing). ⚠️ **Production redeploy required** before re-attempting the load.
+
+
 ### Iteration 44 (Jun 2026) — 🚀 Production data-load prep + 2 critical launch blockers fixed
 
 User is about to **purge production & bulk-load 3 eWards files** (CRM Report ~133MB / Billing Report ~267MB / SKU Wise Billing ~176MB), then start **live POS ingestion at 12 PM IST tomorrow**. Rules: opening balances valid till **31 Dec 2026**; live POS points valid **1 yr from bill date**; **all dates IST**.
