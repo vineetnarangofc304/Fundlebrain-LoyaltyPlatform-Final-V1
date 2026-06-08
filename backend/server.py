@@ -333,6 +333,73 @@ logging.basicConfig(
 logger = logging.getLogger("kazo-fundle")
 
 
+async def ensure_indexes():
+    """Create all hot-path indexes (idempotent, safe to re-run).
+
+    Without these, every dashboard aggregation collection-scans the
+    transactions / customers / points_ledger collections (1M+ docs each after
+    the historic load) and the skip-mode CRM ingest does an unindexed
+    find_one({mobile}) per row — i.e. dashboards "take a million years" / never
+    open. Runs as a background task on startup so it never delays readiness.
+    """
+    from database import (
+        transactions_col, customers_col, points_ledger_col,
+        coupon_redemptions_col, nps_col, db,
+    )
+    plans = [
+        # transactions — the hot dashboard dimensions (bill_date / bill_number
+        # already indexed by bootstrap_pos_defaults)
+        (transactions_col, [("store_id", 1), ("bill_date", -1)], {"name": "ix_txn_store_billdate"}),
+        (transactions_col, [("customer_mobile", 1), ("bill_date", -1)], {"name": "ix_txn_mobile_billdate"}),
+        (transactions_col, [("is_return", 1)], {"name": "ix_txn_is_return"}),
+        # customers — segmentation / analytics dimensions
+        (customers_col, [("tier", 1)], {"name": "ix_cust_tier"}),
+        (customers_col, [("home_store_id", 1)], {"name": "ix_cust_home_store"}),
+        (customers_col, [("last_visit_at", -1)], {"name": "ix_cust_last_visit"}),
+        (customers_col, [("first_purchase_at", 1)], {"name": "ix_cust_first_purchase"}),
+        (customers_col, [("lifetime_spend", -1)], {"name": "ix_cust_lifetime_spend"}),
+        (customers_col, [("city", 1)], {"name": "ix_cust_city"}),
+        (customers_col, [("created_at", -1)], {"name": "ix_cust_created"}),
+        (customers_col, [("visit_count", -1)], {"name": "ix_cust_visit_count"}),
+        # points ledger — economics / expiry
+        (points_ledger_col, [("customer_mobile", 1)], {"name": "ix_pl_mobile"}),
+        (points_ledger_col, [("type", 1), ("expires_at", 1)], {"name": "ix_pl_type_expiry"}),
+        (points_ledger_col, [("created_at", -1)], {"name": "ix_pl_created"}),
+        (points_ledger_col, [("source_bill_id", 1)], {"name": "ix_pl_bill"}),
+        # small collections
+        (coupon_redemptions_col, [("created_at", -1)], {"name": "ix_cr_created"}),
+        (nps_col, [("created_at", -1)], {"name": "ix_nps_created"}),
+        # chunk lookups for large historic uploads
+        (db["historic_chunks"], [("job_id", 1), ("chunk_index", 1)], {"name": "ix_chunk_job_idx"}),
+        (db["historic_ingest_jobs"], [("status", 1), ("queued_at", 1)], {"name": "ix_job_status_queued"}),
+    ]
+    created = 0
+    for col, keys, opts in plans:
+        try:
+            await col.create_index(keys, **opts)
+            created += 1
+        except Exception as e:
+            logger.warning(f"index {opts.get('name')} warn: {e}")
+    # customers.mobile equality lookups (skip-mode ingest + Customer 360).
+    # Prefer the partial-unique index; fall back to a plain index if dupes exist.
+    try:
+        await customers_col.create_index(
+            [("mobile", 1)], unique=True,
+            partialFilterExpression={"mobile": {"$type": "string"}},
+            name="uniq_customer_mobile",
+        )
+        created += 1
+    except Exception as e:
+        logger.warning(f"unique mobile index warn ({e}); trying non-unique fallback")
+        try:
+            await customers_col.create_index([("mobile", 1)], name="ix_cust_mobile")
+            created += 1
+        except Exception as e2:
+            logger.warning(f"mobile index fallback warn: {e2}")
+    logger.info(f"ensure_indexes complete — {created} indexes ensured")
+
+
+
 @app.on_event("startup")
 async def startup():
     from database import users_col, stores_col, loyalty_config_col
@@ -454,6 +521,13 @@ async def startup():
         await ensure_demo_user()
     except Exception as e:
         logger.warning(f"Could not ensure demo user: {e}")
+
+    # Build hot-path indexes in the background so dashboards over 1M+ rows stay
+    # fast. Non-blocking: the app starts serving immediately while Mongo builds.
+    try:
+        asyncio.create_task(ensure_indexes())
+    except Exception as e:
+        logger.warning(f"Could not schedule ensure_indexes: {e}")
 
 
 @app.on_event("shutdown")

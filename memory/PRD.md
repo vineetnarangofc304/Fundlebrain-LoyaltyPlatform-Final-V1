@@ -32,6 +32,17 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 46 (Jun 2026) — 🔴 PROD FIX: dashboards "take a million years" / empty after the bulk load (missing indexes)
+
+User (LIVE, right after loading ~1.1M customers / 8.67L bills / ~10L SKU lines): *"empty dashboards taking million years to open.. some never open.. user goes on clicking many times.. urgent."*
+
+**Root cause:** there was **no startup index creation**. Only `transactions.bill_date` + `bill_number` were indexed (via `bootstrap_pos_defaults`). Every dashboard aggregation therefore **collection-scanned** `transactions` (8.67L), `customers` (≈ unique of 11L rows) and `points_ledger` on unindexed dimensions (`store_id`, `customer_mobile`, `tier`, `city`, `home_store_id`, `last_visit_at`, `first_purchase_at`, `lifetime_spend`, `type/expires_at`, …). The `customers.mobile` equality index only existed if someone manually ran `/backfill-loyalty-model`, so the skip-mode CRM ingest also did an unindexed `find_one({mobile})` per row (≈ O(n²)). At 1M+ rows these scans took tens of seconds → requests hung → frontend rendered empty → users re-clicked → concurrent heavy scans piled up and saturated Mongo/event-loop. (Note: matches use `start.isoformat()` so the string `bill_date` compares correctly — it was pure performance, not a type bug.)
+
+**Fix (`server.py`):** new idempotent `ensure_indexes()` builds all hot-path indexes and is fired as a **non-blocking background task on startup** (`asyncio.create_task`) so it never delays readiness and rebuilds automatically on a fresh prod DB. Indexes added: txn `(store_id,bill_date)`, `(customer_mobile,bill_date)`, `is_return`; customers `tier`, `home_store_id`, `last_visit_at`, `first_purchase_at`, `lifetime_spend`, `city`, `created_at`, `visit_count`, partial-unique `mobile` (non-unique fallback); points_ledger `customer_mobile`, `(type,expires_at)`, `created_at`, `source_bill_id`; plus `historic_chunks (job_id,chunk_index)` and `historic_ingest_jobs (status,queued_at)`.
+
+**Verified:** `explain()` confirms IXSCAN/COUNT_SCAN (txn store-group is even a *covered* PROJECTION_COVERED query) instead of COLLSCAN. Dashboard endpoints (`command-center`, `kpis`, `tier-distribution`) all 200 in ~0.1s on preview. `tests/iteration46_indexes_test.py` asserts all expected indexes exist after `ensure_indexes()`. ⚠️ **Production redeploy required** — indexes build in the background within the first minute after boot, then dashboards are fast.
+
+
 ### Iteration 45 (Jun 2026) — 🔴 PROD FIX: large-file upload Cloudflare 520 (finalize loop-block / memory spike)
 
 User (LIVE, https://kazoloyalty.fundlebrain.ai): uploading the 126MB CRM_Report.csv failed with **"Upload failed: The origin web server sent a response that Cloudflare could not parse… origin returned an empty response / malformed HTTP headers"** (Cloudflare **520**).
