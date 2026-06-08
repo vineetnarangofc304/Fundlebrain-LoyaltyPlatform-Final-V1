@@ -37,6 +37,7 @@ import random
 import secrets
 import logging
 import time
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List
 
@@ -49,6 +50,27 @@ from database import (
 
 router = APIRouter(prefix="/pos", tags=["pos-ewards"])
 logger = logging.getLogger("kazo-fundle.pos-ewards")
+
+
+def _swallow_task_exc(task: "asyncio.Task") -> None:
+    try:
+        exc = task.exception()
+        if exc:
+            logger.warning(f"Background comms task failed: {exc}")
+    except Exception:
+        pass
+
+
+def _fire_and_forget(coro) -> None:
+    """Run a best-effort coroutine (comms) in the background so a slow SMS/WhatsApp
+    provider never blocks the POS API response. Critical for live POS throughput."""
+    try:
+        task = asyncio.create_task(coro)
+        task.add_done_callback(_swallow_task_exc)
+    except RuntimeError:
+        # No running event loop — should not happen under uvicorn.
+        pass
+
 
 # Dedicated collections
 pos_credentials_col = db["pos_credentials"]
@@ -499,7 +521,7 @@ async def _create_otp(*, purpose: str, mobile: str, payload: Dict[str, Any], cre
     # uses the {{otp}} variable, which is rendered here.
     try:
         from routes.communications_routes import fire_event
-        await fire_event("otp", mobile, {"otp": otp, "purpose": purpose})
+        _fire_and_forget(fire_event("otp", mobile, {"otp": otp, "purpose": purpose}))
     except Exception as e:
         logger.warning(f"OTP SMS dispatch failed for {mobile}: {e}")
     return {"otp": otp, "otp_id": otp_id}
@@ -1287,10 +1309,10 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
                 "order_id": txn_id, "points_earned": points_earned,
                 "new_balance": new_balance, "new_tier": new_tier})
 
-    # Fire transactional comms (best-effort)
+    # Fire transactional comms (best-effort, non-blocking — never delays POS response)
     try:
         from routes.communications_routes import fire_event
-        await fire_event("purchase", mobile, {
+        _fire_and_forget(fire_event("purchase", mobile, {
             "name": (cust.get("name") or "").split(" ")[0] or "there",
             "amount": f"{final_amount:,.0f}",
             "bill_no": bill_number,
@@ -1298,7 +1320,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "points_earned": points_earned,
             "points_balance": new_balance,
             "tier": new_tier,
-        })
+        }))
     except Exception:
         pass
 

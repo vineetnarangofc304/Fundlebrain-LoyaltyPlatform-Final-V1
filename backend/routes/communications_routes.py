@@ -8,6 +8,7 @@
 """
 import uuid
 import re
+import logging
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
 import httpx
@@ -22,6 +23,8 @@ from auth import get_current_user
 # Bulk-send job state collection
 bulk_jobs_col = db["bulk_send_jobs"]
 from routes.ai_routes import EMERGENT_LLM_KEY, SYSTEM_PROMPT
+
+logger = logging.getLogger("kazo-fundle.communications")
 
 router = APIRouter(tags=["communications"])
 
@@ -453,12 +456,20 @@ async def get_message_log(channel: Optional[str] = None, limit: int = 100,
 
 # ---------------- Internal: fire_event hook ----------------
 async def fire_event(event_trigger: str, mobile: str, params: Dict[str, Any]):
-    """Fire all active templates registered for this event_trigger."""
+    """Fire all active templates registered for this event_trigger.
+
+    Best-effort and fully exception-safe: callers may run this as a fire-and-forget
+    background task, so it must never raise (a slow/failed provider is logged, not raised).
+    """
     if not mobile:
         return
-    rows = await templates_col.find(
-        {"event_trigger": event_trigger, "status": "active"}, {"_id": 0}
-    ).to_list(50)
+    try:
+        rows = await templates_col.find(
+            {"event_trigger": event_trigger, "status": "active"}, {"_id": 0}
+        ).to_list(50)
+    except Exception as e:
+        logger.warning(f"fire_event template lookup failed for '{event_trigger}': {e}")
+        return
     for t in rows:
         try:
             if t["channel"] == "sms":
