@@ -31,6 +31,27 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+
+### Iteration 36 (Jun 2026) — 🔒 POS strict store validation · 🏆 Slab-wise upgrade bonus · 🔎 Global drill-downs · 🎨 Fundle logo · 🧭 Accordion menu
+
+User batch (last prompt): revert POS auto-create (reject unknown store codes), real Fundle logo, twisty/categorized left menu, slab-wise upgrade bonus points. (User confirmed: Priority 1 = POS reversal only; Priority 2 = all of logo + menu + slab bonus + global drill-downs.)
+
+**1) POS strict store validation (REVERSAL of iter 32 auto-create) — CRITICAL**
+- `pos_ewards_routes.py`: new env flag `STRICT_STORE_VALIDATION` (default **true**). `_get_or_create_store_from_payload()` now RAISES `HTTPException(400)` instead of auto-creating when a bill's (merchant_id + customer_key) store code is unprovisioned (no combo match AND no store whose `code` == customer_key). Legacy fallback paths (no customer_key) also reject when nothing resolves. `posAddPoint()` wraps the resolver in try/except and routes rejections through `_log_api(status=400)` so every rejected unknown-store bill is visible in the API Monitor. Set `STRICT_STORE_VALIDATION=false` to restore legacy auto-create. KNOWN provisioned store codes still succeed + link the txn.
+
+**2) Slab-wise tier-upgrade bonus**
+- `models.py` `TierRule.upgrade_bonus: int = 0`; `loyalty_routes.py` DEFAULT_CONFIG tiers seed upgrade_bonus (gold 500 / platinum 1500 / diamond 5000), GET `/config` backfills `upgrade_bonus` onto existing tiers, `TierCreatePayload.upgrade_bonus`.
+- `posAddPoint()` customer-aggregates block: when a bill promotes a customer UP a tier (rank compared via tier_rules sorted by min_lifetime_spend), credits the new tier's `upgrade_bonus` once (into points_balance + lifetime_points_earned) and writes a `points_ledger` entry `type='bonus'`, `reference_type='tier_upgrade'`.
+- `LoyaltyConfigurator.jsx`: new **TIER UPGRADE BONUSES (SLAB-WISE)** section (per-tier editable input `tier-<slug>-upgrade-bonus`) after Tier Management. Edit + Save persists via PUT and survives reload.
+
+**3) Global drill-downs** — wired the reusable `DrillDownModal` into the 6 dashboards that lacked it: Sales (transactions), Loyalty (customers-by-tier, KPI cards + table rows), NPS (nps_responses promoters/detractors), Campaign Performance (campaigns), Customer Analytics (customers: total / one-timer / top city / high-risk), Executive Summary (transactions + customers). Added shared `mongoDateFilter()` helper in `_shared.jsx`; `KPICard` now shows `cursor-pointer`+hover when `onClick` is set (benefits all dashboards). Existing drill-downs (Command Center / Store / RFM / Cohorts / Points / Campaign ROI) unaffected.
+
+**4) Real Fundle logo** — `brand.config.js` `platformLogoUrl="/fundle-logo.png"` (white wordmark in `/public`). Rendered on dark surfaces: admin sidebar header (under KAZO), CRM/store/enterprise login left panel, public footer "Powered by" lockup.
+
+**5) Accordion ("twisty") left menu** — `AdminLayout.jsx`: `sectionForPath()` + collapsed state so only the section owning the active route is expanded by default; section headers toggle open/close. Removes the long-scroll clutter (11 sections / 40+ links).
+
+**Verified**: testing_agent iteration_20 — backend 7/7 pytest (3 existing iter17 rewritten for strict rule + 4 new iter20: strict reject/accept + api_logs + upgrade-bonus credit/ledger), frontend 12/13 drill-down checks (NPS only shows empty-state because preview has 0 NPS responses — expected). No critical/minor issues. New test: `/app/backend/tests/iteration20_upgrade_bonus_and_strict_store_test.py`. ⚠️ Redeploy required for production. NOTE for Red Chief sync: `STRICT_STORE_VALIDATION` can be toggled per-brand via env; `brand.config.js` `platformLogoUrl` is brand-neutral (points to /public asset).
+
 ### Iteration 35 (Jun 2026) — 🎬 Self-running Fundle-branded product demo (`/demo`)
 
 User wants a self-running sales demo over the live platform with Fundle branding: a main 5-min guided tour + per-section ~2-min walkthroughs, AI voice narration, to host on demo.fundlebrain.ai. Confirmed choices: live auto-tour (1a), premium OpenAI TTS (2b), dedicated `/demo` page + tutorials (3 custom), full + section tours (4c), interactive walkthroughs as "videos" (1a) + read-only demo account (2a).
