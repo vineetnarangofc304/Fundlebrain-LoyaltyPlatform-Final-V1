@@ -32,6 +32,19 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 38 (Jun 2026) — 🐛 SMS Sender ID not reflecting Provider Settings (reported on LIVE)
+
+User: *"Sender id is not coming from provider setting.. I've configured it in provider setting"* (screenshot: New SMS Template form, Sender ID showed grey placeholder "KAZOIN", not an actual value).
+
+**Root cause:** The New Template form's Sender ID was a placeholder only — never pre-filled from `provider_config.sms_sender_id`. (Separately, `send_sms_karix` already used the provider-config sender on the wire, so live SMS *were* going out as KAZOIN; the field just looked empty.)
+
+**Fix (preview — needs redeploy for production):**
+- `TemplatesPage.jsx`: fetches `/provider-config` and pre-fills new SMS templates' `sender_id` + `dlt_entity_id` from Provider Settings (real value, not placeholder); added helper text. Also converted the templates list fetch to the `.then` form (lint-clean).
+- `communications_routes.py` `send_sms_karix()`: now uses a per-template Sender ID / DLT Entity ID override when the template has one set, falling back to global Provider Settings (`sms_sender_id` / `sms_dlt_entity_id`). No regression — empty template fields fall back to the prior behavior.
+
+**Verified:** screenshot — New SMS template Sender ID pre-filled "KAZOIN" (input_value confirmed); backend `/api/provider-config` returns sms_sender_id=KAZOIN, `/api/templates` 200, no errors. ⚠️ Note: if a live-received SMS still shows a wrong/blank sender, that is a Karix-side DLT sender-registration/mapping issue (not code).
+
+
 ### Iteration 37 (Jun 2026) — 🏬 Store Master UX: S.No, page-size paging, City/State/Zone dropdowns
 
 User (Hardik): *"Need a S.no in store master and paging which user can select from the dropdown (20, 50, 100). City, State and Zone need a dropdown in store master."*

@@ -299,14 +299,26 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
     if not cfg.get("sms_api_key") or not cfg.get("sms_endpoint"):
         await _log("sms", "config_missing", mobile, {}, None, template_id, event_trigger)
         return {"ok": False, "error": "SMS provider not configured"}
+    # Effective sender ID + DLT entity ID: a per-template override wins, otherwise
+    # fall back to the global Provider Settings (provider_config).
+    sender = cfg.get("sms_sender_id", "")
+    dlt_entity = cfg.get("sms_dlt_entity_id", "")
+    if template_id:
+        tpl = await templates_col.find_one(
+            {"id": template_id}, {"_id": 0, "sender_id": 1, "dlt_entity_id": 1})
+        if tpl:
+            if tpl.get("sender_id"):
+                sender = tpl["sender_id"]
+            if tpl.get("dlt_entity_id"):
+                dlt_entity = tpl["dlt_entity_id"]
     mob = _normalize_mobile(mobile)
     params = {
         "ver": "1.0",
         "key": cfg["sms_api_key"],
         "encrpt": "0",
         "dest": mob,
-        "send": cfg.get("sms_sender_id", ""),
-        "dlt_entity_id": cfg.get("sms_dlt_entity_id", ""),
+        "send": sender,
+        "dlt_entity_id": dlt_entity,
         "text": text,
     }
     try:

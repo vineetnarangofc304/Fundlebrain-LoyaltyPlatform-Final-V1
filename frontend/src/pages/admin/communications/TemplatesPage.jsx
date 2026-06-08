@@ -38,15 +38,22 @@ export default function TemplatesPage() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
+  const [provider, setProvider] = useState({});
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      const r = await api.get("/templates", { params: { channel: activeCh } });
-      setRows(r.data.rows);
-    } finally { setLoading(false); }
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [activeCh]);
+  useEffect(() => { api.get("/provider-config").then((r) => setProvider(r.data || {})); }, []);
+
+  // Defaults for a brand-new template — SMS sender/DLT pre-filled from Provider Settings
+  const newTemplate = () => ({
+    channel: activeCh, body: "", event_trigger: "none", status: "draft", variables: [],
+    ...(activeCh === "sms"
+      ? { sender_id: provider.sms_sender_id || "", dlt_entity_id: provider.sms_dlt_entity_id || "" }
+      : {}),
+  });
+
+  const load = () => api.get("/templates", { params: { channel: activeCh } })
+    .then((r) => setRows(r.data.rows))
+    .finally(() => setLoading(false));
+  useEffect(() => { load(); }, [activeCh]);
 
   const remove = async (id) => {
     if (!confirm("Delete this template?")) return;
@@ -65,7 +72,7 @@ export default function TemplatesPage() {
         actions={
           <button
             className="k-btn kazo-bg-burgundy k-btn-sm"
-            onClick={() => setEditing({ channel: activeCh, body: "", event_trigger: "none", status: "draft", variables: [] })}
+            onClick={() => setEditing(newTemplate())}
             data-testid="new-template-btn"
           >
             <Plus className="w-3.5 h-3.5" /> New {channel.label} Template
@@ -99,7 +106,7 @@ export default function TemplatesPage() {
             rows.length === 0 ? (
               <div className="py-12 text-center text-neutral-500 text-sm">
                 No {channel.label} templates yet.<br/>
-                <button className="k-btn k-btn-outline mt-4" onClick={() => setEditing({ channel: activeCh, body: "", event_trigger: "none", status: "draft", variables: [] })}>
+                <button className="k-btn k-btn-outline mt-4" onClick={() => setEditing(newTemplate())}>
                   <Plus className="w-3.5 h-3.5" /> Create your first
                 </button>
               </div>
@@ -324,6 +331,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
                   <label className="text-xs">
                     <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Sender ID</div>
                     <input className="k-input" value={form.sender_id || ""} onChange={(e) => update("sender_id", e.target.value)} placeholder="KAZOIN" data-testid="t-sender" />
+                    <div className="text-[10px] text-neutral-400 mt-1">Pre-filled from Provider Settings. Leave as-is to use your global DLT-registered sender; override here only for this template.</div>
                   </label>
                   <label className="text-xs">
                     <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">DLT Entity ID (optional)</div>
