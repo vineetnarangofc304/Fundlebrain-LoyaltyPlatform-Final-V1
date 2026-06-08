@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 21 — Tested (1) Loyalty tier delete immediate persistence via DELETE /api/loyalty/tiers/{slug}, (2) OTP variable + 'OTP / verification' event in SMS templates with best-effort fire_event('otp') from POS, (3) Live Monitor date-range filter on /api/live-monitor/stats and /api/live-monitor/transactions. Backend: 10/10 new pytest pass + 7/7 prior regressions (iter17 + iter20) → 17/17 total. Frontend: tier table exposes silver/gold/platinum/diamond/founders delete testids (tier-<slug>-delete); New SMS Template modal has +OTP chip that inserts {{otp}} and 'OTP / verification' event; clicking the chip auto-surfaces a test-param-otp input. Live Monitor /admin/live-monitor shows lm-fil-start-date, lm-fil-end-date inputs, lm-range-active note appears once range is set, lm-fil-window select gets disabled, and KPI strip + top stores reflect 2020-2030 range (44 bills, ₹52.3K, 5 top stores).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Command Center store filter (cc-store select)",
+        "issues": ["Pre-existing hydration warning '<span> cannot be a child of <option>' — already flagged in iter19 & iter20. Not touched this iteration."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration21_tier_delete_otp_live_monitor_test.py",
+    "/app/test_reports/pytest/iteration21_results.xml"
+  ],
+  "action_items": [
+    "(Optional, pre-existing) Fix Command Center cc-store <select> hydration warning by removing the wrapping <span> from <option> children in CommandCenter.jsx line ~235."
+  ],
+  "critical_code_review_comments": [
+    "DELETE /api/loyalty/tiers/{slug} (loyalty_routes.py:190) correctly: (a) 404s on unknown slug, (b) 400s when only one tier remains, (c) writes audit log, (d) returns updated tiers list. Frontend LoyaltyConfigurator.removeTier was migrated to call api.delete immediately rather than mutating local state — verified via Add → Delete → reload-config that the throwaway tier stays gone.",
+    "POS OTP best-effort dispatch (pos_ewards_routes.py:438-442) correctly wraps fire_event('otp', mobile, {otp,purpose}) in try/except so a missing/inactive template never blocks OTP issuance. Verified: posCustomerCheckRequest returns 200 with otp_id/authentication=true even when no active 'otp'-trigger SMS template exists in the templates collection.",
+    "Live Monitor date-range support (live_monitor_routes.py:51-58 for /transactions, :174-180 for /stats) correctly overrides the relative since_minutes/minutes window when start_date or end_date is provided. end_date is properly extended to T23:59:59.999Z so the inclusive-end semantic matches the UI. Wide range (2020-2030) returns bills_total=44; future range (2099) returns 0.",
+    "TemplatesPage.jsx COMMON_VARS includes {key:'otp', label:'OTP'} → renders +OTP chip that injects {{otp}} via insertVar(). EVENTS contains {key:'otp', label:'OTP / verification'}. testVars useMemo regex /\\{\\{(\\w+)\\}\\}/g auto-detects {{otp}} in body and shows test-param-otp input field. All wired end-to-end."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration21_tier_delete_otp_live_monitor_test.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (10/10 new iter21 + 7/7 prior regressions = 17/17 total)",
+    "frontend": "100% on tested surfaces: tier delete testids visible (5 tiers), OTP chip + {{otp}} insert + test-param-otp + event 'OTP / verification' all wired, Live Monitor date range filter (start/end/range-active/window-disabled/KPI reflects range) fully functional."
+  },
+  "test_credentials": "Super admin superadmin@fundle.io / Fundle@2026 (portal=crm). POS API: kazo_default cred from pos_credentials Mongo collection.",
+  "seed_data_creation": "Pytest creates a throwaway tier slug 'test_iter21_throwaway' (added then deleted in the same test). The last-tier-rejection test snapshots current tier_rules, temporarily replaces with a single 'iter21_only' tier via PUT, verifies DELETE returns 400, then restores the original tiers in finally. No persistent test data left behind.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `cd /app/backend && python -m pytest tests/iteration21_tier_delete_otp_live_monitor_test.py tests/iteration20_upgrade_bonus_and_strict_store_test.py tests/iteration17_store_resolution_test.py -v` for iter21+regression (17 tests, ~14s). The POS OTP test auto-skips if an active 'otp' SMS template exists in seed (to avoid firing Karix to a real mobile). Live Monitor wide-range assertion expects bills in 2020-2030 — seed has 44 bills in that window today; if seed shrinks below 1 bill the test will fail; just keep at least one historic transaction. UI testids confirmed for tier delete (tier-<slug>-delete), live-monitor filters (lm-fil-start-date, lm-fil-end-date, lm-fil-window, lm-range-active), and templates OTP (+OTP chip → {{otp}}, test-param-otp).",
+  "rca of the issue": "N/A — no functional issues found. All three iteration items (tier delete persistence, OTP variable + best-effort fire_event, live-monitor date range) work end-to-end on both backend and frontend."
+}

@@ -1,5 +1,5 @@
 /* Communication Templates — SMS / WhatsApp / RCS with AI suggest + test send. */
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { toast } from "sonner";
 import api from "@/lib/api";
 import { PageHeader, SectionHeading, StatusPill } from "../_shared";
@@ -16,6 +16,7 @@ const CHANNELS = [
 
 const EVENTS = [
   { key: "none", label: "On-demand only" },
+  { key: "otp", label: "OTP / verification" },
   { key: "purchase", label: "On purchase" },
   { key: "coupon_issued", label: "Coupon issued" },
   { key: "points_earned", label: "Points earned" },
@@ -31,6 +32,7 @@ const COMMON_VARS = [
   { key: "bill_no", label: "Bill #" }, { key: "store_name", label: "Store" },
   { key: "coupon_code", label: "Coupon" }, { key: "points_earned", label: "Points earned" },
   { key: "points_balance", label: "Points balance" }, { key: "tier", label: "Tier" },
+  { key: "otp", label: "OTP" },
 ];
 
 export default function TemplatesPage() {
@@ -196,6 +198,23 @@ function TemplateEditor({ template, onClose, onSaved }) {
     const tag = `{{${key}}}`;
     update("body", (form.body || "") + tag);
   };
+
+  // Test-send inputs: auto-detect {{variables}} from the body (so manually-typed
+  // vars like {{otp}} are testable), merged with any AI-declared variables.
+  const VAR_EXAMPLES = { name: "Aarav", amount: "2499", bill_no: "INV-1042", store_name: "KAZO Phoenix",
+    coupon_code: "KAZO10", points_earned: "120", points_balance: "640", tier: "Gold", otp: "123456" };
+  const testVars = useMemo(() => {
+    const found = new Map();
+    const re = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
+    let m;
+    while ((m = re.exec(form.body || "")) !== null) {
+      const key = m[1];
+      const known = COMMON_VARS.find((c) => c.key === key);
+      found.set(key, { key, label: known?.label || key, example: VAR_EXAMPLES[key] || "" });
+    }
+    (form.variables || []).forEach((v) => { if (!found.has(v.key)) found.set(v.key, v); });
+    return Array.from(found.values());
+  }, [form.body, form.variables]);
 
   const aiSuggest = async () => {
     if (!brief.trim()) return toast.error("Add a brief first");
@@ -400,8 +419,8 @@ function TemplateEditor({ template, onClose, onSaved }) {
             <div className="border border-emerald-200 bg-emerald-50/40 p-4" data-testid="test-send-panel">
               <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-800 font-semibold mb-2">TEST SEND</div>
               <input className="k-input mb-2" placeholder="Mobile e.g. 9876543210" value={testMobile} onChange={(e) => setTestMobile(e.target.value)} data-testid="test-mobile" />
-              {(form.variables || []).map((v) => (
-                <input key={v.key} className="k-input mb-2 text-xs" placeholder={`${v.label} (e.g. ${v.example})`} value={testParams[v.key] || ""} onChange={(e) => setTestParams({ ...testParams, [v.key]: e.target.value })} />
+              {testVars.map((v) => (
+                <input key={v.key} className="k-input mb-2 text-xs" placeholder={`${v.label}${v.example ? ` (e.g. ${v.example})` : ""}`} value={testParams[v.key] || ""} onChange={(e) => setTestParams({ ...testParams, [v.key]: e.target.value })} data-testid={`test-param-${v.key}`} />
               ))}
               <button onClick={testSend} disabled={testSending || !form.id} className="k-btn kazo-bg-burgundy k-btn-sm w-full" data-testid="test-send-btn">
                 <Send className="w-3.5 h-3.5" /> {testSending ? "Sending…" : "Send test now"}

@@ -32,46 +32,50 @@ export default function LiveMonitorPage() {
     source: "",
     min_amount: "",
     max_amount: "",
+    start_date: "",
+    end_date: "",
   });
   const [statsWindow, setStatsWindow] = useState(10080); // default = 7d so the KPI strip and table aren't blank on fresh login (a 24h default would show zero on quieter stores)
   const [drillRow, setDrillRow] = useState(null);
   const lastFetchRef = useRef(null);
 
-  const load = async () => {
-    try {
-      const params = { limit: 200, since_minutes: statsWindow };
-      Object.entries(filters).forEach(([k, v]) => {
-        if (v !== "" && v !== "all") params[k] = v;
-      });
-      const [tx, st] = await Promise.all([
-        api.get("/live-monitor/transactions", { params }),
-        api.get("/live-monitor/stats", { params: { minutes: statsWindow } }),
-      ]);
+  const load = () => {
+    const hasRange = filters.start_date || filters.end_date;
+    const params = { limit: 200 };
+    const statsParams = {};
+    if (hasRange) {
+      // Explicit date range overrides the relative stats window
+      if (filters.start_date) { params.start_date = filters.start_date; statsParams.start_date = filters.start_date; }
+      if (filters.end_date) { params.end_date = filters.end_date; statsParams.end_date = filters.end_date; }
+    } else {
+      params.since_minutes = statsWindow;
+      statsParams.minutes = statsWindow;
+    }
+    Object.entries(filters).forEach(([k, v]) => {
+      if (k === "start_date" || k === "end_date") return;
+      if (v !== "" && v !== "all") params[k] = v;
+    });
+    return Promise.all([
+      api.get("/live-monitor/transactions", { params }),
+      api.get("/live-monitor/stats", { params: statsParams }),
+    ]).then(([tx, st]) => {
       setRows(tx.data.rows || []);
       setStats(st.data || null);
       lastFetchRef.current = new Date();
-    } catch (e) {
-      console.error("live-monitor load failed", e);
-    }
+    }).catch((e) => console.error("live-monitor load failed", e));
   };
 
-  const loadStores = async () => {
-    try {
-      const r = await api.get("/stores");
-      setStores(r.data || []);
-    } catch (e) { /* ignore */ }
-  };
+  const loadStores = () => api.get("/stores").then((r) => setStores(r.data || [])).catch(() => {});
 
   useEffect(() => { loadStores(); }, []);
   useEffect(() => {
     load();
-    if (paused) return;
+    if (paused) return undefined;
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paused, filters, statsWindow]);
 
-  const clearFilters = () => setFilters({ store_id: "", region: "", has_mobile: "all", payment_mode: "", source: "", min_amount: "", max_amount: "" });
+  const clearFilters = () => setFilters({ store_id: "", region: "", has_mobile: "all", payment_mode: "", source: "", min_amount: "", max_amount: "", start_date: "", end_date: "" });
   const activeFilterCount = useMemo(() =>
     Object.values(filters).filter((v) => v !== "" && v !== "all").length, [filters]);
 
@@ -139,7 +143,9 @@ export default function LiveMonitorPage() {
             ]} testid="lm-fil-payment" />
             <NumInput label="Min ₹" value={filters.min_amount} onChange={(v) => setFilters({ ...filters, min_amount: v })} testid="lm-fil-min" />
             <NumInput label="Max ₹" value={filters.max_amount} onChange={(v) => setFilters({ ...filters, max_amount: v })} testid="lm-fil-max" />
-            <Select label="Stats window" value={String(statsWindow)} onChange={(v) => setStatsWindow(Number(v))} options={[
+            <DateInput label="From date" value={filters.start_date} onChange={(v) => setFilters({ ...filters, start_date: v })} testid="lm-fil-start-date" />
+            <DateInput label="To date" value={filters.end_date} onChange={(v) => setFilters({ ...filters, end_date: v })} testid="lm-fil-end-date" />
+            <Select label="Stats window" value={String(statsWindow)} onChange={(v) => setStatsWindow(Number(v))} disabled={!!(filters.start_date || filters.end_date)} options={[
               { value: "15", label: "Last 15m" },
               { value: "60", label: "Last 1h" },
               { value: "360", label: "Last 6h" },
@@ -149,6 +155,9 @@ export default function LiveMonitorPage() {
               { value: "129600", label: "Last 90d" },
               { value: "525600", label: "Last 365d" },
             ]} testid="lm-fil-window" />
+            {(filters.start_date || filters.end_date) && (
+              <div className="self-center text-[10px] text-amber-700 uppercase tracking-widest" data-testid="lm-range-active">Date range active · live window ignored</div>
+            )}
             {activeFilterCount > 0 && (
               <button onClick={clearFilters} className="k-btn k-btn-ghost k-btn-sm" data-testid="lm-clear-filters">
                 <X className="w-3 h-3" /> Clear
@@ -160,7 +169,7 @@ export default function LiveMonitorPage() {
         {/* Top stores */}
         {stats?.by_store_top10?.length > 0 && (
           <div className="chart-card p-5" data-accent="teal">
-            <SectionHeading eyebrow={`LAST ${statsWindow} MIN`} title="Top stores by revenue" accent="teal" />
+            <SectionHeading eyebrow={(filters.start_date || filters.end_date) ? `${filters.start_date || "…"} → ${filters.end_date || "…"}` : `LAST ${statsWindow} MIN`} title="Top stores by revenue" accent="teal" />
             <div className="grid md:grid-cols-2 lg:grid-cols-5 gap-3 mt-3">
               {stats.by_store_top10.slice(0, 5).map((s) => (
                 <div key={s.store_id || s.store_name} className="p-3 border border-black/10 bg-neutral-50" data-testid={`lm-top-store-${s.store_id}`}>
@@ -269,13 +278,22 @@ function KPI({ label, value, icon: Icon, color, testid }) {
   );
 }
 
-function Select({ label, value, onChange, options, testid }) {
+function Select({ label, value, onChange, options, testid, disabled }) {
   return (
     <label className="block">
       <div className="text-neutral-500 uppercase tracking-widest text-[10px] mb-1">{label}</div>
-      <select className="k-input k-input-sm" value={value} onChange={(e) => onChange(e.target.value)} data-testid={testid} style={{ minWidth: 130 }}>
+      <select className="k-input k-input-sm" value={value} onChange={(e) => onChange(e.target.value)} data-testid={testid} disabled={disabled} style={{ minWidth: 130, opacity: disabled ? 0.5 : 1 }}>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
+    </label>
+  );
+}
+
+function DateInput({ label, value, onChange, testid }) {
+  return (
+    <label className="block">
+      <div className="text-neutral-500 uppercase tracking-widest text-[10px] mb-1">{label}</div>
+      <input type="date" className="k-input k-input-sm" value={value} onChange={(e) => onChange(e.target.value)} data-testid={testid} style={{ minWidth: 140 }} />
     </label>
   );
 }

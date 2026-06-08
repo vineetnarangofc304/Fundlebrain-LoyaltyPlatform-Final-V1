@@ -30,11 +30,9 @@ export default function LoyaltyConfigurator() {
   const [stats, setStats] = useState([]);
   const [saving, setSaving] = useState(false);
 
-  const load = async () => {
-    const [c, s] = await Promise.all([api.get("/loyalty/config"), api.get("/loyalty/tier-stats")]);
-    setCfg(c.data);
-    setStats(s.data);
-  };
+  const load = () =>
+    Promise.all([api.get("/loyalty/config"), api.get("/loyalty/tier-stats")])
+      .then(([c, s]) => { setCfg(c.data); setStats(s.data); });
   useEffect(() => { load(); }, []);
 
   const save = async () => {
@@ -56,7 +54,15 @@ export default function LoyaltyConfigurator() {
     arr[i] = { ...arr[i], [k]: v };
     setCfg({ ...cfg, tier_rules: arr });
   };
-  const removeTier = (slug) => setCfg({ ...cfg, tier_rules: cfg.tier_rules.filter((t) => t.tier !== slug) });
+  const removeTier = async (slug) => {
+    try {
+      await api.delete(`/loyalty/tiers/${slug}`);
+      setCfg((c) => ({ ...c, tier_rules: c.tier_rules.filter((t) => t.tier !== slug) }));
+      toast.success(`Tier "${slug}" deleted`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Delete failed");
+    }
+  };
 
   return (
     <div data-testid="loyalty-configurator">
@@ -133,7 +139,7 @@ export default function LoyaltyConfigurator() {
                   <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Mult.</th>
                   <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Type</th>
                   <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Welcome</th>
-                  <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">B'day</th>
+                  <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">B&apos;day</th>
                   <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Anniv.</th>
                   <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Coupon %</th>
                   <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Ship ≥ ₹</th>
@@ -189,7 +195,7 @@ export default function LoyaltyConfigurator() {
             </table>
           </div>
           <p className="text-xs text-neutral-500 mt-3">
-            Mult. = earn multiplier · Welcome / B'day / Anniv. = one-shot bonuses · Coupon % = auto applied on every bill · Ship ≥ ₹ = free-shipping threshold · Expiry (d) = override of global point expiry · Visits = alternative tier-promotion path
+            Mult. = earn multiplier · Welcome / B&apos;day / Anniv. = one-shot bonuses · Coupon % = auto applied on every bill · Ship ≥ ₹ = free-shipping threshold · Expiry (d) = override of global point expiry · Visits = alternative tier-promotion path
           </p>
         </SectionCard>
 
@@ -222,7 +228,7 @@ export default function LoyaltyConfigurator() {
             </table>
           </div>
           <p className="text-xs text-neutral-500 mt-3">
-            Awarded once when a bill pushes a customer's lifetime spend past this slab's minimum and promotes them into this tier. The entry tier (lowest slab) is usually 0.
+            Awarded once when a bill pushes a customer&apos;s lifetime spend past this slab&apos;s minimum and promotes them into this tier. The entry tier (lowest slab) is usually 0.
           </p>
         </SectionCard>
 
@@ -279,7 +285,7 @@ export default function LoyaltyConfigurator() {
         <SectionCard title="FESTIVAL BOOSTERS" subtitle="Date-range earn multipliers — Diwali, Republic Day, anniversaries" icon={Calendar}
                       actions={<AddFestivalBooster onAdd={() => load()} />}>
           {(cfg.festival_boosters || []).length === 0 ? (
-            <div className="text-sm text-neutral-500 py-4 text-center">No active boosters. Click "Add booster" to launch one.</div>
+            <div className="text-sm text-neutral-500 py-4 text-center">No active boosters. Click &quot;Add booster&quot; to launch one.</div>
           ) : (
             <table className="w-full text-sm" data-testid="festival-table">
               <thead className="border-b border-black/10 text-left">

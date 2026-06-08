@@ -432,6 +432,14 @@ async def _create_otp(*, purpose: str, mobile: str, payload: Dict[str, Any], cre
         "cred_label": cred_label,
         "payload_snapshot": payload,
     })
+    # Dispatch the OTP over SMS via any active 'otp'-trigger template (best-effort —
+    # never block OTP creation if the gateway/template is missing). The template body
+    # uses the {{otp}} variable, which is rendered here.
+    try:
+        from routes.communications_routes import fire_event
+        await fire_event("otp", mobile, {"otp": otp, "purpose": purpose})
+    except Exception as e:
+        logger.warning(f"OTP SMS dispatch failed for {mobile}: {e}")
     return {"otp": otp, "otp_id": otp_id}
 
 

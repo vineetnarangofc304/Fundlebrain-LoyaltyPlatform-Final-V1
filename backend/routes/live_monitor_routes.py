@@ -29,6 +29,8 @@ async def live_transactions(
     since_minutes: Optional[int] = Query(None, ge=1, le=525600,
         description="Convenience window in minutes (1 = 1 min, 1440 = 1d, up to 365d)."
         " Overrides `since` if both given."),
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range start (overrides since_minutes)"),
+    end_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range end (inclusive)"),
     store_id: Optional[str] = None,
     store_code: Optional[str] = None,
     city: Optional[str] = None,
@@ -46,7 +48,15 @@ async def live_transactions(
 ):
     """Paginated list of recent transactions for the cockpit table."""
     fil: dict = {}
-    if since_minutes:
+    if start_date or end_date:
+        # Explicit date range wins over the relative window
+        dr: dict = {}
+        if start_date:
+            dr["$gte"] = start_date
+        if end_date:
+            dr["$lte"] = end_date + "T23:59:59.999Z"
+        fil["bill_date"] = dr
+    elif since_minutes:
         # Compute cutoff so the table matches whatever Stats Window the
         # frontend is using — keeps the KPI strip and the row list consistent.
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=since_minutes)).isoformat()
@@ -154,14 +164,25 @@ async def live_transactions(
 @router.get("/stats")
 async def live_stats(
     minutes: int = Query(60, ge=1, le=525600),  # up to 365 days (1 year)
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range start (overrides minutes)"),
+    end_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range end (inclusive)"),
     user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
                                          "marketing_manager", "regional_manager",
                                          "analytics_viewer", "readonly_executive")),
 ):
     """Top KPIs for the cockpit: bills, revenue, mobile-attach rate, lost opportunities."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    if start_date or end_date:
+        dr: dict = {}
+        if start_date:
+            dr["$gte"] = start_date
+        if end_date:
+            dr["$lte"] = end_date + "T23:59:59.999Z"
+        date_match = {"bill_date": dr}
+    else:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        date_match = {"bill_date": {"$gte": cutoff}}
     pipe_total = [
-        {"$match": {"bill_date": {"$gte": cutoff}}},
+        {"$match": dict(date_match)},
         {"$group": {
             "_id": None,
             "bills": {"$sum": 1},
@@ -196,7 +217,7 @@ async def live_stats(
 
     # Repeat bills — bills whose customer_mobile appears 2+ times in the window
     repeat_pipe = [
-        {"$match": {"bill_date": {"$gte": cutoff},
+        {"$match": {**date_match,
                      "customer_mobile": {"$nin": [None, ""]}}},
         {"$group": {"_id": "$customer_mobile", "n": {"$sum": 1}}},
         {"$match": {"n": {"$gte": 2}}},
@@ -211,7 +232,7 @@ async def live_stats(
 
     # Per-store top performers
     pipe_store = [
-        {"$match": {"bill_date": {"$gte": cutoff}}},
+        {"$match": dict(date_match)},
         {"$group": {
             "_id": "$store_id",
             "store_name": {"$first": "$store_name"},
