@@ -32,6 +32,19 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 43 (Jun 2026) — ⏯️ Loyalty Earn/Burn ON-OFF + scheduled pause windows · 🔁 Live Monitor RETURN type + receive time
+
+User: "in Type We require return if bill type is return"; "Need Bill receive time"; "brands want to turn off/on points for date ranges — need a provision in loyalty rules to stop earning/burning and a start option."
+
+**1) Earn & Burn Control (Loyalty Rules).** New config keys `earn_enabled`, `burn_enabled` (master switches) + `earn_burn_pauses` (scheduled blackout windows: `{id,label,start_date,end_date,pause_earn,pause_burn,active}`). Backend (`loyalty_routes.py`): `PUT /api/loyalty/earn-burn-control` (instant ON/OFF), `POST /api/loyalty/pauses`, `PATCH /api/loyalty/pauses/{id}/toggle`, `DELETE /api/loyalty/pauses/{id}` (all MANAGEMENT_ROLES, audit-logged; validates start<=end + at least one of earn/burn). Engine gating (`pos_ewards_routes.py` `_loyalty_paused(cfg, kind, when)`): **earn** gated in `posAddPoint` on the bill's `order_time` (a bill dated in an active earn-pause earns 0; stores `earn_pause_reason`); **burn** gated in `posRedeemPointRequest` on today (blocks redemption with a clear message). Frontend (`LoyaltyConfigurator.jsx`): new **EARN & BURN CONTROL** section — two master Stop/Start switches (`ebc-earn-master`/`ebc-burn-master`) + "Add Pause Window" modal + pauses table (toggle/delete).
+
+**2) Live Monitor TYPE = RETURN.** `LiveMonitorPage.jsx` TYPE column now shows a **RETURN** pill (`lm-type-return-<bill>`) when `is_return`, otherwise NEW/REPEAT/WALK-IN.
+
+**3) Bill receive time.** `live_monitor_routes.py /transactions` now returns `received_at` (=`created_at`, the ingestion time). The "Bill Date · Time" cell shows a 2nd line "Recd {received_at}"; the bill drill drawer shows both **Bill Date** and **Received**.
+
+**Verified:** pytest `tests/iteration23_earn_burn_control_test.py` 4/4 (earn OFF→0 / ON→2000; pause CRUD + validation; burn-pause blocks redeem then allows; live-monitor exposes received_at+is_return). testing_agent iteration_22 frontend **100%** on all 8 criteria (config restored to ACTIVE/no-pauses after). ⚠️ Redeploy required for production. Non-blocking note: NEW/REPEAT/WALK-IN pills lack testids (only RETURN has one); pre-existing CommandCenter `<span> in <option>` hydration warning.
+
+
 ### Iteration 42 (Jun 2026) — 🔁 returnOrder: drop bill-number requirement · 📅 Legacy Reports date filters
 
 User: "In returnOrder API, We don't need to check bill number." + earlier "date range filter was to be everywhere in every report" (only Live Monitor had it).
