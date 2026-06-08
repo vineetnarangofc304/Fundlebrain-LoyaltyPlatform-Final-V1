@@ -51,6 +51,24 @@ Data-tool protocol:
 Brand voice: Refined, premium fashion editorial. Indian context. No emojis.
 """
 
+# Injected as an extra system message for read-only demo sessions (is_demo users).
+DEMO_SYSTEM_NOTE = (
+    "IMPORTANT — DEMO MODE: You are running inside a PUBLIC, READ-ONLY product demo. "
+    "You may answer questions and pull read-only insights/reports, but you must NOT perform "
+    "or facilitate ANY write or mutation — deactivate, reactivate, unsubscribe, resubscribe, "
+    "reactivate coupons/points, send campaigns, or change any setting. If the user asks for "
+    "any such action, REFUSE in ONE short sentence stating this is a read-only demo, and do "
+    "NOT ask for confirmation, reasons, or further details. Offer to show a read-only insight instead."
+)
+
+
+def _base_history(user: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    """Seed the conversation; demo (read-only) users also get the demo guardrail."""
+    msgs: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if user and user.get("is_demo"):
+        msgs.append({"role": "system", "content": DEMO_SYSTEM_NOTE})
+    return msgs
+
 
 # ---------------- LiteLLM through Emergent proxy ----------------
 def _build_completion_params(messages: List[Dict[str, Any]], model: str,
@@ -166,7 +184,7 @@ async def chat(req: AIChatRequest, user: dict = Depends(get_current_user)):
     existing = await ai_chats_col.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
 
     # Build conversation history from stored messages
-    history: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    history: List[Dict[str, Any]] = _base_history(user)
     if existing:
         for m in (existing.get("messages") or [])[-12:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
@@ -213,7 +231,7 @@ async def chat_stream(req: AIChatRequest, user: dict = Depends(get_current_user)
     session_id = req.session_id or uuid.uuid4().hex
     existing = await ai_chats_col.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
 
-    history: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    history: List[Dict[str, Any]] = _base_history(user)
     if existing:
         for m in (existing.get("messages") or [])[-12:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
@@ -323,7 +341,7 @@ async def chat_upload_csv(
 
     sid = session_id or uuid.uuid4().hex
     existing = await ai_chats_col.find_one({"id": sid, "user_id": user["id"]}, {"_id": 0})
-    history: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    history: List[Dict[str, Any]] = _base_history(user)
     if existing:
         for m in (existing.get("messages") or [])[-6:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
