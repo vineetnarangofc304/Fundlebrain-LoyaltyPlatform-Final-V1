@@ -32,6 +32,19 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 39 (Jun 2026) — 🐛 Tier delete persistence · 💬 OTP SMS variable · 📅 Live Monitor date range
+
+User (Hardik, on LIVE): (a) deleted Silver/Gold/Platinum/Diamond/Founders tiers kept reappearing in Loyalty Logic; (b) "Need otp variable in SMS"; (c) "Live Monitor needs a date range filter — date range filter should be everywhere in every report."
+
+**1) Tier delete now persists immediately (BUG).** Root cause: `LoyaltyConfigurator.removeTier` only mutated local state → deletion persisted only on "Save Changes", which then failed PUT validation because some tier bands were invalid (e.g. Kazo Style Icon Max ₹100 < Min ₹350, Platinum Max ₹150 < Min ₹750) → save rejected → defaults reappeared on reload. Fix: `removeTier` now calls `DELETE /api/loyalty/tiers/{slug}` immediately then removes from local state (mirrors AddTier's immediate POST). Backend DELETE already 404s unknown slug, refuses last tier, writes audit log.
+
+**2) OTP variable in SMS (FEATURE).** `TemplatesPage.jsx`: added **+OTP** chip (inserts `{{otp}}`) to COMMON_VARS, an **'OTP / verification'** event trigger, and a `testVars` auto-detector (regex over body `{{...}}`) so any typed variable — incl. otp — gets a test-send input (`test-param-otp`). Backend: `pos_ewards_routes._create_otp()` now best-effort calls `fire_event('otp', mobile, {otp,purpose})` (lazy import, wrapped in try/except — never blocks OTP issuance). Actual OTP SMS goes out only if an active 'otp'-trigger SMS template exists.
+
+**3) Live Monitor date-range filter (FEATURE).** `LiveMonitorPage.jsx`: added **From date / To date** inputs (`lm-fil-start-date`/`lm-fil-end-date`); when a range is set the relative **Stats window** select is disabled and a "Date range active" note (`lm-range-active`) shows; `load()` passes start_date/end_date to both calls. Backend `live_monitor_routes.py`: `/stats` and `/transactions` accept `start_date`/`end_date` (YYYY-MM-DD) that override the relative window; end_date extended to T23:59:59.999Z for inclusive end.
+
+**Verified:** testing_agent iteration_21 — backend 17/17 pytest (10 new iter21 + 7 prior regressions), frontend 100% on all three features. New test: `/app/backend/tests/iteration21_tier_delete_otp_live_monitor_test.py`. Note: preview data is mostly historical (>7d old) so Live Monitor's default "Last 7d" legitimately shows 0 bills — use the date range to see older data. ⚠️ Redeploy required for production. Pending (not done): user asked for date range "everywhere in every report" — applied to Live Monitor; legacy reports / remaining dashboards still TODO.
+
+
 ### Iteration 38 (Jun 2026) — 🐛 SMS Sender ID not reflecting Provider Settings (reported on LIVE)
 
 User: *"Sender id is not coming from provider setting.. I've configured it in provider setting"* (screenshot: New SMS Template form, Sender ID showed grey placeholder "KAZOIN", not an actual value).
