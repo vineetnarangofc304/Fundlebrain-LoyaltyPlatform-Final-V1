@@ -7,7 +7,7 @@ import { fmtDateTime } from "@/lib/format";
 import { toast } from "sonner";
 import {
   Activity, ShoppingBag, AlertTriangle, CheckCircle2, RefreshCw, Pause, Play,
-  Phone, PhoneOff, MapPin, Receipt, Filter, X, TrendingDown, Coins, Award,
+  Phone, PhoneOff, MapPin, Receipt, Filter, X, TrendingDown, Coins, Award, Calculator,
 } from "lucide-react";
 
 const PALETTE = {
@@ -24,6 +24,7 @@ export default function LiveMonitorPage() {
   const [stats, setStats] = useState(null);
   const [stores, setStores] = useState([]);
   const [paused, setPaused] = useState(false);
+  const [recalcing, setRecalcing] = useState(false);
   const [filters, setFilters] = useState({
     store_id: "",
     region: "",
@@ -67,6 +68,31 @@ export default function LiveMonitorPage() {
 
   const loadStores = () => api.get("/stores").then((r) => setStores(r.data || [])).catch(() => {});
 
+  // Re-credit points for bills that earned 0 (e.g. captured before the earn-engine fix).
+  // Dry-run first to preview, then confirm to apply. Idempotent on the backend.
+  const recalcPoints = async () => {
+    setRecalcing(true);
+    try {
+      const preview = (await api.post("/live-monitor/recalc-points", { dry_run: true })).data;
+      if (!preview.eligible) {
+        toast.info("No bills need recalculation — all eligible sale bills already have points.");
+        return;
+      }
+      const ok = window.confirm(
+        `${preview.eligible} bill(s) currently have 0 points and qualify to earn ` +
+        `${preview.total_points.toLocaleString()} points total.\n\nApply now and credit the customers?`
+      );
+      if (!ok) return;
+      const res = (await api.post("/live-monitor/recalc-points", { dry_run: false })).data;
+      toast.success(`Recalculated ${res.credited} bill(s) · credited ${res.total_points.toLocaleString()} points.`);
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Recalculation failed");
+    } finally {
+      setRecalcing(false);
+    }
+  };
+
   useEffect(() => { loadStores(); }, []);
   useEffect(() => {
     load();
@@ -88,6 +114,9 @@ export default function LiveMonitorPage() {
           <>
             <button onClick={() => setPaused((p) => !p)} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-toggle-pause">
               {paused ? <><Play className="w-3.5 h-3.5" /> Resume</> : <><Pause className="w-3.5 h-3.5" /> Pause</>}
+            </button>
+            <button onClick={recalcPoints} disabled={recalcing} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-recalc-points">
+              <Calculator className="w-3.5 h-3.5" /> {recalcing ? "Recalculating…" : "Recalc points"}
             </button>
             <button onClick={load} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-refresh">
               <RefreshCw className="w-3.5 h-3.5" /> Refresh now
@@ -197,7 +226,10 @@ export default function LiveMonitorPage() {
                   <th>Customer</th>
                   <th>Type</th>
                   <th>Mobile</th>
-                  <th className="text-right">Amount</th>
+                  <th className="text-right">Bill Amt</th>
+                  <th className="text-right">Pts Base</th>
+                  <th className="text-right">Tax</th>
+                  <th className="text-right">Discount</th>
                   <th className="text-right">Earn</th>
                   <th className="text-right">Redeem</th>
                   <th>Source</th>
@@ -205,7 +237,7 @@ export default function LiveMonitorPage() {
               </thead>
               <tbody>
                 {rows.length === 0 ? (
-                  <tr><td colSpan={12} className="py-10 text-center text-neutral-500 text-sm">Waiting for live bills…</td></tr>
+                  <tr><td colSpan={15} className="py-10 text-center text-neutral-500 text-sm">Waiting for live bills…</td></tr>
                 ) : rows.map((r) => (
                   <tr key={r.id} onClick={() => setDrillRow(r)} className="cursor-pointer hover:bg-neutral-50"
                        style={{ borderLeft: `4px solid ${r.has_mobile ? PALETTE.emerald : PALETTE.rose}` }}
@@ -246,7 +278,10 @@ export default function LiveMonitorPage() {
                         <span className="text-rose-700">—</span>
                       )}
                     </td>
-                    <td className="text-right font-mono tabular-nums">₹{Math.round(r.net_amount || 0).toLocaleString()}</td>
+                    <td className="text-right font-mono tabular-nums" data-testid={`lm-row-amount-${r.bill_number}`}>₹{Math.round((r.bill_with_tax ?? r.net_amount ?? r.final_amount) || 0).toLocaleString()}</td>
+                    <td className="text-right font-mono tabular-nums text-emerald-700" data-testid={`lm-row-base-${r.bill_number}`}>₹{Math.round((r.points_base ?? r.amount ?? r.net_amount) || 0).toLocaleString()}</td>
+                    <td className="text-right font-mono tabular-nums text-neutral-500">₹{Math.round(r.tax_amount || 0).toLocaleString()}</td>
+                    <td className="text-right font-mono tabular-nums text-neutral-500">₹{Math.round(r.discount_amount || 0).toLocaleString()}</td>
                     <td className="text-right font-mono tabular-nums text-amber-700">{r.points_earned || 0}</td>
                     <td className="text-right font-mono tabular-nums text-indigo-700">{r.points_redeemed || 0}</td>
                     <td>
@@ -349,6 +384,9 @@ function BillDrillModal({ row, onClose }) {
           <Field label="Tier" value={row.tier || "—"} />
           <Field label="Current Points" value={row.current_points?.toLocaleString() || "—"} />
           <Field label="Gross" value={`₹${(row.gross_amount || 0).toLocaleString()}`} />
+          <Field label="Points base (₹)" value={`₹${((row.points_base ?? row.amount ?? row.net_amount) || 0).toLocaleString()}`} valueClass="text-emerald-700 font-medium" />
+          <Field label="Tax (GST)" value={`₹${(row.tax_amount || 0).toLocaleString()}`} />
+          <Field label="Bill w/ tax" value={`₹${((row.bill_with_tax ?? row.net_amount) || 0).toLocaleString()}`} />
           <Field label="Discount" value={`₹${(row.discount_amount || 0).toLocaleString()}`} />
           <Field label="Net" value={`₹${(row.net_amount || 0).toLocaleString()}`} />
           <Field label="Final paid" value={`₹${(row.final_amount || row.net_amount || 0).toLocaleString()}`} />

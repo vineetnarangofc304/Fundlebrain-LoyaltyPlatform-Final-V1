@@ -32,6 +32,17 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 41 (Jun 2026) — 📊 Live Monitor: Pts-Base/Tax/Discount columns + 🔁 Recalculate-points backfill
+
+User (LIVE): "two previous transactions on live monitor… pls give points"; "in live monitor show also Amount on which u r calculating points and add a tax discount column."
+
+**1) Live Monitor columns.** `live_monitor_routes.py` `/transactions` now returns `amount`, `points_base` (=loyalty_gross_amount), `tax_amount`, `bill_with_tax`, `discount_amount`. `LiveMonitorPage.jsx` table now shows **Bill Amt** (= bill_with_tax, fallback net), **Pts Base** (the amount points are calc'd on, green), **Tax** (GST), **Discount**, then Earn/Redeem. Detail drawer adds Points base / Tax (GST) / Bill w-tax fields. (Old bills lacking these fields fall back to net_amount; new bills populate fully.)
+
+**2) Recalculate-points backfill (production-safe self-serve).** New admin endpoint `POST /api/live-monitor/recalc-points` (super_admin/brand_admin; `dry_run` default true; optional store_id/date range). Re-credits SALE bills with `points_earned<=0` that should earn, using the fixed `_compute_earn_points` engine: updates txn.points_earned, increments customer points_balance + lifetime_points_earned, writes a `points_ledger` entry (type=earn, reference_type=recalc). **Idempotent** — once credited, points_earned>0 so it's skipped on re-run. `LiveMonitorPage` "Recalc points" header button: dry-runs first (shows eligible count + total points in a confirm), then applies. This is how the user credits the bills captured before the earn fix (incl. the "two previous transactions").
+
+**Verified (curl + screenshot):** dry-run → 21 eligible / 45,607 pts; apply → 21 credited + 21 recalc ledger entries; re-run → 0 eligible (idempotent); sample bill 0→1490 pts. Columns render (Bill Amt/Pts Base/Tax/Discount). Lint clean. ⚠️ Redeploy required; the user runs "Recalc points" on production themselves (I cannot write to prod DB).
+
+
 ### Iteration 40 (Jun 2026) — 🔴 CRITICAL: Sales bills earning 0 points (earn engine fix)
 
 User (Hardik, LIVE): "sales bills not getting points / earn points not working… return bill did deduct points… loyalty rules already configured from the front end." Plus canonical rules: Sales points base = `amount`; Return base = `return_loyalty_gross_amount`; Bill Amount (with tax) = `amount` + `taxes.amount` (name=GST); Tax = `taxes.amount` (name=GST).

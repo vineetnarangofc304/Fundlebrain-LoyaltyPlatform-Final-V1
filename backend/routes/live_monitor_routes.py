@@ -148,6 +148,10 @@ async def live_transactions(
             "gross_amount": r.get("gross_amount"),
             "net_amount": r.get("net_amount"),
             "final_amount": r.get("final_amount"),
+            "amount": r.get("amount"),
+            "points_base": r.get("loyalty_gross_amount", r.get("amount")),
+            "tax_amount": r.get("tax_amount", r.get("loyalty_tax_amount")),
+            "bill_with_tax": r.get("bill_with_tax"),
             "discount_amount": r.get("discount_amount"),
             "points_earned": r.get("points_earned", 0),
             "points_redeemed": r.get("points_redeemed", 0),
@@ -280,6 +284,87 @@ async def live_stats(
             } for s in by_store
         ],
     }
+
+
+# ---------------- Recalculate points (backfill for bills that earned 0) ----------------
+class RecalcBody(BaseModel):
+    dry_run: bool = True            # preview counts before applying
+    store_id: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    limit: int = 20000
+
+
+@router.post("/recalc-points")
+async def recalc_points(
+    body: RecalcBody = RecalcBody(),
+    user: dict = Depends(require_roles("super_admin", "brand_admin")),
+):
+    """Re-credit loyalty points for SALE bills that currently have 0 points but should
+    have earned (e.g. bills captured before the earn-engine fix). Idempotent: once a
+    bill is credited its points_earned > 0, so it is skipped on subsequent runs.
+    Call with dry_run=true first to preview; dry_run=false applies + writes ledger."""
+    from database import db
+    from routes.pos_ewards_routes import _compute_earn_points
+    points_ledger_col = db["points_ledger"]
+    loyalty_config_col = db["loyalty_config"]
+
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
+    min_bill = float(cfg.get("min_bill_for_earn", 0) or 0)
+    tier_mult = {t.get("tier"): t.get("earn_multiplier", 1.0) for t in (cfg.get("tier_rules") or [])}
+
+    fil: dict = {"is_return": {"$ne": True},
+                 "$or": [{"points_earned": {"$lte": 0}}, {"points_earned": None}]}
+    if body.store_id:
+        fil["store_id"] = body.store_id
+    if body.start_date or body.end_date:
+        dr: dict = {}
+        if body.start_date:
+            dr["$gte"] = body.start_date
+        if body.end_date:
+            dr["$lte"] = body.end_date + "T23:59:59.999Z"
+        fil["bill_date"] = dr
+
+    scanned = eligible = credited = total_points = 0
+    samples: List[dict] = []
+    async for t in transactions_col.find(fil, {"_id": 0}).limit(body.limit):
+        scanned += 1
+        if str(t.get("loyalty_flag", "1")).strip().lower() in {"0", "false", "no"}:
+            continue
+        base = float(t.get("loyalty_gross_amount") or t.get("amount")
+                     or t.get("net_amount") or t.get("final_amount") or 0)
+        if base <= 0 or base < min_bill:
+            continue
+        cust = None
+        if t.get("customer_id"):
+            cust = await customers_col.find_one({"id": t["customer_id"]}, {"_id": 0, "id": 1, "tier": 1})
+        if not cust and t.get("customer_mobile"):
+            cust = await customers_col.find_one({"mobile": t["customer_mobile"]}, {"_id": 0, "id": 1, "tier": 1})
+        if not cust:
+            continue
+        mult = tier_mult.get(cust.get("tier") or "silver", 1.0)
+        pts = _compute_earn_points(base, cfg, mult)
+        if pts <= 0:
+            continue
+        eligible += 1
+        total_points += pts
+        if len(samples) < 10:
+            samples.append({"bill_number": t.get("bill_number"), "base": base,
+                            "points": pts, "mobile": t.get("customer_mobile")})
+        if not body.dry_run:
+            await transactions_col.update_one({"id": t["id"]}, {"$set": {"points_earned": pts}})
+            await customers_col.update_one({"id": cust["id"]},
+                {"$inc": {"points_balance": pts, "lifetime_points_earned": pts}})
+            await points_ledger_col.insert_one({
+                "id": uuid.uuid4().hex, "customer_id": cust["id"], "type": "earn",
+                "points": pts, "reference_type": "recalc", "reference_id": t.get("id"),
+                "note": f"Points recalculated for bill {t.get('bill_number')}",
+                "created_at": _now_iso(),
+            })
+            credited += 1
+    return {"dry_run": body.dry_run, "scanned": scanned, "eligible": eligible,
+            "credited": credited, "total_points": total_points, "samples": samples}
+
 
 
 # ---------------- POS Credentials (admin-only) ----------------
