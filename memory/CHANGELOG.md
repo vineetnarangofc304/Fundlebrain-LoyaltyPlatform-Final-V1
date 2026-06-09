@@ -5,6 +5,34 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-09 (cont.3) — 🔴→🟢 FIXED recurring "Invalid OTP" on POS redemption (iter 67)
+
+**Root cause (the real "configuration disconnect"):** there were TWO separate POS
+redemption implementations writing OTPs to TWO different Mongo collections:
+- eWards / x-api-key flow (`pos_ewards_routes.py`) → `pos_otp_sessions`
+- legacy `/pos/*` flow (`stores_routes.py` `pos_router`) → `otps`
+An OTP issued by one flow could never be verified by the other → permanent "Invalid OTP".
+The bare `"Invalid OTP"` string (no period) the client saw is the legacy `stores_routes.py`
+message; the eWards one returns `"Invalid OTP."` with diagnostics.
+
+**Verified in preview:** the eWards flow (the one KAZO's POS actually uses with x-api-key)
+ALREADY works correctly end-to-end, even with a +91 / leading-0 format mismatch — i.e. the
+previous mobile-normalization fix is correct but **was never redeployed to production** (why
+the client still saw failures).
+
+**Fix (unification):** `stores_routes.py` legacy `/pos/issue-otp`, `/pos/redeem-points` and
+`/pos/validate-customer` now read/write the SAME canonical `pos_otp_sessions` collection
+with the same last-10-digit `_norm_mobile`/`_mobile_key` matching and the same
+`_otp_failure_reason` diagnostics. Any OTP from either flow now resolves; wrong OTP returns a
+precise reason instead of bare "Invalid OTP". Removed dead `otp_col`/`random` usage in
+stores_routes.
+- Tests: `iteration67_unified_otp_redeem_test.py` (cross-flow A & B + diagnostic) — PASS;
+  `iteration66` still PASS.
+- **ACTION REQUIRED: client must REDEPLOY to production for any of this to go live.**
+
+---
+
+
 ## 2026-06-09 (cont.2) — 🟢 TIER-DRIVEN earning + full POS flow correctness (iter 60)
 
 Client confirmed the canonical flow: bill → (auto-register if new) → earn by TIER → SMS;

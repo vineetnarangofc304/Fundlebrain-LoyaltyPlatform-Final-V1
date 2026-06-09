@@ -6,7 +6,6 @@ from database import stores_col, customers_col, transactions_col, points_ledger_
 from auth import get_current_user, require_roles, log_audit, ADMIN_ROLES
 from models import StoreCreate, Store
 import uuid
-import random
 import time
 
 router = APIRouter(prefix="/stores", tags=["stores"])
@@ -132,11 +131,12 @@ async def _log_api(endpoint: str, method: str, status: int, ms: int, customer_mo
 @pos_router.post("/validate-customer")
 async def validate_customer(body: dict):
     t0 = time.time()
-    mobile = body.get("mobile", "").strip()
+    from routes.pos_ewards_routes import _find_customer_by_mobile, _norm_mobile
+    mobile = _norm_mobile(body.get("mobile"))
     if not mobile:
         await _log_api("/api/pos/validate-customer", "POST", 400, int((time.time() - t0) * 1000), error="missing mobile", payload=body)
         raise HTTPException(400, "Mobile required")
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     ms = int((time.time() - t0) * 1000)
     if not cust:
         await _log_api("/api/pos/validate-customer", "POST", 404, ms, customer_mobile=mobile, error="customer not found", payload=body)
@@ -148,24 +148,19 @@ async def validate_customer(body: dict):
 @pos_router.post("/issue-otp")
 async def issue_otp(body: dict):
     t0 = time.time()
-    mobile = body.get("mobile", "").strip()
-    purpose = body.get("purpose", "redeem")
+    from routes.pos_ewards_routes import _create_otp, _norm_mobile
+    mobile = _norm_mobile(body.get("mobile"))
     if not mobile:
         await _log_api("/api/pos/issue-otp", "POST", 400, int((time.time() - t0) * 1000), error="missing mobile", payload=body)
         raise HTTPException(400, "Mobile required")
-    otp = f"{random.randint(100000, 999999)}"
-    await otp_col.insert_one({
-        "id": uuid.uuid4().hex,
-        "mobile": mobile,
-        "otp": otp,
-        "purpose": purpose,
-        "verified": False,
-        "expires_at": (datetime.now(timezone.utc).timestamp() + 300),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    # UNIFIED OTP: write into the SAME `pos_otp_sessions` collection (purpose=redeem_points)
+    # that the eWards POS verify endpoints read. An OTP issued here is therefore valid for
+    # redemption regardless of which redeem endpoint the POS calls — no more split-collection
+    # mismatch that produced spurious "Invalid OTP".
+    otp_data = await _create_otp(purpose="redeem_points", mobile=mobile, payload=body, cred_label="store_ops")
     ms = int((time.time() - t0) * 1000)
     await _log_api("/api/pos/issue-otp", "POST", 200, ms, customer_mobile=mobile, payload=body)
-    return {"success": True, "otp_id": "***masked***", "demo_otp": otp}  # demo_otp only for development
+    return {"success": True, "otp_id": otp_data["otp_id"], "demo_otp": otp_data["otp"]}  # demo_otp only for development
 
 
 @pos_router.post("/issue-points")
@@ -256,23 +251,42 @@ async def issue_points(body: dict):
 @pos_router.post("/redeem-points")
 async def redeem_points(body: dict):
     t0 = time.time()
-    mobile = body.get("mobile")
+    from routes.pos_ewards_routes import (
+        pos_otp_col, _find_customer_by_mobile, _mobile_key, _norm_mobile,
+        _otp_failure_reason, _now_iso,
+    )
+    mobile = _norm_mobile(body.get("mobile"))
     points_to_redeem = int(body.get("points", 0))
-    otp = body.get("otp", "")
+    otp = str(body.get("otp", "") or "").strip()
     bill_number = body.get("bill_number")
     if not mobile or not points_to_redeem:
         await _log_api("/api/pos/redeem-points", "POST", 400, int((time.time() - t0) * 1000), error="missing fields", customer_mobile=mobile, bill_number=bill_number, payload=body)
         raise HTTPException(400, "Missing fields")
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
-    if not cust or cust.get("points_balance", 0) < points_to_redeem:
+    cust = await _find_customer_by_mobile(mobile)
+    if not cust:
+        await _log_api("/api/pos/redeem-points", "POST", 404, int((time.time() - t0) * 1000), error="customer not found", customer_mobile=mobile, bill_number=bill_number, payload=body)
+        raise HTTPException(404, "Customer not found")
+    if cust.get("points_balance", 0) < points_to_redeem:
         await _log_api("/api/pos/redeem-points", "POST", 400, int((time.time() - t0) * 1000), error="insufficient points", customer_mobile=mobile, bill_number=bill_number, payload=body)
         raise HTTPException(400, "Insufficient points")
-    # OTP check
-    otp_doc = await otp_col.find_one({"mobile": mobile, "otp": otp, "verified": False}, {"_id": 0})
+    # UNIFIED OTP check — read the SAME canonical `pos_otp_sessions` collection using
+    # last-10-digit matching (tolerant of +91 / leading 0 / spaces), matching any
+    # redeem-purpose OTP regardless of verified state. A genuinely-unknown OTP returns
+    # a precise diagnostic reason instead of the old bare "Invalid OTP".
+    mob_key = _mobile_key(mobile)
+    otp_doc = await pos_otp_col.find_one({
+        "otp": otp,
+        "purpose": {"$in": ["redeem_points", "redeem"]},
+        "$or": [{"mobile_key": mob_key}, {"mobile": mobile}],
+    }, {"_id": 0}, sort=[("created_at", -1)])
     if not otp_doc:
-        await _log_api("/api/pos/redeem-points", "POST", 401, int((time.time() - t0) * 1000), error="invalid OTP", customer_mobile=mobile, bill_number=bill_number, payload=body)
-        raise HTTPException(401, "Invalid OTP")
-    await otp_col.update_one({"id": otp_doc["id"]}, {"$set": {"verified": True}})
+        reason = await _otp_failure_reason(mobile, mob_key, otp, "redeem_points")
+        await _log_api("/api/pos/redeem-points", "POST", 401, int((time.time() - t0) * 1000), error=f"invalid OTP — {reason}", customer_mobile=mobile, bill_number=bill_number, payload=body)
+        raise HTTPException(401, f"Invalid OTP — {reason}")
+    if otp_doc.get("expires_at", "") and otp_doc["expires_at"] < _now_iso():
+        await _log_api("/api/pos/redeem-points", "POST", 401, int((time.time() - t0) * 1000), error="OTP expired", customer_mobile=mobile, bill_number=bill_number, payload=body)
+        raise HTTPException(401, "OTP expired. Please request a new one.")
+    await pos_otp_col.update_one({"otp_id": otp_doc["otp_id"]}, {"$set": {"verified": True, "verified_at": _now_iso()}})
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {"burn_ratio": 0.25}
     discount = points_to_redeem * cfg.get("burn_ratio", 0.25)
     await customers_col.update_one(
