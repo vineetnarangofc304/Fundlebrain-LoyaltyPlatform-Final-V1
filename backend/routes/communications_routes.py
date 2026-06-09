@@ -355,7 +355,7 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
     if dlt_tm:
         params["dlt_tm_id"] = dlt_tm
     try:
-        async with httpx.AsyncClient(timeout=12.0) as c:
+        async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.get(cfg["sms_endpoint"], params=params)
         ok = r.status_code == 200
         status = "ok" if ok else f"http_{r.status_code}"
@@ -363,12 +363,18 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
         # (dropped) by the carrier — flag it so the Message Log shows the real cause.
         if ok and not dlt_template:
             status = "ok_no_dlt_template"
-        await _log("sms", status, mob, params, r.text, template_id, event_trigger, context)
+        # Always record SOMETHING in the response (some non-200 bodies are empty).
+        resp_text = r.text or f"HTTP {r.status_code} (empty body)"
+        await _log("sms", status, mob, params, resp_text, template_id, event_trigger, context)
         return {"ok": ok, "status_code": r.status_code, "response": r.text,
                 "dlt_template_id": dlt_template or None, "dlt_entity_id": dlt_entity or None}
     except Exception as e:
-        await _log("sms", "exception", mob, params, str(e), template_id, event_trigger, context)
-        return {"ok": False, "error": str(e)}
+        # Capture the exception TYPE + endpoint so the Message Log is diagnostic even for
+        # timeouts / connection errors whose str(e) is empty (e.g. egress blocked, bad URL).
+        err = f"{type(e).__name__}: {e}".strip().rstrip(":").strip() or type(e).__name__
+        err = f"{err} — gateway: {cfg.get('sms_endpoint')}"
+        await _log("sms", "exception", mob, params, err, template_id, event_trigger, context)
+        return {"ok": False, "error": err}
 
 
 async def send_whatsapp_karix(mobile: str, template_id_external: str,

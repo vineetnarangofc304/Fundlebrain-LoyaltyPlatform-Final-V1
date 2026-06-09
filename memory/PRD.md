@@ -32,6 +32,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 64 (Jun 2026) — 🔴 Diagnose PRODUCTION SMS "Error" (blank Response)
+User shared a production (kazoloyalty.fundlebrain.ai) Message Log screenshot: every SMS row = Status **Error**, **Response empty**, DLT Template **none**.
+- **Diagnosis:** the `Error` pill = the `exception` branch of `send_sms_karix` (the HTTP call to the Karix gateway itself failed — it never reached "Platform Accepted"). The Response was blank because timeout/connection exceptions (`ReadTimeout`, `ConnectError`) often have an empty `str(e)`. Preview runs the SAME code and works (gateway reachable HTTP 200 in ~0.8s, sends logged `ok_no_dlt_template`) → the code is correct; the difference is the **production environment** (outbound egress to `pod2-japi.instaalerts.zone` blocked/timing out, or production Provider Settings endpoint/api_key wrong).
+- **Fix (`communications_routes.py`):** exception handler now records `f"{type(e).__name__}: {e} — gateway: <endpoint>"` (so timeouts/DNS/connection errors are visible in the Message Log Response column); non-200 responses log a body fallback; httpx timeout 12s→20s. Verified the captured message reads e.g. `ConnectError: [Errno -2] Name or service not known — gateway: ...`. ⚠️ Requires redeploy; then the production Response column will reveal the exact cause. DLT Content Template IDs still need to be filled on each template for delivery once sending succeeds.
+
+
 ### Iteration 63 (Jun 2026) — 🔴 SMS delivery fix · Lost-Customer gate · Welcome bonus · Zero-Bill Visitor · Message Log
 Five client-requested changes (tested e2e — testing agent iteration_25.json: 100% backend + frontend, 0 issues; pytest iteration63 + iteration64 pass).
 
