@@ -54,6 +54,17 @@ export default function HistoricDataPage() {
       setJobs(r.data.rows || []);
     } catch (e) { /* ignore */ }
   };
+  const cancelJob = async (e, jobId) => {
+    e.stopPropagation();
+    if (!window.confirm("Cancel this job? Any partial chunks are cleared and it won't be re-run. This cannot be undone.")) return;
+    try {
+      await api.post(`/historic-data/ingest/abort/${jobId}`);
+      toast.success("Job cancelled");
+      loadJobs();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Could not cancel job");
+    }
+  };
 
   useEffect(() => { loadSchema(); /* eslint-disable-next-line */ }, [dataset]);
   useEffect(() => {
@@ -337,6 +348,7 @@ export default function HistoricDataPage() {
                   <th className="text-right" title="Rows the parser rejected — invalid mobile, missing required field, etc.">Skipped</th>
                   <th className="text-right" title="Sum of New + Touched + Skipped — should equal CSV Rows">Reconciled</th>
                   <th>Queued</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -377,6 +389,16 @@ export default function HistoricDataPage() {
                         {!isBalanced && <span className="ml-1">⚠</span>}
                       </td>
                       <td className="text-xs text-neutral-500">{fmtDateTime(j.queued_at)}</td>
+                      <td className="text-right">
+                        {["uploading", "queued", "pending_ingest", "running"].includes(j.status) && (
+                          <button
+                            onClick={(e) => cancelJob(e, j.id)}
+                            data-testid={`hist-cancel-${j.id}`}
+                            className="text-[11px] text-rose-600 hover:bg-rose-50 px-2 py-1 rounded font-medium"
+                            title="Cancel this job"
+                          >Cancel</button>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}

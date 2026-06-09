@@ -818,6 +818,10 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                             except Exception as e:
                                 logger.warning(f"SKU items attach partial failure: {e}")
                             tops.clear()
+                            # Keep the job alive during the long attach pass so the
+                            # stale-recovery watchdog doesn't restart it mid-way.
+                            await historic_jobs_col.update_one(
+                                {"id": job_id}, {"$set": {"heartbeat": now()}})
                     if tops:
                         try:
                             await transactions_col.bulk_write(tops, ordered=False)
@@ -1741,11 +1745,12 @@ async def _reconcile_job(job_id: str, dataset: str):
 
 @router.post("/ingest/abort/{job_id}")
 async def ingest_abort(job_id: str, user: dict = Depends(get_current_user)):
-    """Cancel an in-flight chunked upload (clean temp chunks from MongoDB)."""
+    """Cancel an in-flight or stuck job (clears temp chunks, marks it failed so
+    the scheduler/stale-recovery won't re-run it)."""
     job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(404, "Job not found")
-    if job.get("status") not in {"uploading", "queued", "pending_ingest"}:
+    if job.get("status") not in {"uploading", "queued", "pending_ingest", "running"}:
         return {"ok": True, "noop": True}
     await historic_chunks_col.delete_many({"job_id": job_id})
     await historic_jobs_col.update_one(

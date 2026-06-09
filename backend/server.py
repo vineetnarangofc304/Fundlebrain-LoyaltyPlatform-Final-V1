@@ -352,6 +352,10 @@ async def ensure_indexes():
         (transactions_col, [("store_id", 1), ("bill_date", -1)], {"name": "ix_txn_store_billdate"}),
         (transactions_col, [("customer_mobile", 1), ("bill_date", -1)], {"name": "ix_txn_mobile_billdate"}),
         (transactions_col, [("is_return", 1)], {"name": "ix_txn_is_return"}),
+        # transaction_id powers the SKU line-item attach ($or with bill_number).
+        # Without it that post-pass does a COLLSCAN per bill (O(n²)) and never
+        # finishes on a 1M-line file — pegging the DB and 500-ing dashboards.
+        (transactions_col, [("transaction_id", 1)], {"name": "ix_txn_transaction_id"}),
         # customers — segmentation / analytics dimensions
         (customers_col, [("tier", 1)], {"name": "ix_cust_tier"}),
         (customers_col, [("home_store_id", 1)], {"name": "ix_cust_home_store"}),

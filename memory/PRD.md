@@ -32,6 +32,21 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 48 (Jun 2026) — 🔴 PROD FIX: SKU jobs never finish (O(n²) attach) → DB saturated → dashboards 500
+
+User (LIVE): *"the SKU both just keep running… also command centre not opening at all"* (Command Center now shows the new "Couldn't load… Retry" card with **HTTP 500** — so the iter-47 frontend guard works; the backend is erroring under load).
+
+**Root cause:** the SKU line-item post-pass attaches items to bills with `UpdateMany({"$or":[{"transaction_id":{"$in":keys}},{"bill_number":{"$in":keys}}]})` **once per bill (~787k times)**, and **`transaction_id` was not indexed** → `explain` showed a **COLLSCAN** per attach → O(n²) over 787k bills. The job reaches "10,00,000 touched" (main loop done) then hangs forever in the attach, **pegging `transactions_col`**. That saturation makes the command-center aggregations exceed their 25s `maxTimeMS` → `ExecutionTimeout` → 500. Repeated redeploys orphaned "running" jobs (zombies), and there was no UI to cancel them.
+
+**Fix:**
+- **`server.py ensure_indexes`:** added `transaction_id` index. `explain` now shows **IXSCAN (OR of bill_number + transaction_id)** — the attach is index-backed and completes fast.
+- **`historic_routes.py` SKU post-pass:** writes a `heartbeat` after each 1000-bill batch so the stale-recovery watchdog (3-min) doesn't restart it mid-attach.
+- **`historic_routes.py` abort:** now also cancels `running` jobs (was uploading/queued/pending only), marking them `failed` so they aren't re-run.
+- **`HistoricDataPage.jsx`:** added a **Cancel** button on every in-flight/stuck job row (`hist-cancel-*`) so duplicates/zombies can be cleared.
+
+**Verified:** SKU-attach query plan = IXSCAN (was COLLSCAN); `transaction_id indexed = True`; 21 indexes ensured on startup; frontend compiles clean. ⚠️ **Redeploy required**, then cancel the duplicate/zombie jobs (see recovery steps).
+
+
 ### Iteration 47 (Jun 2026) — 🔴 PROD FIX: Command Center "black screen" (frontend crash on API failure + heavy queries)
 
 User (LIVE, mid-load): *"command centre still not opening… black screen."* (a blank dark screen, not a spinner).
