@@ -117,6 +117,36 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# KAZO operates in IST. A POS-supplied bill date with NO timezone is treated as IST.
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+
+def _normalize_order_time(value: Any) -> str:
+    """Normalise a POS-supplied bill date/time into an ISO-8601 string so it renders
+    (and sorts / filters) correctly everywhere. The real eWards POS may send dates as
+    'DD-MM-YYYY HH:MM:SS', 'YYYY-MM-DD HH:MM:SS', 'DD/MM/YYYY', epoch seconds/ms, etc.
+    Stored raw these show as 'Invalid Date'. Rules: explicit timezone is preserved; a
+    naive value is tagged IST (+05:30); blank / unparseable falls back to now() so a
+    bad date never blocks a bill."""
+    if value is None or str(value).strip() == "":
+        return _now_iso()
+    s = str(value).strip()
+    if re.fullmatch(r"\d{10}", s):           # epoch seconds
+        return datetime.fromtimestamp(int(s), tz=IST_TZ).isoformat()
+    if re.fullmatch(r"\d{13}", s):           # epoch milliseconds
+        return datetime.fromtimestamp(int(s) / 1000, tz=IST_TZ).isoformat()
+    try:
+        from dateutil import parser as _dtp
+        iso_like = bool(re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", s))
+        dt = _dtp.parse(s, dayfirst=not iso_like, yearfirst=iso_like)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST_TZ)
+        return dt.isoformat()
+    except Exception:
+        logger.warning(f"Unparseable POS order_time '{s}' — defaulting to now()")
+        return _now_iso()
+
+
 def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"status_code": 200, "response": payload}
 
@@ -1184,7 +1214,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     # Points are earned on `amount` (pre-tax). Fall back to loyalty_gross_amount/net for
     # legacy payloads that don't send `amount`.
     loyalty_base = amount or _parse_float(txn.get("loyalty_gross_amount")) or net
-    order_time = txn.get("order_time") or _now_iso()
+    order_time = _normalize_order_time(txn.get("order_time"))
 
     # Loyalty engine
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}

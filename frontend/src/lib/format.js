@@ -38,20 +38,42 @@ export const fmtPct = (n, digits = 1) => {
 // Indian Standard Time regardless of the viewer's machine timezone.
 const IST_TZ = "Asia/Kolkata";
 
+// Tolerant date parser. Handles ISO strings AND the day-first formats some POS
+// terminals send (DD-MM-YYYY / DD/MM/YYYY, optional HH:MM[:SS]) which `new Date()`
+// rejects as "Invalid Date". Day-first naive values are treated as IST (+05:30).
+const parseDate = (s) => {
+  if (s === null || s === undefined || s === "") return null;
+  const str = String(s).trim();
+  // ISO-like (YYYY-MM-DD…) — reliable, identical across all browsers.
+  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(str)) {
+    const d = new Date(str);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  // Day-first DD-MM-YYYY / DD/MM/YYYY (optional HH:MM[:SS]) — what some POS send.
+  // Treated as IST so it renders correctly. (Safari rejects these via new Date().)
+  const m = str.match(
+    /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/
+  );
+  if (m) {
+    const [, dd, mm, yyyy, hh = "00", mi = "00", ss = "00"] = m;
+    const iso = `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}T${hh.padStart(2, "0")}:${mi}:${ss}+05:30`;
+    const d = new Date(iso);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  const fallback = new Date(str);
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+};
+
 export const fmtDate = (s) => {
-  if (!s) return "—";
-  try {
-    const d = new Date(s);
-    return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: IST_TZ });
-  } catch { return s; }
+  const d = parseDate(s);
+  if (!d) return s ? s : "—";
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: IST_TZ });
 };
 
 export const fmtDateTime = (s) => {
-  if (!s) return "—";
-  try {
-    const d = new Date(s);
-    return d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: IST_TZ });
-  } catch { return s; }
+  const d = parseDate(s);
+  if (!d) return s ? s : "—";
+  return d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: IST_TZ });
 };
 
 export const tierClass = (t) => `pill pill-${(t || "silver").toLowerCase()}`;
