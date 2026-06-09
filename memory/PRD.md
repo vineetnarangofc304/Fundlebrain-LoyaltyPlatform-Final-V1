@@ -32,6 +32,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 65 (Jun 2026) — 🔧 Outbound-connectivity diagnostic for production SMS ConnectTimeout
+After redeploy, production Message Log Response showed `ConnectTimeout — gateway: https://pod2-japi.instaalerts.zone/...` (DLT template IDs now populated on newer rows = client added them). User pushed back that Karix has NO IP allowlist (preview was never whitelisted yet works) and that other Emergent prod apps use Karix (incl. WhatsApp) fine. Note: Karix WhatsApp uses a DIFFERENT host than the SMS "japi" gateway, so that doesn't prove this SMS host is reachable from prod.
+- **Added `GET /api/provider-connectivity`** (`communications_routes.py`, super-admin via get_current_user): returns the deployment's egress public IP + connectivity checks to control hosts (api.ipify.org, google) and the configured SMS gateway, with a verdict separating "blanket egress block" (control fails too → Emergent Support) from "host-specific block" (only gateway fails → Karix IP/route for this host). Verified in preview: egress 34.16.56.64, all reachable, gateway 807ms.
+- **Added a "Connectivity check" button** on `MessageLogPage.jsx` that calls it and renders the egress IP + per-target results + verdict. ⚠️ Requires redeploy; then run it ON production to read the production egress IP and pinpoint the cause.
+
+
 ### Iteration 64 (Jun 2026) — 🔴 Diagnose PRODUCTION SMS "Error" (blank Response)
 User shared a production (kazoloyalty.fundlebrain.ai) Message Log screenshot: every SMS row = Status **Error**, **Response empty**, DLT Template **none**.
 - **Diagnosis:** the `Error` pill = the `exception` branch of `send_sms_karix` (the HTTP call to the Karix gateway itself failed — it never reached "Platform Accepted"). The Response was blank because timeout/connection exceptions (`ReadTimeout`, `ConnectError`) often have an empty `str(e)`. Preview runs the SAME code and works (gateway reachable HTTP 200 in ~0.8s, sends logged `ok_no_dlt_template`) → the code is correct; the difference is the **production environment** (outbound egress to `pod2-japi.instaalerts.zone` blocked/timing out, or production Provider Settings endpoint/api_key wrong).

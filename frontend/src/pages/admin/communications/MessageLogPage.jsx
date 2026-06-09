@@ -5,7 +5,7 @@ import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
 import { PageHeader, SectionHeading } from "../_shared";
 import { fmtDateTime } from "@/lib/format";
-import { RefreshCw, Search, X, AlertTriangle } from "lucide-react";
+import { RefreshCw, Search, X, AlertTriangle, Activity, CheckCircle2, XCircle } from "lucide-react";
 
 const STATUS_STYLES = {
   ok: { bg: "#ECFDF5", color: "#047857", border: "#A7F3D0", label: "Sent" },
@@ -25,6 +25,19 @@ export default function MessageLogPage() {
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ channel: "", status: "", mobile: "", event_trigger: "" });
   const [expanded, setExpanded] = useState(null);
+  const [diag, setDiag] = useState(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+
+  const runDiag = async () => {
+    setDiagLoading(true);
+    setDiag(null);
+    try {
+      const r = await api.get("/provider-connectivity");
+      setDiag(r.data);
+    } catch (e) {
+      setDiag({ error: e?.response?.data?.detail || e.message || "Diagnostic failed" });
+    } finally { setDiagLoading(false); }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -48,9 +61,14 @@ export default function MessageLogPage() {
         title="SMS / Message Log"
         subtitle="EVERY DISPATCH · LIVE"
         actions={
-          <button onClick={load} className="k-btn k-btn-outline k-btn-sm" data-testid="msglog-refresh">
-            <RefreshCw className="w-3.5 h-3.5" /> Refresh
-          </button>
+          <>
+            <button onClick={runDiag} className="k-btn k-btn-outline k-btn-sm" data-testid="msglog-diag" disabled={diagLoading}>
+              <Activity className={`w-3.5 h-3.5 ${diagLoading ? "animate-pulse" : ""}`} /> {diagLoading ? "Testing…" : "Connectivity check"}
+            </button>
+            <button onClick={load} className="k-btn k-btn-outline k-btn-sm" data-testid="msglog-refresh">
+              <RefreshCw className="w-3.5 h-3.5" /> Refresh
+            </button>
+          </>
         }
       />
 
@@ -78,6 +96,37 @@ export default function MessageLogPage() {
           <button onClick={load} className="k-btn k-btn-primary k-btn-sm" data-testid="msglog-apply"><Search className="w-3.5 h-3.5" /> Search</button>
           <button onClick={clear} className="k-btn k-btn-outline k-btn-sm" data-testid="msglog-clear"><X className="w-3.5 h-3.5" /> Clear</button>
         </div>
+
+        {/* Connectivity diagnostic results */}
+        {diag && (
+          <div className="chart-card p-4" data-testid="msglog-diag-result">
+            <div className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 mb-2">Outbound Connectivity (run from THIS deployment)</div>
+            {diag.error ? (
+              <div className="text-sm text-rose-700">{String(diag.error)}</div>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-x-8 gap-y-1 text-sm">
+                  <div><span className="text-neutral-500">Egress IP:</span> <span className="font-mono font-medium" data-testid="diag-egress-ip">{diag.egress_ip}</span></div>
+                  <div className="text-neutral-500 break-all">Gateway: <span className="font-mono">{diag.sms_endpoint}</span></div>
+                </div>
+                <div className="mt-3 grid sm:grid-cols-3 gap-2">
+                  {(diag.checks || []).map((ck) => (
+                    <div key={ck.target} className={`border p-2 text-xs ${ck.ok ? "border-emerald-200 bg-emerald-50/50" : "border-rose-200 bg-rose-50/50"}`}>
+                      <div className="flex items-center gap-1 font-medium">
+                        {ck.ok ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> : <XCircle className="w-3.5 h-3.5 text-rose-600" />}
+                        {ck.target}
+                      </div>
+                      <div className="text-[11px] text-neutral-600 mt-1">{ck.ok ? `HTTP ${ck.http_status} · ${ck.ms}ms` : ck.error}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 text-[12px] text-neutral-700 bg-amber-50 border border-amber-200 rounded px-3 py-2" data-testid="diag-verdict">
+                  <strong>Verdict:</strong> {diag.verdict}
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         <div className="chart-card p-5" data-accent="burgundy">
           <SectionHeading eyebrow={`${total.toLocaleString()} TOTAL · ${rows.length} SHOWN`} title="Message dispatch log" accent="burgundy" />

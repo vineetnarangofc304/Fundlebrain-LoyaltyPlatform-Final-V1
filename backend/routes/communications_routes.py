@@ -504,6 +504,57 @@ async def get_message_log(channel: Optional[str] = None, status: Optional[str] =
     return {"rows": rows, "total": total}
 
 
+@router.get("/provider-connectivity")
+async def provider_connectivity(user: dict = Depends(get_current_user)):
+    """Outbound-egress diagnostic — run this ON the deployment to see exactly what it can
+    reach. Returns the deployment's egress (public) IP + connectivity to a control host and
+    to the configured SMS gateway. Lets us separate a blanket egress block (control also
+    fails) from a host-specific block (only the SMS gateway fails)."""
+    import time as _time
+    cfg = await _get_config()
+    endpoint = cfg.get("sms_endpoint") or "https://pod2-japi.instaalerts.zone/httpapi/QueryStringReceiver"
+    out: Dict[str, Any] = {"egress_ip": None, "sms_endpoint": endpoint, "checks": []}
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as c:
+        try:
+            r = await c.get("https://api.ipify.org")
+            out["egress_ip"] = r.text.strip()
+        except Exception as e:
+            out["egress_ip"] = f"ERROR: {type(e).__name__}: {e}"
+
+        targets = [
+            ("control_internet", "https://api.ipify.org", None),
+            ("control_google", "https://www.google.com", None),
+            ("sms_gateway", endpoint, {"ping": "1"}),
+        ]
+        for label, url, params in targets:
+            t0 = _time.time()
+            try:
+                rr = await c.get(url, params=params)
+                out["checks"].append({"target": label, "url": url, "ok": True,
+                                       "http_status": rr.status_code,
+                                       "ms": int((_time.time() - t0) * 1000)})
+            except Exception as e:
+                out["checks"].append({"target": label, "url": url, "ok": False,
+                                       "error": f"{type(e).__name__}: {e}",
+                                       "ms": int((_time.time() - t0) * 1000)})
+
+    control_ok = any(ck["ok"] for ck in out["checks"] if ck["target"].startswith("control"))
+    gateway_ok = any(ck["ok"] for ck in out["checks"] if ck["target"] == "sms_gateway")
+    if gateway_ok:
+        out["verdict"] = "SMS gateway reachable from this deployment."
+    elif control_ok:
+        out["verdict"] = ("General internet egress works, but the SMS gateway host is NOT "
+                          "reachable — host/IP-specific block (Karix IP filter on this pod, or "
+                          "a route to this host). Give your production egress IP to Karix, or "
+                          "ask Emergent Support to allow this destination host.")
+    else:
+        out["verdict"] = ("No outbound internet egress at all from this deployment — blanket "
+                          "egress block. Contact Emergent Support to enable outbound HTTPS egress.")
+    return out
+
+
+
 # ---------------- Internal: fire_event hook ----------------
 async def fire_event(event_trigger: str, mobile: str, params: Dict[str, Any]):
     """Fire all active templates registered for this event_trigger.
