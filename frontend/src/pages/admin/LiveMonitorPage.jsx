@@ -19,6 +19,26 @@ const PALETTE = {
   emerald: "#047857",
 };
 
+// Row colour-coding by bill type — repeat (green), new (amber/gold), walk-in (rose),
+// return (orange). Literal class strings so Tailwind's JIT keeps them.
+const ROW_STYLES = {
+  repeat:  { cls: "bg-emerald-50 hover:bg-emerald-100", border: "#047857" },
+  new:     { cls: "bg-amber-50 hover:bg-amber-100",     border: "#D97706" },
+  walk_in: { cls: "bg-rose-50 hover:bg-rose-100",       border: "#9F1239" },
+  return:  { cls: "bg-orange-50 hover:bg-orange-100",   border: "#EA580C" },
+};
+const rowKind = (r) =>
+  r.is_return ? "return"
+  : !r.has_mobile ? "walk_in"
+  : r.customer_status === "new" ? "new"
+  : "repeat";
+
+// Today's calendar date in IST (YYYY-MM-DD) — drives the default "Today" window.
+const istTodayIso = () =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+
 export default function LiveMonitorPage() {
   const [rows, setRows] = useState([]);
   const [stats, setStats] = useState(null);
@@ -36,7 +56,7 @@ export default function LiveMonitorPage() {
     start_date: "",
     end_date: "",
   });
-  const [statsWindow, setStatsWindow] = useState(10080); // default = 7d so the KPI strip and table aren't blank on fresh login (a 24h default would show zero on quieter stores)
+  const [statsWindow, setStatsWindow] = useState("today"); // default = Today (IST 00:00→23:59); the other relative windows remain in the dropdown
   const [drillRow, setDrillRow] = useState(null);
   const lastFetchRef = useRef(null);
 
@@ -45,12 +65,17 @@ export default function LiveMonitorPage() {
     const params = { limit: 200 };
     const statsParams = {};
     if (hasRange) {
-      // Explicit date range overrides the relative stats window
+      // Explicit From/To date range overrides everything
       if (filters.start_date) { params.start_date = filters.start_date; statsParams.start_date = filters.start_date; }
       if (filters.end_date) { params.end_date = filters.end_date; statsParams.end_date = filters.end_date; }
+    } else if (statsWindow === "today") {
+      // Default: today's calendar day in IST (12 AM → 11:59 PM)
+      const d = istTodayIso();
+      params.start_date = d; params.end_date = d;
+      statsParams.start_date = d; statsParams.end_date = d;
     } else {
-      params.since_minutes = statsWindow;
-      statsParams.minutes = statsWindow;
+      params.since_minutes = Number(statsWindow);
+      statsParams.minutes = Number(statsWindow);
     }
     Object.entries(filters).forEach(([k, v]) => {
       if (k === "start_date" || k === "end_date") return;
@@ -104,6 +129,9 @@ export default function LiveMonitorPage() {
   const clearFilters = () => setFilters({ store_id: "", region: "", has_mobile: "all", payment_mode: "", source: "", min_amount: "", max_amount: "", start_date: "", end_date: "" });
   const activeFilterCount = useMemo(() =>
     Object.values(filters).filter((v) => v !== "" && v !== "all").length, [filters]);
+  const windowEyebrow = (filters.start_date || filters.end_date)
+    ? `${filters.start_date || "…"} → ${filters.end_date || "…"}`
+    : statsWindow === "today" ? "TODAY (IST)" : `LAST ${statsWindow} MIN`;
 
   return (
     <div data-testid="live-monitor-page">
@@ -174,7 +202,8 @@ export default function LiveMonitorPage() {
             <NumInput label="Max ₹" value={filters.max_amount} onChange={(v) => setFilters({ ...filters, max_amount: v })} testid="lm-fil-max" />
             <DateInput label="From date" value={filters.start_date} onChange={(v) => setFilters({ ...filters, start_date: v })} testid="lm-fil-start-date" />
             <DateInput label="To date" value={filters.end_date} onChange={(v) => setFilters({ ...filters, end_date: v })} testid="lm-fil-end-date" />
-            <Select label="Stats window" value={String(statsWindow)} onChange={(v) => setStatsWindow(Number(v))} disabled={!!(filters.start_date || filters.end_date)} options={[
+            <Select label="Stats window" value={String(statsWindow)} onChange={(v) => setStatsWindow(v)} disabled={!!(filters.start_date || filters.end_date)} options={[
+              { value: "today", label: "Today" },
               { value: "15", label: "Last 15m" },
               { value: "60", label: "Last 1h" },
               { value: "360", label: "Last 6h" },
@@ -198,13 +227,19 @@ export default function LiveMonitorPage() {
         {/* Top stores */}
         {stats?.by_store_top10?.length > 0 && (
           <div className="chart-card p-5" data-accent="teal">
-            <SectionHeading eyebrow={(filters.start_date || filters.end_date) ? `${filters.start_date || "…"} → ${filters.end_date || "…"}` : `LAST ${statsWindow} MIN`} title="Top stores by revenue" accent="teal" />
+            <SectionHeading eyebrow={windowEyebrow} title="Top stores by revenue" accent="teal" />
             <div className="grid md:grid-cols-2 lg:grid-cols-5 gap-3 mt-3">
               {stats.by_store_top10.slice(0, 5).map((s) => (
                 <div key={s.store_id || s.store_name} className="p-3 border border-black/10 bg-neutral-50" data-testid={`lm-top-store-${s.store_id}`}>
-                  <div className="text-[10px] uppercase tracking-widest text-neutral-500">{s.bills} BILLS · {s.attach_rate_pct}% ATTACH</div>
-                  <div className="font-display text-base truncate mt-1">{s.store_name}</div>
-                  <div className="font-mono text-sm mt-1">₹{(s.revenue || 0).toLocaleString()}</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[10px] uppercase tracking-widest text-neutral-500">{s.bills} BILLS · {s.attach_rate_pct}% ATTACH</div>
+                    {s.store_code && <span className="font-mono text-[10px] text-teal-800 bg-teal-50 px-1.5 py-0.5 border border-teal-200" data-testid={`lm-top-store-code-${s.store_id}`}>{s.store_code}</span>}
+                  </div>
+                  <div className="font-display text-base truncate mt-1" title={s.store_name}>{s.store_name}</div>
+                  <div className="font-mono text-sm mt-1">
+                    ₹{(s.revenue || 0).toLocaleString()}
+                    {s.returns ? <span className="text-[10px] text-rose-600 ml-1">· {s.returns} ret</span> : null}
+                  </div>
                 </div>
               ))}
             </div>
@@ -214,6 +249,12 @@ export default function LiveMonitorPage() {
         {/* Live transactions table */}
         <div className="chart-card p-5" data-accent="burgundy" data-testid="lm-table-card">
           <SectionHeading eyebrow={`${rows.length} RECENT`} title="Bills as they arrive" accent="burgundy" />
+          <div className="flex flex-wrap items-center gap-3 mt-2 mb-2 text-[10px] uppercase tracking-widest text-neutral-500" data-testid="lm-row-legend">
+            <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-emerald-100 border-l-2" style={{ borderColor: "#047857" }} /> Repeat</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-amber-100 border-l-2" style={{ borderColor: "#D97706" }} /> New</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-rose-100 border-l-2" style={{ borderColor: "#9F1239" }} /> Walk-in</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-orange-100 border-l-2" style={{ borderColor: "#EA580C" }} /> Return</span>
+          </div>
           <div className="overflow-x-auto">
             <table className="data-table">
               <thead>
@@ -238,9 +279,11 @@ export default function LiveMonitorPage() {
               <tbody>
                 {rows.length === 0 ? (
                   <tr><td colSpan={15} className="py-10 text-center text-neutral-500 text-sm">Waiting for live bills…</td></tr>
-                ) : rows.map((r) => (
-                  <tr key={r.id} onClick={() => setDrillRow(r)} className="cursor-pointer hover:bg-neutral-50"
-                       style={{ borderLeft: `4px solid ${r.has_mobile ? PALETTE.emerald : PALETTE.rose}` }}
+                ) : rows.map((r) => {
+                  const rk = ROW_STYLES[rowKind(r)];
+                  return (
+                  <tr key={r.id} onClick={() => setDrillRow(r)} className={`cursor-pointer ${rk.cls}`}
+                       style={{ borderLeft: `4px solid ${rk.border}` }}
                        data-testid={`lm-row-${r.id}`}>
                     <td>
                       {r.has_mobile
@@ -298,7 +341,8 @@ export default function LiveMonitorPage() {
                       {r.is_return && <span className="pill pill-warning ml-1">RETURN</span>}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

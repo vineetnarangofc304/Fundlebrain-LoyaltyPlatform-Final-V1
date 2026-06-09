@@ -1091,6 +1091,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         return resp
     store_id = store["id"] if store else None
     store_name = store.get("name") if store else None
+    store_code = store.get("code") if store else None
 
     # Upsert customer
     existing = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
@@ -1186,6 +1187,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         "customer_name": cust.get("name"),
         "store_id": store_id,
         "store_name": store_name,
+        "store_code": store_code,
         "bill_number": bill_number,
         "transaction_id": str(txn.get("id") or bill_number),
         "bill_date": order_time,

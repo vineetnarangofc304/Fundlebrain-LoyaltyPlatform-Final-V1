@@ -111,10 +111,22 @@ async def live_transactions(
                                              "visit_count": 1}):
             cust_map[c["mobile"]] = c
 
+    # Resolve LOC code (store_code) + canonical store name/city/zone from the store
+    # master so the cockpit's "Loc Code" column is populated even for bills ingested
+    # before store_code was persisted on the transaction (live POS bills + history).
+    store_ids = list({r.get("store_id") for r in rows if r.get("store_id")})
+    store_map = {}
+    if store_ids:
+        async for s in stores_col.find({"id": {"$in": store_ids}},
+                                        {"_id": 0, "id": 1, "code": 1, "name": 1,
+                                         "city": 1, "region": 1}):
+            store_map[s["id"]] = s
+
     enriched = []
     for r in rows:
         mob = r.get("customer_mobile")
         c = cust_map.get(mob) if mob else None
+        st = store_map.get(r.get("store_id")) or {}
         # Derive customer_status: walk-in (no mobile) vs new (first ever bill)
         # vs repeat (had earlier bills). "first ever" means this row's bill_date
         # equals the customer's first_purchase_at (same calendar date).
@@ -137,10 +149,10 @@ async def live_transactions(
             "bill_date": r.get("bill_date"),
             "received_at": r.get("created_at"),
             "store_id": r.get("store_id"),
-            "store_name": r.get("store_name"),
-            "store_code": r.get("store_code"),
-            "city": r.get("city"),
-            "zone": r.get("zone"),
+            "store_name": r.get("store_name") or st.get("name"),
+            "store_code": r.get("store_code") or st.get("code"),
+            "city": r.get("city") or st.get("city"),
+            "zone": r.get("zone") or st.get("region"),
             "customer_mobile": mob,
             "customer_name": r.get("customer_name") or (c.get("name") if c else None),
             "tier": (c.get("tier") if c else None) or r.get("tier"),
@@ -235,14 +247,17 @@ async def live_stats(
     repeat_bills = int(rr_doc.get("repeat_bills") or 0)
     repeat_customers = int(rr_doc.get("repeat_customers") or 0)
 
-    # Per-store top performers
+    # Per-store top performers — exclude bills with no store_id (returns/anonymous
+    # bills lacking a store were lumping into an "Unknown" card with negative revenue).
+    # Revenue here = SALES only (returns excluded) so "Top stores by revenue" reads clean.
     pipe_store = [
-        {"$match": dict(date_match)},
+        {"$match": {**date_match, "store_id": {"$nin": [None, ""]}}},
         {"$group": {
             "_id": "$store_id",
             "store_name": {"$first": "$store_name"},
             "bills": {"$sum": 1},
-            "revenue": {"$sum": "$net_amount"},
+            "revenue": {"$sum": {"$cond": ["$is_return", 0, "$net_amount"]}},
+            "returns": {"$sum": {"$cond": ["$is_return", 1, 0]}},
             "bills_with_mobile": {
                 "$sum": {"$cond": [
                     {"$and": [{"$ne": ["$customer_mobile", None]},
@@ -255,6 +270,14 @@ async def live_stats(
         {"$limit": 10},
     ]
     by_store = await transactions_col.aggregate(pipe_store).to_list(10)
+    # Resolve LOC code + canonical name from the store master (txn store_name can be
+    # blank/inconsistent).
+    bs_ids = [s.get("_id") for s in by_store if s.get("_id")]
+    bs_map = {}
+    if bs_ids:
+        async for s in stores_col.find({"id": {"$in": bs_ids}},
+                                        {"_id": 0, "id": 1, "code": 1, "name": 1}):
+            bs_map[s["id"]] = s
 
     return {
         "window_minutes": minutes,
@@ -274,9 +297,11 @@ async def live_stats(
         "by_store_top10": [
             {
                 "store_id": s.get("_id"),
-                "store_name": s.get("store_name") or "Unknown",
+                "store_name": (bs_map.get(s.get("_id")) or {}).get("name") or s.get("store_name") or "Unknown",
+                "store_code": (bs_map.get(s.get("_id")) or {}).get("code"),
                 "bills": s.get("bills", 0),
                 "revenue": round(s.get("revenue", 0) or 0, 2),
+                "returns": int(s.get("returns") or 0),
                 "bills_with_mobile": s.get("bills_with_mobile", 0),
                 "attach_rate_pct": round(
                     (s.get("bills_with_mobile", 0) / s.get("bills", 1) * 100) if s.get("bills") else 0,

@@ -550,20 +550,41 @@ async def _bulk_upsert_resilient(col, ops, _depth=0):
     return up, ma, failed
 
 
-async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
-                            duplicate_mode: str, dry_run: bool):
+async def _beat(job_id: str) -> None:
+    """Write a heartbeat so the scheduler's stale-recovery watchdog knows a long
+    post-pass is still alive and does NOT re-queue + re-run the whole job (which
+    previously made multi-lakh files appear to ingest 'forever')."""
+    try:
+        await historic_jobs_col.update_one(
+            {"id": job_id},
+            {"$set": {"heartbeat": datetime.now(timezone.utc).isoformat()}})
+    except Exception:
+        pass
+
+
+async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = None,
+                            duplicate_mode: str = "upsert", dry_run: bool = False,
+                            csv_path: Optional[str] = None):
     def now():
         return datetime.now(timezone.utc).isoformat()
     await historic_jobs_col.update_one({"id": job_id},
-        {"$set": {"status": "running", "started_at": now()}})
+        {"$set": {"status": "running", "started_at": now(), "heartbeat": now()}})
+    fh = None
+    total_rows = 0
+    processed = 0
+    inserted = 0
+    updated = 0
+    skipped = 0
+    errors: List[Dict[str, Any]] = []
     try:
-        reader = csv.DictReader(io.StringIO(raw_text))
-        total_rows = 0
-        processed = 0
-        inserted = 0
-        updated = 0
-        skipped = 0
-        errors: List[Dict[str, Any]] = []
+        if csv_path:
+            # Stream the CSV from a temp file on disk (O(1) memory). Python text-mode
+            # reading decodes UTF-8 incrementally + correctly across buffer boundaries,
+            # so a 126MB+ file is never held as one giant decoded string.
+            fh = open(csv_path, "r", encoding="utf-8-sig", errors="replace", newline="")
+            reader = csv.DictReader(fh)
+        else:
+            reader = csv.DictReader(io.StringIO(raw_text or ""))
         skipped_buf: List[Dict[str, Any]] = []  # buffered skipped-row docs for persistence
         skipped_persisted = 0
 
@@ -1097,6 +1118,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                         if len(cust_ops) >= 500:
                             await customers_col.bulk_write(cust_ops, ordered=False)
                             cust_ops.clear()
+                            await _beat(job_id)
                     if cust_ops:
                         await customers_col.bulk_write(cust_ops, ordered=False)
                 logger.info(f"Auto-backfill complete for job {job_id} ({len(affected)} mobiles refreshed)")
@@ -1126,6 +1148,12 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                        "errors_sample": errors[:MAX_ERROR_SAMPLES],
                        "total_rows": total_rows,
                        "completed_at": now()}})
+    finally:
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
 
 
 def _get_pk(dataset: str, doc: Dict[str, Any]) -> Tuple[Optional[str], Any]:
@@ -1207,6 +1235,7 @@ async def _write_ledger_for_job(job_id: str) -> Dict[str, int]:
             except Exception as e:
                 logger.warning(f"Ledger bulk insert partial failure: {e}")
             ops.clear()
+            await _beat(job_id)
     if ops:
         try:
             await points_ledger_col.bulk_write(ops, ordered=False)
@@ -1315,6 +1344,7 @@ async def _link_registered_stores_for_job(job_id: str) -> int:
             touched += res.modified_count
         except Exception as e:
             logger.warning(f"registered-store link partial failure: {e}")
+        await _beat(job_id)
     logger.info(f"Registered-store link job {job_id}: {len(codes)} codes, "
                 f"{len(new_docs)} stub stores, {touched} customers attributed")
     return touched
@@ -1351,12 +1381,31 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
             "total_spend": {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
         }},
     ]
-    rows = await transactions_col.aggregate(agg_pipe).to_list(len(touched_mobiles))
-
-    ops = []
-    home_ops = []
+    await _beat(job_id)
+    # Stream the aggregate (allowDiskUse so a huge $group/$addToSet spills to disk
+    # instead of hitting the 100MB in-memory limit) and flush in batches so we never
+    # hold all groups in memory AND keep the heartbeat alive on multi-lakh files.
+    cursor = transactions_col.aggregate(agg_pipe, allowDiskUse=True)
+    ops: List[Any] = []
+    home_ops: List[Any] = []
     now_iso = datetime.now(timezone.utc).isoformat()
-    for r in rows:
+    n = 0
+
+    async def _flush_recompute():
+        if ops:
+            try:
+                await customers_col.bulk_write(ops, ordered=False)
+            except Exception as e:
+                logger.warning(f"Customer-aggregate bulk write partial failure: {e}")
+            ops.clear()
+        if home_ops:
+            try:
+                await customers_col.bulk_write(home_ops, ordered=False)
+            except Exception as e:
+                logger.warning(f"Customer home-store bulk write partial failure: {e}")
+            home_ops.clear()
+
+    async for r in cursor:
         mobile = r["_id"]
         update_set: Dict[str, Any] = {
             "first_purchase_at": r["first_purchase_at"],
@@ -1392,18 +1441,13 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
         home_ops.append(UpdateOne(
             {"mobile": mobile, "registered_store_id": None},
             {"$set": {"home_store_id": r["first_store_id"]}}))
-    if ops:
-        try:
-            await customers_col.bulk_write(ops, ordered=False)
-        except Exception as e:
-            logger.warning(f"Customer-aggregate bulk write partial failure: {e}")
-    if home_ops:
-        try:
-            await customers_col.bulk_write(home_ops, ordered=False)
-        except Exception as e:
-            logger.warning(f"Customer home-store bulk write partial failure: {e}")
-    logger.info(f"Recomputed customer aggregates for {len(rows)} mobiles (job {job_id})")
-    return len(rows)
+        n += 1
+        if len(ops) >= 500:
+            await _flush_recompute()
+            await _beat(job_id)
+    await _flush_recompute()
+    logger.info(f"Recomputed customer aggregates for {n} mobiles (job {job_id})")
+    return n
 
 
 def _exists_col(dataset: str):
@@ -1860,16 +1904,40 @@ async def process_pending_ingests():
     from pymongo import ReturnDocument
 
     iso_now = datetime.now(timezone.utc).isoformat()
-    stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+    # Generous stale window: a long post-pass on a multi-lakh file can legitimately
+    # run for a few minutes between heartbeats. Heartbeats are now written through
+    # every post-pass, so a job silent for >8 min is genuinely stuck.
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=8)).isoformat()
 
-    # Step 1: recover stale "running" jobs
-    recovery = await historic_jobs_col.update_many(
+    # Step 1: recover stale "running" jobs — but NEVER loop forever. A job that has
+    # been recovered MAX_RECOVERIES times without completing is marked failed (and its
+    # chunks cleaned up) so it can't keep re-running and pegging the worker. This is
+    # the hard stop for the previous "job lies in queue forever / re-runs endlessly".
+    MAX_RECOVERIES = 4
+    stale_jobs = await historic_jobs_col.find(
         {"status": "running", "heartbeat": {"$lt": stale_cutoff}},
-        {"$set": {"status": "pending_ingest",
-                   "stale_recovered_at": iso_now}},
-    )
-    if recovery.modified_count:
-        logger.warning(f"Recovered {recovery.modified_count} stale ingest job(s)")
+        {"_id": 0, "id": 1, "recovery_count": 1},
+    ).to_list(50)
+    for sj in stale_jobs:
+        rc = int(sj.get("recovery_count") or 0)
+        if rc >= MAX_RECOVERIES:
+            await historic_jobs_col.update_one(
+                {"id": sj["id"]},
+                {"$set": {"status": "failed",
+                           "error": (f"Stalled — recovered {rc}× without completing; marked "
+                                     "failed to stop the re-run loop. Please retry the upload."),
+                           "completed_at": iso_now}},
+            )
+            await historic_chunks_col.delete_many({"job_id": sj["id"]})
+            logger.error(f"Ingest job {sj['id']} FAILED after {rc} stale recoveries — stopped re-run loop")
+        else:
+            await historic_jobs_col.update_one(
+                {"id": sj["id"]},
+                {"$set": {"status": "pending_ingest", "stale_recovered_at": iso_now,
+                           "heartbeat": iso_now},
+                 "$inc": {"recovery_count": 1}},
+            )
+            logger.warning(f"Recovered stale ingest job {sj['id']} (recovery #{rc + 1})")
 
     # Step 2: claim one pending job atomically
     job = await historic_jobs_col.find_one_and_update(
@@ -1887,34 +1955,63 @@ async def process_pending_ingests():
     job_id = job["id"]
     logger.info(f"Claimed ingest job {job_id} (dataset={job['dataset']}, rows={job.get('row_count_estimated')})")
 
-    # Step 3: stitch chunks and run ingest
+    # Step 3: stage chunks to a temp file on disk, then ingest from disk.
+    # We deliberately do NOT join the whole file into one in-memory bytes blob +
+    # decoded string (that spiked memory to ~2-4× file size and risked OOM on the
+    # 126MB+ CRM file). For CSV we stream raw bytes straight to disk; only xlsx —
+    # which must be fully loaded to convert — is stitched in memory (those files are
+    # small). _run_ingest_job then reads the CSV line-by-line from disk.
+    import tempfile
+    import os as _os
+    filename = job.get("filename", "") or ""
+    is_xlsx = filename.lower().endswith(".xlsx")
+    tmp_path = None
     try:
         cursor = historic_chunks_col.find(
             {"job_id": job_id},
             {"_id": 0, "chunk_index": 1, "data": 1},
         ).sort("chunk_index", 1)
-        parts: List[bytes] = []
-        async for doc in cursor:
-            parts.append(doc["data"])
-        # CPU-bound join + decode (+ xlsx→csv) runs in a worker thread so a
-        # 100MB+ file never blocks the event loop (a blocked loop would 520
-        # concurrent chunk uploads / live POS / health checks).
-        text = await asyncio.to_thread(_stitch_and_decode, parts, job.get("filename", ""))
-        parts = []
+        fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"ingest_{job_id}_")
+        if is_xlsx:
+            parts: List[bytes] = []
+            async for doc in cursor:
+                parts.append(doc["data"])
+            text = await asyncio.to_thread(_stitch_and_decode, parts, filename)
+            parts = []
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            del text
+        else:
+            # Stream raw CSV bytes to disk (O(chunk) memory) — never holds the full file.
+            with _os.fdopen(fd, "wb") as f:
+                async for doc in cursor:
+                    f.write(doc["data"])
     except Exception as e:
-        logger.exception(f"Failed to stitch chunks for job {job_id}")
+        logger.exception(f"Failed to stage chunks for job {job_id}")
         await historic_jobs_col.update_one(
             {"id": job_id},
             {"$set": {"status": "failed",
                        "error": f"Could not read uploaded chunks: {e}",
                        "completed_at": datetime.now(timezone.utc).isoformat()}},
         )
+        if tmp_path:
+            try:
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
         return
 
-    # _run_ingest_job already writes heartbeat per flush + handles its own try/except
-    await _run_ingest_job(job_id, job["dataset"], text,
-                           job["duplicate_mode"], job.get("dry_run", False))
-    del text
+    # _run_ingest_job streams the CSV from disk + writes heartbeats through every
+    # pass, and handles its own try/except.
+    try:
+        await _run_ingest_job(job_id, job["dataset"], None,
+                               job["duplicate_mode"], job.get("dry_run", False),
+                               csv_path=tmp_path)
+    finally:
+        try:
+            _os.unlink(tmp_path)
+        except Exception:
+            pass
 
     # Step 4: cleanup chunks if ingest completed cleanly
     refreshed = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0, "status": 1, "total_rows": 1, "inserted": 1, "updated": 1, "skipped": 1})
