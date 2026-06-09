@@ -113,6 +113,36 @@ def _norm_mobile(value: Any) -> str:
     return digits
 
 
+def _is_valid_indian_mobile(value: Any) -> bool:
+    """Valid Indian mobile = exactly 10 digits starting 6/7/8/9 (after stripping +91).
+    Points/loyalty are granted ONLY to valid Indian mobiles; an invalid/missing mobile is a
+    NON-LOYALTY 'Lost Customer' — its bill is still recorded (for purchase analytics) but
+    earns no points and triggers no SMS."""
+    m = _norm_mobile(value)
+    return len(m) == 10 and m[0] in "6789"
+
+
+def _map_pos_items(raw_items):
+    """Normalise POS line items into the stored transaction items[] shape (reused by the
+    normal earn path and the Lost-Customer record)."""
+    items = []
+    for it in (raw_items or []):
+        items.append({
+            "sku": str(it.get("id") or it.get("sku") or ""),
+            "name": str(it.get("name") or ""),
+            "category": str(it.get("category") or ""),
+            "category_id": str(it.get("category_id") or ""),
+            "quantity": _parse_int(it.get("quantity")),
+            "unit_price": _parse_float(it.get("rate")),
+            "total": _parse_float(it.get("subtotal") or it.get("rate")),
+            "discount": _parse_float(it.get("discount")),
+            "hsn_code": it.get("hsn_code"),
+            "bar_code": it.get("bar_code"),
+        })
+    return items
+
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -776,10 +806,11 @@ async def pos_add_customer(payload: Dict[str, Any], request: Request,
     c = payload.get("customer") or {}
     mobile = _norm_mobile(c.get("mobile"))
     name = (c.get("name") or "").strip()
-    if not mobile or not name:
-        resp = _err(400, "Required fields are missing")
+    if not name or not _is_valid_indian_mobile(mobile):
+        resp = _err(400, "A valid Indian mobile number (10 digits, starts 6-9) and a name are required")
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                       error="invalid_mobile_or_name",
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
@@ -801,18 +832,35 @@ async def pos_add_customer(payload: Dict[str, Any], request: Request,
         await customers_col.update_one({"mobile": mobile}, {"$set": update})
         resp = _ok({"message": "Profile updated successfully"})
     else:
+        cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
+        welcome_bonus_points = int(_parse_float(cfg.get("welcome_bonus", 0)) or 0)
         update.update({
             "id": uuid.uuid4().hex,
             "mobile": mobile,
-            "tier": "silver",
-            "points_balance": 0,
-            "lifetime_points_earned": 0,
+            "tier": _derive_tier(0, cfg) or "",
+            "points_balance": welcome_bonus_points,
+            "lifetime_points_earned": welcome_bonus_points,
             "lifetime_points_redeemed": 0,
             "lifetime_spend": 0,
             "visit_count": 0,
+            "welcome_bonus_given": welcome_bonus_points > 0,
             "created_at": _now_iso(),
         })
         await customers_col.insert_one(update)
+        # Welcome bonus — single GLOBAL bonus, credited ONCE when the customer joins.
+        if welcome_bonus_points > 0:
+            await points_ledger_col.insert_one({
+                "id": uuid.uuid4().hex,
+                "customer_id": update["id"],
+                "customer_mobile": mobile,
+                "type": "bonus",
+                "points": welcome_bonus_points,
+                "reference_type": "welcome",
+                "reference_id": None,
+                "note": "Welcome bonus (joined programme)",
+                "expires_at": _expiry_iso(_now_iso(), int(cfg.get("point_expiry_days", 365) or 365)),
+                "created_at": _now_iso(),
+            })
         resp = _ok({"message": "Member successfully registered"})
         # Welcome / registration SMS (best-effort, non-blocking — only on first
         # registration). Fires every active template registered for the
@@ -1159,13 +1207,14 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
 
     c = payload.get("customer") or {}
     txn = payload.get("transaction") or {}
-    mobile = _norm_mobile(c.get("mobile"))
+    raw_mobile = c.get("mobile")
+    mobile = _norm_mobile(raw_mobile)
     bill_number = (txn.get("number") or txn.get("id") or "").strip()
-    if not mobile or not bill_number:
+    if not bill_number:
         resp = _err(400, "Required fields are missing")
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                       bill_number=bill_number, error="missing mobile/bill",
+                       bill_number=bill_number, error="missing bill number",
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
@@ -1192,7 +1241,77 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     store_name = store.get("name") if store else None
     store_code = store.get("code") if store else None
 
-    # Upsert customer
+    # Amounts — KAZO canonical: `amount` is the PRE-TAX loyalty base; GST comes from the
+    # taxes[] array. Bill Amount (with tax) = amount + GST. Computed up-front so a
+    # NON-LOYALTY "Lost Customer" bill (invalid/no mobile) is still recorded with its
+    # purchase value for analytics — just without earning any points.
+    amount = _parse_float(txn.get("amount"))
+    tax_gst = _gst_from_taxes(txn.get("taxes"))
+    bill_with_tax = amount + tax_gst
+    # Back-compat for older payloads that send gross/net explicitly
+    gross = _parse_float(txn.get("gross_amount")) or bill_with_tax
+    net = _parse_float(txn.get("net_amount")) or amount
+    final_amount = amount or net
+    discount = _parse_float(txn.get("discount"))
+    # loyalty_flag: earn UNLESS the POS explicitly disables it.
+    loyalty_flag = str(txn.get("loyalty_flag", "1")).strip().lower() not in {"0", "false", "no", "n", "off"}
+    # Points are earned on `amount` (pre-tax). Fall back to loyalty_gross_amount/net for
+    # legacy payloads that don't send `amount`.
+    loyalty_base = amount or _parse_float(txn.get("loyalty_gross_amount")) or net
+    order_time = _normalize_order_time(txn.get("order_time"))
+    items = _map_pos_items(txn.get("items") or [])
+    payment_mode = "unknown"
+    pm_list = txn.get("payment_mode")
+    if isinstance(pm_list, list) and pm_list:
+        payment_mode = (pm_list[0] or {}).get("name") or "unknown"
+
+    # --- VALID INDIAN MOBILE GATE (canonical) ---
+    # Points/loyalty are granted ONLY to a VALID Indian mobile (10 digits starting 6-9).
+    # A bill with an invalid / missing mobile is a NON-LOYALTY "Lost Customer": recorded
+    # for purchase analytics, but NO points, NO loyalty account, NO SMS. Shown distinctly
+    # on the Live Monitor + Lost-Customer KPI cards.
+    if not _is_valid_indian_mobile(mobile):
+        lost_reason = ("invalid_or_missing_mobile — not a valid Indian mobile "
+                       "(need 10 digits starting 6-9); recorded as Lost Customer, no points")
+        lost_txn = {
+            "id": uuid.uuid4().hex,
+            "customer_id": None,
+            "customer_mobile": None,
+            "customer_name": (c.get("name") or "").strip() or None,
+            "raw_mobile": str(raw_mobile or "").strip() or None,
+            "store_id": store_id, "store_name": store_name, "store_code": store_code,
+            "bill_number": bill_number,
+            "transaction_id": str(txn.get("id") or bill_number),
+            "bill_date": order_time,
+            "gross_amount": gross, "discount_amount": discount, "net_amount": net,
+            "final_amount": final_amount, "amount": amount,
+            "tax_amount": tax_gst, "bill_with_tax": bill_with_tax,
+            "loyalty_gross_amount": loyalty_base,
+            "items": items, "taxes": txn.get("taxes") or [], "charges": txn.get("charges") or [],
+            "payment_mode": payment_mode, "channel": txn.get("channel"),
+            "cashier_name": txn.get("cashier_name"),
+            "points_earned": 0, "points_redeemed": 0,
+            "loyalty_flag": loyalty_flag,
+            "is_lost_customer": True,
+            "loyalty_customer": False,
+            "earn_skip_reason": lost_reason,
+            "is_return": False,
+            "source": "pos_ewards",
+            "created_at": _now_iso(),
+        }
+        await transactions_col.insert_one(lost_txn)
+        resp = _ok({"message": "Bill recorded (no loyalty — invalid or missing mobile)",
+                    "order_id": lost_txn["id"], "points_earned": 0, "lost_customer": True,
+                    "earn_skip_reason": lost_reason})
+        await _log_api(endpoint=endpoint, method="POST", status=200,
+                       ms=int((time.time() - t0) * 1000), customer_mobile=None,
+                       bill_number=bill_number, store_id=store_id,
+                       error="lost_customer_invalid_mobile",
+                       payload=payload, response=resp, api_key_label=cred.get("label"))
+        return resp
+
+    # Upsert customer (valid Indian mobile only)
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
     existing = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
     customer_doc_update = {
         "name": (c.get("name") or "").strip() or (existing.get("name") if existing else ""),
@@ -1208,7 +1327,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         customer_doc_update.update({
             "id": uuid.uuid4().hex,
             "mobile": mobile,
-            "tier": "silver",
+            "tier": _derive_tier(0, cfg) or "",
             "points_balance": 0,
             "lifetime_points_earned": 0,
             "lifetime_points_redeemed": 0,
@@ -1225,27 +1344,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         cust = {**existing, **customer_doc_update}
         is_new_customer = False
 
-    # Amounts — KAZO canonical: `amount` is the PRE-TAX loyalty base; GST comes from
-    # the taxes[] array.  Bill Amount (with tax) = amount + GST.
-    amount = _parse_float(txn.get("amount"))
-    tax_gst = _gst_from_taxes(txn.get("taxes"))
-    bill_with_tax = amount + tax_gst
-    # Back-compat for older payloads that send gross/net explicitly
-    gross = _parse_float(txn.get("gross_amount")) or bill_with_tax
-    net = _parse_float(txn.get("net_amount")) or amount
-    final_amount = amount or net
-    discount = _parse_float(txn.get("discount"))
-    # loyalty_flag: earn UNLESS the POS explicitly disables it. Lenient on purpose so a
-    # truthy value the POS sends ("1", "true", "Y", "yes", 1, etc.) all earn; only an
-    # explicit negative ("0"/"false"/"no"/"off") suppresses earning.
-    loyalty_flag = str(txn.get("loyalty_flag", "1")).strip().lower() not in {"0", "false", "no", "n", "off"}
-    # Points are earned on `amount` (pre-tax). Fall back to loyalty_gross_amount/net for
-    # legacy payloads that don't send `amount`.
-    loyalty_base = amount or _parse_float(txn.get("loyalty_gross_amount")) or net
-    order_time = _normalize_order_time(txn.get("order_time"))
-
-    # Loyalty engine
-    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
+    # Loyalty engine (cfg already loaded above)
     min_bill_for_earn = _parse_float(cfg.get("min_bill_for_earn", 0))
     # Client rule: add this bill to the customer's ACCUMULATED Total Billing, decide the
     # tier from the configured purchase ranges on that NEW total, THEN earn points at that
@@ -1282,27 +1381,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     points_redeemed = _parse_int(redemption.get("redeemed_points"))
     coupon_code = (redemption.get("reward_id") or txn.get("coupon_code") or "").strip() or None
 
-    # Items mapping
-    items: List[Dict[str, Any]] = []
-    for it in (txn.get("items") or []):
-        items.append({
-            "sku": str(it.get("id") or it.get("sku") or ""),
-            "name": str(it.get("name") or ""),
-            "category": str(it.get("category") or ""),
-            "category_id": str(it.get("category_id") or ""),
-            "quantity": _parse_int(it.get("quantity")),
-            "unit_price": _parse_float(it.get("rate")),
-            "total": _parse_float(it.get("subtotal") or it.get("rate")),
-            "discount": _parse_float(it.get("discount")),
-            "hsn_code": it.get("hsn_code"),
-            "bar_code": it.get("bar_code"),
-        })
-
-    payment_mode = "unknown"
-    pm_list = txn.get("payment_mode")
-    if isinstance(pm_list, list) and pm_list:
-        payment_mode = (pm_list[0] or {}).get("name") or "unknown"
-
+    # items[] and payment_mode were mapped up-front (shared with the Lost-Customer path).
     txn_id = uuid.uuid4().hex
     txn_doc = {
         "id": txn_id,
@@ -1357,18 +1436,28 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             nt = next((t for t in ranked if t.get("tier") == new_tier), None)
             upgrade_bonus_points = int((nt or {}).get("upgrade_bonus", 0) or 0)
 
-    new_balance = int(cust.get("points_balance") or 0) + points_earned + upgrade_bonus_points - points_redeemed
+    # Welcome bonus — single GLOBAL bonus, credited ONCE when a customer first joins the
+    # programme (here, their first bill created the customer). Never re-awarded on tier/slab moves.
+    welcome_bonus_points = 0
+    if is_new_customer and not cust.get("welcome_bonus_given"):
+        welcome_bonus_points = int(_parse_float(cfg.get("welcome_bonus", 0)) or 0)
+
+    new_balance = (int(cust.get("points_balance") or 0) + points_earned
+                   + upgrade_bonus_points + welcome_bonus_points - points_redeemed)
+    cust_set = {
+        "points_balance": new_balance,
+        "lifetime_spend": new_lifetime_spend,
+        "visit_count": new_visit_count,
+        "last_visit_at": _now_iso(),
+        "tier": new_tier,
+    }
+    if welcome_bonus_points > 0:
+        cust_set["welcome_bonus_given"] = True
     await customers_col.update_one(
         {"id": cust["id"]},
-        {"$set": {
-            "points_balance": new_balance,
-            "lifetime_spend": new_lifetime_spend,
-            "visit_count": new_visit_count,
-            "last_visit_at": _now_iso(),
-            "tier": new_tier,
-        },
+        {"$set": cust_set,
          "$inc": {
-            "lifetime_points_earned": points_earned + upgrade_bonus_points,
+            "lifetime_points_earned": points_earned + upgrade_bonus_points + welcome_bonus_points,
             "lifetime_points_redeemed": points_redeemed,
         }},
     )
@@ -1399,6 +1488,19 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "reference_type": "tier_upgrade",
             "reference_id": txn_id,
             "note": f"Tier upgrade bonus: {old_tier} → {new_tier}",
+            "expires_at": earn_expiry,
+            "created_at": _now_iso(),
+        })
+    if welcome_bonus_points > 0:
+        await points_ledger_col.insert_one({
+            "id": uuid.uuid4().hex,
+            "customer_id": cust["id"],
+            "customer_mobile": mobile,
+            "type": "bonus",
+            "points": welcome_bonus_points,
+            "reference_type": "welcome",
+            "reference_id": txn_id,
+            "note": "Welcome bonus (joined programme)",
             "expires_at": earn_expiry,
             "created_at": _now_iso(),
         })

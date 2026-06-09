@@ -42,6 +42,8 @@ class TemplateIn(BaseModel):
     variables: List[Dict[str, str]] = []  # [{key, label, example}]
     sender_id: Optional[str] = None        # for SMS (DLT)
     dlt_entity_id: Optional[str] = None
+    dlt_template_id: Optional[str] = None  # DLT Content Template ID (REQUIRED for Indian SMS delivery)
+    dlt_tm_id: Optional[str] = None        # DLT Telemarketer / chain ID (only for aggregator/multi-chain accounts)
     waba_template_id: Optional[str] = None  # for WhatsApp
     waba_params_order: List[str] = []       # ordered list of variable keys for WABA positional params
     waba_language: Optional[str] = "en"
@@ -58,6 +60,8 @@ class ProviderConfigIn(BaseModel):
     sms_endpoint: Optional[str] = None
     sms_sender_id: Optional[str] = None
     sms_dlt_entity_id: Optional[str] = None
+    sms_dlt_template_id: Optional[str] = None  # global fallback DLT content template id
+    sms_dlt_tm_id: Optional[str] = None        # global DLT telemarketer / chain id (optional)
     whatsapp_endpoint: Optional[str] = None
     whatsapp_from_number: Optional[str] = None
     whatsapp_api_key: Optional[str] = None
@@ -72,6 +76,8 @@ DEFAULT_CONFIG = {
     "sms_endpoint": "https://pod2-japi.instaalerts.zone/httpapi/QueryStringReceiver",
     "sms_sender_id": "KAZOIN",
     "sms_dlt_entity_id": "",
+    "sms_dlt_template_id": "",
+    "sms_dlt_tm_id": "",
     "whatsapp_endpoint": "https://rcmapi.instaalerts.zone/services/rcm/sendMessage",
     "whatsapp_from_number": "919133325826",
     "whatsapp_api_key": "",
@@ -281,7 +287,9 @@ def _render(body: str, params: Dict[str, Any]) -> str:
 
 async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
                 response: Any, template_id: Optional[str] = None,
-                event_trigger: Optional[str] = None):
+                event_trigger: Optional[str] = None,
+                context: Optional[Dict[str, Any]] = None):
+    ctx = context or {}
     await message_log_col.insert_one({
         "id": uuid.uuid4().hex,
         "channel": channel,
@@ -289,6 +297,10 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
         "mobile": mobile,
         "template_id": template_id,
         "event_trigger": event_trigger,
+        "bill_number": ctx.get("bill_number"),
+        "trigger_source": ctx.get("source"),
+        "sender_id": (payload or {}).get("send"),
+        "dlt_template_id": (payload or {}).get("dlt_template_id"),
         "payload_summary": {k: (v if k not in {"key", "apikey"} else "•••")
                               for k, v in (payload or {}).items()},
         "response": str(response)[:500] if response else None,
@@ -297,25 +309,36 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
 
 
 async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = None,
-                          event_trigger: Optional[str] = None) -> Dict[str, Any]:
+                          event_trigger: Optional[str] = None,
+                          context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = await _get_config()
     if not cfg.get("sms_api_key") or not cfg.get("sms_endpoint"):
-        await _log("sms", "config_missing", mobile, {}, None, template_id, event_trigger)
+        await _log("sms", "config_missing", mobile, {}, None, template_id, event_trigger, context)
         return {"ok": False, "error": "SMS provider not configured"}
-    # Sender ID + DLT entity ID — the GLOBAL Provider Settings (provider_config) is the
-    # single source of truth (what the admin configured on the panel). A per-template
-    # value is ONLY used to fill a gap when the global is blank, so a stale sender baked
-    # into an old template can never override the current Provider Settings sender.
+    # Sender ID + DLT IDs — all read from what the admin configured on the Communication
+    # screens (Provider Settings + the per-template DLT fields). Global Provider Settings is
+    # authoritative for Sender ID / Entity ID; the DLT *Content Template ID* is per-template
+    # (each DLT-approved template has its own). REQUIRED for delivery on Indian networks
+    # (TRAI DLT) — without it the operator silently drops the SMS even though Karix returns
+    # "Platform Accepted".
     sender = (cfg.get("sms_sender_id") or "").strip()
     dlt_entity = (cfg.get("sms_dlt_entity_id") or "").strip()
-    if template_id and (not sender or not dlt_entity):
+    dlt_template = (cfg.get("sms_dlt_template_id") or "").strip()
+    dlt_tm = (cfg.get("sms_dlt_tm_id") or "").strip()
+    if template_id:
         tpl = await templates_col.find_one(
-            {"id": template_id}, {"_id": 0, "sender_id": 1, "dlt_entity_id": 1})
+            {"id": template_id},
+            {"_id": 0, "sender_id": 1, "dlt_entity_id": 1, "dlt_template_id": 1, "dlt_tm_id": 1})
         if tpl:
             if not sender and tpl.get("sender_id"):
                 sender = tpl["sender_id"]
             if not dlt_entity and tpl.get("dlt_entity_id"):
-                dlt_entity = tpl["dlt_entity_id"]
+                dlt_entity = str(tpl["dlt_entity_id"]).strip()
+            # per-template DLT content template id / tm id take priority (each has its own)
+            if tpl.get("dlt_template_id"):
+                dlt_template = str(tpl["dlt_template_id"]).strip()
+            if tpl.get("dlt_tm_id"):
+                dlt_tm = str(tpl["dlt_tm_id"]).strip()
     mob = _normalize_mobile(mobile)
     params = {
         "ver": "1.0",
@@ -323,18 +346,28 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
         "encrpt": "0",
         "dest": mob,
         "send": sender,
-        "dlt_entity_id": dlt_entity,
         "text": text,
     }
+    if dlt_entity:
+        params["dlt_entity_id"] = dlt_entity
+    if dlt_template:
+        params["dlt_template_id"] = dlt_template
+    if dlt_tm:
+        params["dlt_tm_id"] = dlt_tm
     try:
         async with httpx.AsyncClient(timeout=12.0) as c:
             r = await c.get(cfg["sms_endpoint"], params=params)
         ok = r.status_code == 200
-        await _log("sms", "ok" if ok else f"http_{r.status_code}", mob, params,
-                    r.text, template_id, event_trigger)
-        return {"ok": ok, "status_code": r.status_code, "response": r.text}
+        status = "ok" if ok else f"http_{r.status_code}"
+        # Self-diagnosing: a 200 with NO DLT content template id will be DLT-scrubbed
+        # (dropped) by the carrier — flag it so the Message Log shows the real cause.
+        if ok and not dlt_template:
+            status = "ok_no_dlt_template"
+        await _log("sms", status, mob, params, r.text, template_id, event_trigger, context)
+        return {"ok": ok, "status_code": r.status_code, "response": r.text,
+                "dlt_template_id": dlt_template or None, "dlt_entity_id": dlt_entity or None}
     except Exception as e:
-        await _log("sms", "exception", mob, params, str(e), template_id, event_trigger)
+        await _log("sms", "exception", mob, params, str(e), template_id, event_trigger, context)
         return {"ok": False, "error": str(e)}
 
 
@@ -446,11 +479,20 @@ async def update_provider_config(body: ProviderConfigIn, user: dict = Depends(ge
 
 # ---------------- Message log ----------------
 @router.get("/message-log")
-async def get_message_log(channel: Optional[str] = None, limit: int = 100,
-                          user: dict = Depends(get_current_user)):
+async def get_message_log(channel: Optional[str] = None, status: Optional[str] = None,
+                          mobile: Optional[str] = None, event_trigger: Optional[str] = None,
+                          limit: int = 100, user: dict = Depends(get_current_user)):
     flt: Dict[str, Any] = {}
     if channel:
         flt["channel"] = channel
+    if status:
+        flt["status"] = status
+    if event_trigger:
+        flt["event_trigger"] = event_trigger
+    if mobile:
+        digits = re.sub(r"\D", "", mobile)
+        if digits:
+            flt["mobile"] = {"$regex": f"{digits}$"}  # match by trailing digits (ignores 91 prefix)
     rows = await message_log_col.find(flt, {"_id": 0}).sort("timestamp", -1).limit(min(limit, 500)).to_list(500)
     total = await message_log_col.count_documents(flt)
     return {"rows": rows, "total": total}
@@ -474,14 +516,17 @@ async def fire_event(event_trigger: str, mobile: str, params: Dict[str, Any]):
         return
     for t in rows:
         try:
+            ctx = {"bill_number": params.get("bill_no") or params.get("bill_number"),
+                   "source": f"event:{event_trigger}"}
             if t["channel"] == "sms":
                 text = _render(t["body"], params)
-                await send_sms_karix(mobile, text, template_id=t["id"], event_trigger=event_trigger)
+                await send_sms_karix(mobile, text, template_id=t["id"],
+                                     event_trigger=event_trigger, context=ctx)
             elif t["channel"] in {"whatsapp", "rcs"} and t.get("waba_template_id"):
                 # Only fire WABA templates that have been approved
                 if t.get("waba_approval_status") != "approved":
                     await _log(t["channel"], "skipped_unapproved", mobile, {}, None,
-                                t["id"], event_trigger)
+                                t["id"], event_trigger, ctx)
                     continue
                 wa_params = _waba_positional_params(t, params)
                 await send_whatsapp_karix(mobile, t["waba_template_id"], wa_params,

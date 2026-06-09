@@ -13,7 +13,9 @@ const SECTIONS = [
       { key: "sms_endpoint", label: "Endpoint URL", placeholder: "https://pod2-japi.instaalerts.zone/httpapi/QueryStringReceiver" },
       { key: "sms_api_key", label: "API Key", secret: true },
       { key: "sms_sender_id", label: "Sender ID (DLT registered)", placeholder: "KAZOIN" },
-      { key: "sms_dlt_entity_id", label: "DLT Entity ID (optional)" },
+      { key: "sms_dlt_entity_id", label: "DLT Entity ID (Principal Entity ID)" },
+      { key: "sms_dlt_template_id", label: "Default DLT Content Template ID (fallback)" },
+      { key: "sms_dlt_tm_id", label: "DLT Telemarketer / Chain ID (optional)" },
     ],
   },
   {

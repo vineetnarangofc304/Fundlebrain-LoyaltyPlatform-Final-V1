@@ -25,10 +25,12 @@ const ROW_STYLES = {
   repeat:  { cls: "bg-emerald-50 hover:bg-emerald-100", border: "#047857" },
   new:     { cls: "bg-amber-50 hover:bg-amber-100",     border: "#D97706" },
   walk_in: { cls: "bg-rose-50 hover:bg-rose-100",       border: "#9F1239" },
+  lost:    { cls: "bg-fuchsia-50 hover:bg-fuchsia-100", border: "#86198F" },
   return:  { cls: "bg-orange-50 hover:bg-orange-100",   border: "#EA580C" },
 };
 const rowKind = (r) =>
   r.is_return ? "return"
+  : r.is_lost_customer ? "lost"
   : !r.has_mobile ? "walk_in"
   : r.customer_status === "new" ? "new"
   : "repeat";
@@ -182,12 +184,13 @@ export default function LiveMonitorPage() {
       <div className="p-8 space-y-6">
         {/* KPI strip */}
         {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-9 gap-3" data-testid="lm-kpis">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-10 gap-3" data-testid="lm-kpis">
             <KPI label="Bills" value={(stats.bills_total || 0).toLocaleString()} icon={Receipt} color={PALETTE.burgundy} />
             <KPI label="Loyalty Bills" value={(stats.bills_with_mobile || 0).toLocaleString()} icon={Phone} color={PALETTE.emerald} testid="lm-kpi-loyalty-bills" />
             <KPI label="Repeat Bills" value={(stats.repeat_bills || 0).toLocaleString()} icon={Award} color={PALETTE.indigo} testid="lm-kpi-repeat-bills" />
-            <KPI label="Lost Opp." value={(stats.bills_without_mobile || 0).toLocaleString()}
+            <KPI label="Lost Cust." value={(stats.bills_without_mobile || 0).toLocaleString()}
                   icon={PhoneOff} color={PALETTE.rose} testid="lm-kpi-lost" />
+            <KPI label="Lost Purchase" value={fmtCurrency(stats.revenue_lost)} icon={ShoppingBag} color={PALETTE.rose} testid="lm-kpi-lost-rev" />
             <KPI label="Attach %" value={`${(stats.mobile_attach_rate_pct || 0).toFixed(1)}%`} icon={CheckCircle2} color={PALETTE.indigo} />
             <KPI label="Total Purchase" value={fmtCurrency(stats.revenue_total)} icon={ShoppingBag} color={PALETTE.teal} testid="lm-kpi-total-rev" />
             <KPI label="Loyalty Purchase" value={fmtCurrency(stats.loyalty_revenue)} icon={Award} color={PALETTE.emerald} testid="lm-kpi-loyalty-rev" />
@@ -279,6 +282,7 @@ export default function LiveMonitorPage() {
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-emerald-100 border-l-2" style={{ borderColor: "#047857" }} /> Repeat</span>
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-amber-100 border-l-2" style={{ borderColor: "#D97706" }} /> New</span>
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-rose-100 border-l-2" style={{ borderColor: "#9F1239" }} /> Walk-in</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-fuchsia-100 border-l-2" style={{ borderColor: "#86198F" }} /> Lost Customer (invalid mobile)</span>
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-orange-100 border-l-2" style={{ borderColor: "#EA580C" }} /> Return</span>
           </div>
           <div className="overflow-x-auto">
@@ -343,15 +347,19 @@ export default function LiveMonitorPage() {
                     <td className="text-[10px] uppercase tracking-widest">
                       {r.is_return
                         ? <span className="pill pill-warning" data-testid={`lm-type-return-${r.bill_number}`}>Return</span>
-                        : !r.has_mobile
-                          ? <span className="pill pill-danger">Walk-in</span>
-                          : r.customer_status === "new"
-                            ? <span className="pill" style={{ background: "#FDE68A", color: "#92400E", border: "1px solid #FBBF24" }}>New</span>
-                            : <span className="pill pill-success">Repeat</span>}
+                        : r.is_lost_customer
+                          ? <span className="pill" style={{ background: "#FAE8FF", color: "#86198F", border: "1px solid #F0ABFC" }} data-testid={`lm-type-lost-${r.bill_number}`}>Lost Cust.</span>
+                          : !r.has_mobile
+                            ? <span className="pill pill-danger">Walk-in</span>
+                            : r.customer_status === "new"
+                              ? <span className="pill" style={{ background: "#FDE68A", color: "#92400E", border: "1px solid #FBBF24" }}>New</span>
+                              : <span className="pill pill-success">Repeat</span>}
                     </td>
                     <td className="font-mono text-[12px]">
                       {r.customer_mobile ? (
                         <span className="text-emerald-700">{r.customer_mobile}</span>
+                      ) : r.is_lost_customer && r.raw_mobile ? (
+                        <span className="text-fuchsia-700 line-through" title="Invalid Indian mobile — no points given">{r.raw_mobile}</span>
                       ) : (
                         <span className="text-rose-700">—</span>
                       )}

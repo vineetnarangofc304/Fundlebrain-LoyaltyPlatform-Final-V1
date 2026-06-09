@@ -56,8 +56,9 @@ export default function CustomerDashboard() {
   if (error && !data) return <DashboardError error={error} onRetry={reload} title="Customer Analytics" />;
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
   const totalCust = data.churn_distribution.reduce((s, r) => s + r.count, 0);
-  const life = data.lifecycle_split || { one_timer: { count: 0, lifetime_spend: 0 }, repeat: { count: 0, lifetime_spend: 0 } };
-  const lifeTotal = life.one_timer.count + life.repeat.count;
+  const life = data.lifecycle_split || { zero_bill: { count: 0, lifetime_spend: 0 }, one_timer: { count: 0, lifetime_spend: 0 }, repeat: { count: 0, lifetime_spend: 0 } };
+  const zb = life.zero_bill || { count: 0, lifetime_spend: 0 };
+  const lifeTotal = (zb.count || 0) + life.one_timer.count + life.repeat.count;
   const lifePct = (n) => lifeTotal ? (n / lifeTotal) * 100 : 0;
   return (
     <div data-testid="customer-dashboard">
@@ -83,15 +84,25 @@ export default function CustomerDashboard() {
           <KPICard label="Top City" value={data.city_distribution[0]?.city || "—"} hint={fmtINR(data.city_distribution[0]?.spend)} accent="teal" testid="kpi-top-city" onClick={() => data.city_distribution[0]?.city && openCustomers(`Customers · ${data.city_distribution[0].city}`, { city: data.city_distribution[0].city })} />
         </div>
 
-        {/* Lifecycle split — One-timer vs Repeat (docx #11) */}
+        {/* Lifecycle split — Zero-Bill Visitor vs One-timer vs Repeat */}
         <div className="chart-card p-5" data-accent="indigo" data-testid="cust-lifecycle-split">
-          <SectionHeading eyebrow="LIFECYCLE BIFURCATION" title="One-time vs Repeat buyers" accent="indigo" />
-          <div className="grid md:grid-cols-2 gap-4 mt-4">
+          <SectionHeading eyebrow="LIFECYCLE BIFURCATION" title="Zero-bill vs One-time vs Repeat" accent="indigo" />
+          <div className="grid md:grid-cols-3 gap-4 mt-4">
+            <div className="border border-fuchsia-200 bg-fuchsia-50/50 p-5 min-w-0" data-testid="lifecycle-zero-bill">
+              <div className="text-[10px] uppercase tracking-[0.3em] text-fuchsia-800 font-medium mb-2">ZERO-BILL VISITORS</div>
+              <div className="font-display hero-number text-fuchsia-900" title={String(zb.count ?? "")}>{fmtNum(zb.count)}</div>
+              <div className="mt-2 text-sm text-neutral-600">
+                <span className="font-mono">{lifePct(zb.count).toFixed(1)}%</span> of base · registered members with <span className="font-medium">0 bills</span> yet
+              </div>
+              <div className="mt-3 h-2 bg-white border border-fuchsia-200">
+                <div className="h-full bg-fuchsia-500" style={{ width: `${lifePct(zb.count)}%` }} />
+              </div>
+            </div>
             <div className="border border-amber-200 bg-amber-50/50 p-5 min-w-0" data-testid="lifecycle-one-timer">
               <div className="text-[10px] uppercase tracking-[0.3em] text-amber-800 font-medium mb-2">ONE-TIME BUYERS</div>
               <div className="font-display hero-number text-amber-900" title={String(life.one_timer.count ?? "")}>{fmtNum(life.one_timer.count)}</div>
               <div className="mt-2 text-sm text-neutral-600">
-                <span className="font-mono">{lifePct(life.one_timer.count).toFixed(1)}%</span> of loyalty base · contributing <span className="font-mono">{fmtINR(life.one_timer.lifetime_spend)}</span> lifetime spend
+                <span className="font-mono">{lifePct(life.one_timer.count).toFixed(1)}%</span> of base · exactly <span className="font-medium">1 bill</span> · <span className="font-mono">{fmtINR(life.one_timer.lifetime_spend)}</span> spend
               </div>
               <div className="mt-3 h-2 bg-white border border-amber-200">
                 <div className="h-full bg-amber-500" style={{ width: `${lifePct(life.one_timer.count)}%` }} />
@@ -101,7 +112,7 @@ export default function CustomerDashboard() {
               <div className="text-[10px] uppercase tracking-[0.3em] text-emerald-800 font-medium mb-2">REPEAT BUYERS</div>
               <div className="font-display hero-number text-emerald-900" title={String(life.repeat.count ?? "")}>{fmtNum(life.repeat.count)}</div>
               <div className="mt-2 text-sm text-neutral-600">
-                <span className="font-mono">{lifePct(life.repeat.count).toFixed(1)}%</span> of loyalty base · contributing <span className="font-mono">{fmtINR(life.repeat.lifetime_spend)}</span> lifetime spend
+                <span className="font-mono">{lifePct(life.repeat.count).toFixed(1)}%</span> of base · <span className="font-medium">2+ bills</span> · <span className="font-mono">{fmtINR(life.repeat.lifetime_spend)}</span> spend
               </div>
               <div className="mt-3 h-2 bg-white border border-emerald-200">
                 <div className="h-full bg-emerald-500" style={{ width: `${lifePct(life.repeat.count)}%` }} />

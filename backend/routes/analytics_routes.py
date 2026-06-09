@@ -246,11 +246,15 @@ async def customer_dashboard(
     ot_map = {r["_id"]: r["count"] for r in ot_rows}
     one_timer_recency_distribution = [{"bucket": b, "count": ot_map.get(b, 0)} for b in REC_ORDER]
 
-    # Lifecycle split — one-timer vs repeat (addresses #11 in docx)
+    # Lifecycle split — Zero-Bill Visitor (0 bills) vs One-Timer (exactly 1 bill) vs Repeat
+    # (2+). Canonical: a customer with NO bills is NOT a one-timer.
     lifecycle_pipe = [
         {"$match": loyalty_q},
         {"$group": {
-            "_id": {"$cond": [{"$lte": [{"$ifNull": ["$visit_count", 0]}, 1]}, "one_timer", "repeat"]},
+            "_id": {"$switch": {"branches": [
+                {"case": {"$gte": [{"$ifNull": ["$visit_count", 0]}, 2]}, "then": "repeat"},
+                {"case": {"$eq": [{"$ifNull": ["$visit_count", 0]}, 1]}, "then": "one_timer"},
+            ], "default": "zero_bill"}},
             "count": {"$sum": 1},
             "lifetime_spend": {"$sum": "$lifetime_spend"},
         }},
@@ -258,6 +262,10 @@ async def customer_dashboard(
     life_rows = await customers_col.aggregate(lifecycle_pipe, allowDiskUse=True).to_list(5)
     life_map = {r["_id"]: r for r in life_rows}
     lifecycle_split = {
+        "zero_bill": {
+            "count": life_map.get("zero_bill", {}).get("count", 0),
+            "lifetime_spend": round(life_map.get("zero_bill", {}).get("lifetime_spend", 0), 2),
+        },
         "one_timer": {
             "count": life_map.get("one_timer", {}).get("count", 0),
             "lifetime_spend": round(life_map.get("one_timer", {}).get("lifetime_spend", 0), 2),

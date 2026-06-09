@@ -354,8 +354,17 @@ function TemplateEditor({ template, onClose, onSaved }) {
                     <div className="text-[10px] text-neutral-400 mt-1">Pre-filled from Provider Settings. Leave as-is to use your global DLT-registered sender; override here only for this template.</div>
                   </label>
                   <label className="text-xs">
-                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">DLT Entity ID (optional)</div>
-                    <input className="k-input" value={form.dlt_entity_id || ""} onChange={(e) => update("dlt_entity_id", e.target.value)} data-testid="t-dlt" />
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">DLT Entity ID</div>
+                    <input className="k-input" value={form.dlt_entity_id || ""} onChange={(e) => update("dlt_entity_id", e.target.value)} placeholder="Principal Entity ID" data-testid="t-dlt" />
+                  </label>
+                  <label className="text-xs col-span-2">
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">DLT Content Template ID <span className="text-rose-600">(required for delivery)</span></div>
+                    <input className="k-input font-mono" value={form.dlt_template_id || ""} onChange={(e) => update("dlt_template_id", e.target.value)} placeholder="e.g. 1107161951486743588" data-testid="t-dlt-template" />
+                    <div className="text-[10px] text-neutral-400 mt-1">The DLT-approved Content Template ID registered for THIS message. Without it, Indian operators drop the SMS even though Karix returns "Accepted".</div>
+                  </label>
+                  <label className="text-xs">
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">DLT Telemarketer / Chain ID (optional)</div>
+                    <input className="k-input font-mono" value={form.dlt_tm_id || ""} onChange={(e) => update("dlt_tm_id", e.target.value)} placeholder="only for aggregator/multi-chain accounts" data-testid="t-dlt-tm" />
                   </label>
                 </>
               )}

@@ -80,7 +80,7 @@ def test_refresh_cache_reads_from_db():
         await hist._refresh_tier_rules_cache()
         return hist._TIER_RULES_CACHE
 
-    cache = asyncio.get_event_loop().run_until_complete(run())
+    cache = asyncio.run(run())
     # The preview DB has a default config with tier_rules -> cache populated.
     assert isinstance(cache, list)
     if cache:

@@ -61,6 +61,7 @@ import FormulaCatalog from "@/pages/admin/FormulaCatalog";
 import TemplatesPage from "@/pages/admin/communications/TemplatesPage";
 import ProviderSettingsPage from "@/pages/admin/communications/ProviderSettingsPage";
 import BulkJobsPage from "@/pages/admin/communications/BulkJobsPage";
+import MessageLogPage from "@/pages/admin/communications/MessageLogPage";
 import AutoCampaignsPage from "@/pages/admin/AutoCampaignsPage";
 import RawReportsPage from "@/pages/admin/RawReportsPage";
 import DigestsPage from "@/pages/admin/DigestsPage";
@@ -165,6 +166,7 @@ function App() {
             <Route path="dashboards/executive-summary" element={<ExecutiveSummary />} />
             <Route path="formula-catalog" element={<FormulaCatalog />} />
             <Route path="communications/templates" element={<TemplatesPage />} />
+            <Route path="communications/message-log" element={<MessageLogPage />} />
             <Route path="communications/bulk-jobs" element={<BulkJobsPage />} />
             <Route path="communications/settings" element={<ProviderSettingsPage />} />
             <Route path="customers" element={<Customer360 />} />

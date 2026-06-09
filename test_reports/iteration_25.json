@@ -1,0 +1,37 @@
+{
+  "summary": "End-to-end validation of the 5 client-requested changes for KAZO/Fundle (Lost-Customer gate, single global welcome bonus, 3-way lifecycle split incl. Zero-Bill Visitors, SMS/Message Log page, and DLT template-id propagation). Backend: ran iteration63 (existing) + authored & ran new iteration64 covering posAddCustomer mobile gate + welcome-bonus idempotency, GET /api/analytics/customer-dashboard 3-way lifecycle_split, GET /api/message-log filters + new row fields, and GET /api/live-monitor/transactions lost-customer fields. ALL 5 backend tests PASS (100%). Frontend: logged in as super admin and verified Message Log page (testids + filters + amber NO-DLT banner + 200 rows + clickable), Templates DLT fields (t-dlt-template + t-dlt-tm visible), Provider Settings new fields (DEFAULT DLT CONTENT TEMPLATE ID & DLT TELEMARKETER/CHAIN ID rendered — see screenshot), Live Monitor (lm-kpi-lost & lm-kpi-lost-rev KPIs + 'LOST CUSTOMER (INVALID MOBILE)' legend visible), and Customer Analytics lifecycle 3-way (lifecycle-zero-bill=26, lifecycle-one-timer=26, lifecycle-repeat=10 — matches backend exactly).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration63_lost_customer_welcome_bonus_test.py",
+    "/app/backend/tests/iteration64_lost_customer_full_e2e_test.py",
+    "/app/test_reports/pytest/iteration64.xml"
+  ],
+  "action_items": [
+    "Documentation nit only: review_request lists Customer Analytics path as /admin/dashboards/customer (singular); the actual route in App.js is /admin/dashboards/customers (plural). The nav link works correctly; just a doc typo."
+  ],
+  "critical_code_review_comments": [
+    "pos_ewards_routes.py — posAddPoint Lost-Customer gate correctly stores the bill with is_lost_customer=true, customer_mobile=null, raw_mobile preserved, and does NOT create a loyalty account (verified by iteration63 DB asserts).",
+    "Welcome bonus is gated on welcome_bonus_given flag AND credits a points_ledger entry with reference_type='welcome' exactly once, on first bill OR on first posAddCustomer registration — verified idempotent on re-register and on second bill.",
+    "analytics_routes.py lifecycle_split $switch is correct: visit_count>=2 -> repeat, ==1 -> one_timer, else zero_bill. Returns counts + lifetime_spend per bucket.",
+    "communications_routes.py GET /message-log supports channel/status/mobile/event_trigger filters; mobile uses trailing-digits regex so the 91-prefix is ignored — matches UI behaviour.",
+    "live_monitor_routes.py transactions response correctly exposes is_lost_customer + raw_mobile on every row, enabling the fuchsia row + 'Lost Cust.' pill in the UI."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration64_lost_customer_full_e2e_test.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "Used superadmin@fundle.io / Fundle@2026 for CRM, and POS x-api-key with KAZO_FUNDLE merchant. Mongo accessed locally with MONGO_URL/DB_NAME from backend/.env.",
+  "seed_data_creation": "iteration64 creates ephemeral customer (mobile 97XXXXXXXX) + ledger entries via posAddCustomer and cleans them up in finally. No persistent test data left behind.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend e2e for the 5 changes lives in iteration63 + iteration64 (run together: pytest backend/tests/iteration63_lost_customer_welcome_bonus_test.py backend/tests/iteration64_lost_customer_full_e2e_test.py). Customer Analytics route is /admin/dashboards/customers (plural). SMS dispatch in preview will show status 'ok_no_dlt_template' until DLT IDs are configured in Templates / Provider Settings — by design, not a bug.",
+  "rca_of_the_issue": "N/A — no bug found. One frontend false-negative during initial run was caused by my test script (case-sensitive substring match on Live Monitor body text and a singular vs plural URL typo carried from the review request); re-ran with correct route and all UI testids resolve."
+}

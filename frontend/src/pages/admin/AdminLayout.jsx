@@ -49,6 +49,7 @@ const SECTIONS = [
     label: "COMMUNICATIONS",
     items: [
       { to: "/admin/communications/templates", icon: MessageSquare, label: "Templates", testid: "nav-comm-templates" },
+      { to: "/admin/communications/message-log", icon: FileText, label: "SMS / Message Log", testid: "nav-comm-log" },
       { to: "/admin/communications/bulk-jobs", icon: Send, label: "Bulk Send Jobs", testid: "nav-comm-jobs" },
       { to: "/admin/communications/settings", icon: Settings, label: "Provider Settings", testid: "nav-comm-settings" },
     ],

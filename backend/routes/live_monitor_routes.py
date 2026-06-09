@@ -178,6 +178,8 @@ async def live_transactions(
             "items_count": len(r.get("items") or []),
             "has_mobile": bool(mob),
             "lost_opportunity": not bool(mob),
+            "is_lost_customer": bool(r.get("is_lost_customer")),
+            "raw_mobile": r.get("raw_mobile"),
         })
     return {"rows": enriched, "count": len(enriched), "as_of": _now_iso()}
 
