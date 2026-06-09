@@ -222,14 +222,22 @@ async def _validate_creds(x_api_key: Optional[str], merchant_id: Optional[str],
     return cred
 
 
-def _derive_tier(lifetime_spend: float) -> str:
-    if lifetime_spend >= 200_000:
-        return "diamond"
-    if lifetime_spend >= 75_000:
-        return "platinum"
-    if lifetime_spend >= 25_000:
-        return "gold"
-    return "silver"
+def _derive_tier(lifetime_spend: float, cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Assign a tier from the CONFIGURED Tier Rules based on the customer's cumulative
+    lifetime spend (the running sum of all their bills). The customer sits in the highest
+    tier whose `min_lifetime_spend` threshold they have reached. Fully config-driven — no
+    hardcoded thresholds. Falls back to 'silver' only when no tiers are configured."""
+    rules = [t for t in ((cfg or {}).get("tier_rules") or []) if t.get("is_active", True)]
+    if not rules:
+        return "silver"
+    rules = sorted(rules, key=lambda t: _parse_float(t.get("min_lifetime_spend", 0)))
+    chosen = rules[0]
+    for t in rules:
+        if lifetime_spend >= _parse_float(t.get("min_lifetime_spend", 0)):
+            chosen = t
+        else:
+            break
+    return chosen.get("tier") or rules[0].get("tier") or "silver"
 
 
 def _parse_int(value: Any, default: int = 0) -> int:
@@ -1238,9 +1246,14 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     # Loyalty engine
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
     min_bill_for_earn = _parse_float(cfg.get("min_bill_for_earn", 0))
+    # Client rule: add this bill to the customer's ACCUMULATED Total Billing, decide the
+    # tier from the configured purchase ranges on that NEW total, THEN earn points at that
+    # (post-bill) tier's multiplier.
+    new_lifetime_spend = float(cust.get("lifetime_spend") or 0) + final_amount
+    new_tier = _derive_tier(new_lifetime_spend, cfg)
     multiplier = 1.0
     for tr in cfg.get("tier_rules", []) or []:
-        if tr.get("tier") == (cust.get("tier") or "silver"):
+        if tr.get("tier") == new_tier:
             multiplier = tr.get("earn_multiplier", 1.0)
             break
 
@@ -1329,11 +1342,9 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     }
     await transactions_col.insert_one(txn_doc)
 
-    # Customer aggregates
-    new_lifetime_spend = float(cust.get("lifetime_spend") or 0) + final_amount
+    # Customer aggregates (new_lifetime_spend + new_tier already computed above, pre-earn)
     new_visit_count = int(cust.get("visit_count") or 0) + 1
     old_tier = (cust.get("tier") or "silver")
-    new_tier = _derive_tier(new_lifetime_spend)
 
     # Slab-wise tier-upgrade bonus — awarded ONCE when a customer crosses UP into a
     # higher tier (slab). Each tier defines its own `upgrade_bonus` in the loyalty config.

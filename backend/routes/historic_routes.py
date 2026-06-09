@@ -173,7 +173,37 @@ def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
     }, None)
 
 
+# Tier rules cache (refreshed from loyalty_config at the start of each ingest job) so
+# historic tier assignment uses the CONFIGURED purchase ranges, not hardcoded thresholds.
+_TIER_RULES_CACHE: List[Dict[str, Any]] = []
+
+
+async def _refresh_tier_rules_cache() -> None:
+    global _TIER_RULES_CACHE
+    try:
+        from database import loyalty_config_col
+        cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "tier_rules": 1})
+        _TIER_RULES_CACHE = [t for t in ((cfg or {}).get("tier_rules") or [])
+                             if t.get("is_active", True)]
+    except Exception:
+        _TIER_RULES_CACHE = []
+
+
 def _derive_tier(lifetime_spend: float) -> str:
+    """Assign a tier from the CONFIGURED Tier Rules (cumulative-spend ranges). The customer
+    sits in the highest tier whose `min_lifetime_spend` they have reached. Falls back to a
+    sensible default ladder only when no tiers are configured / cache is empty."""
+    rules = _TIER_RULES_CACHE
+    if rules:
+        rules = sorted(rules, key=lambda t: parse_float(t.get("min_lifetime_spend", 0)))
+        chosen = rules[0]
+        for t in rules:
+            if lifetime_spend >= parse_float(t.get("min_lifetime_spend", 0)):
+                chosen = t
+            else:
+                break
+        return chosen.get("tier") or rules[0].get("tier") or "silver"
+    # Fallback (no configured tiers loaded)
     if lifetime_spend >= 200_000:
         return "diamond"
     if lifetime_spend >= 75_000:
@@ -569,6 +599,9 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = N
         return datetime.now(timezone.utc).isoformat()
     await historic_jobs_col.update_one({"id": job_id},
         {"$set": {"status": "running", "started_at": now(), "heartbeat": now()}})
+    # Load the CONFIGURED tier ranges so historic customers are tiered from the panel's
+    # Tier Rules (using each customer's accumulated Total Billing), not hardcoded slabs.
+    await _refresh_tier_rules_cache()
     fh = None
     total_rows = 0
     processed = 0
