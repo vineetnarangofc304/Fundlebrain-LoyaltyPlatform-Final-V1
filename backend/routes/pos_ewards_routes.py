@@ -77,7 +77,7 @@ pos_credentials_col = db["pos_credentials"]
 pos_otp_col = db["pos_otp_sessions"]
 pos_wallet_col = db["pos_wallet_requests"]
 
-OTP_TTL_SECONDS = 300  # 5 minutes
+OTP_TTL_SECONDS = 600  # 10 minutes
 TEST_MODE_RETURN_OTP = os.environ.get("POS_RETURN_OTP_IN_RESPONSE", "true").lower() == "true"
 
 # ---- Test-OTP bypass (for Postman / QA / integration testing) -------
@@ -226,10 +226,11 @@ def _derive_tier(lifetime_spend: float, cfg: Optional[Dict[str, Any]] = None) ->
     """Assign a tier from the CONFIGURED Tier Rules based on the customer's cumulative
     lifetime spend (the running sum of all their bills). The customer sits in the highest
     tier whose `min_lifetime_spend` threshold they have reached. Fully config-driven — no
-    hardcoded thresholds. Falls back to 'silver' only when no tiers are configured."""
+    hardcoded thresholds and no hardcoded tier names. Returns "" (untiered) only when no
+    tiers are configured (never fabricates a tier the brand hasn't defined)."""
     rules = [t for t in ((cfg or {}).get("tier_rules") or []) if t.get("is_active", True)]
     if not rules:
-        return "silver"
+        return ""
     rules = sorted(rules, key=lambda t: _parse_float(t.get("min_lifetime_spend", 0)))
     chosen = rules[0]
     for t in rules:
@@ -237,7 +238,7 @@ def _derive_tier(lifetime_spend: float, cfg: Optional[Dict[str, Any]] = None) ->
             chosen = t
         else:
             break
-    return chosen.get("tier") or rules[0].get("tier") or "silver"
+    return chosen.get("tier") or rules[0].get("tier") or ""
 
 
 def _parse_int(value: Any, default: int = 0) -> int:
@@ -663,7 +664,7 @@ async def resend_otp_customer_check(payload: Dict[str, Any], request: Request,
         {"$set": {"otp": new_otp,
                   "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)).isoformat()}},
     )
-    msg = f"{new_otp} is your OTP. Valid for the next 5 minutes."
+    msg = f"{new_otp} is your OTP. Valid for the next 10 minutes."
     body = {"message": "Resend OTP successfully", "otp_message": msg}
     if TEST_MODE_RETURN_OTP:
         body["otp"] = new_otp
@@ -963,7 +964,7 @@ async def resend_otp_redeem(payload: Dict[str, Any], request: Request,
         {"$set": {"otp": new_otp,
                    "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)).isoformat()}},
     )
-    msg = f"{new_otp} is your OTP to redeem points. Valid for 5 minutes."
+    msg = f"{new_otp} is your OTP to redeem points. Valid for 10 minutes."
     body = {"message": "Resend OTP successfully", "otp_message": msg}
     if TEST_MODE_RETURN_OTP:
         body["otp"] = new_otp

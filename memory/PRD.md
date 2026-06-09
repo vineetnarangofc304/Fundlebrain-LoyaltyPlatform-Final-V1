@@ -32,6 +32,18 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 61 (Jun 2026) — 🔴 P0: Tiers assigned STRICTLY from frontend-configured Tier Rules (kill hardcoded tier names) · ⏱️ OTP validity 5→10 min
+User: *"there is no diamond tier.. tier names are as defined in the front end.. hope you are taking those"* (continuation of the tier-driven earning work).
+
+**🔴 Root cause / risk:** both `_derive_tier` functions had a **hardcoded fallback ladder** (`diamond`/`platinum`/`gold`/`silver` at 200k/75k/25k) that fired whenever the tier-rules cache/config was empty — i.e. it could stamp a customer with a **phantom tier the brand never defined** (e.g. "diamond"). The canonical rule is: tiers come ONLY from the Loyalty Logic editor (`loyalty_config_col.tier_rules`).
+- **Fix (`historic_routes.py` + `pos_ewards_routes.py`):** removed the hardcoded thresholds/tier names from BOTH `_derive_tier`s. They now return strictly the configured tier slug for the highest band whose `min_lifetime_spend` the customer has reached; inactive tiers are filtered inline; when no tiers are configured they return `""` (untiered) instead of fabricating one. Historic still refreshes `_TIER_RULES_CACHE` from the DB at the start of every ingest job (`_run_ingest_job` → `_refresh_tier_rules_cache()`), so newly-ingested historic customers get the correct brand-defined tier.
+- **Verified:** `tests/iteration61_config_driven_tier_test.py` (10 assertions: custom tier names kazo_insider/trendsetter/style_icon resolved by spend band; never returns a hardcoded name; empty cache/config → ""; inactive tiers ignored; `_refresh_tier_rules_cache` loads active rules from DB) + iteration60 (tier-driven earn) + iteration59 (OTP idempotency) all pass.
+
+**⏱️ OTP validity extended 5 → 10 minutes** (`pos_ewards_routes.OTP_TTL_SECONDS` 300→600) for better POS redemption UX; the two hardcoded resend-OTP SMS strings updated to say "10 minutes". (OTP sent via 'otp' templates carries brand-authored copy.)
+
+**⚠️ Redeploy required** for production. Self-tested via pytest (backend-only pure-function changes).
+
+
 ### Iteration 56 (Jun 2026) — 🔴 Historical "stores" upload skipped ALL rows (header-casing mismatch)
 User: Historical → Stores (upsert) **skipped everything**; the Stores-module bulk upload worked fine. Root cause: `_map_store_row` only read **TitleCase** headers (`Name`/`City`) AND **required City**, but the user's CSV used the Stores-page **lowercase** format (`code,name,city,...`) → no `Name` found → "Missing Store Name" → all skipped.
 - **Fix (`historic_routes.py`):** mapper now does **case-insensitive** header lookup (works with both formats), **City is optional**, accepts code-only/name-only rows (derives the other), and **uppercases codes** so the two upload paths can't create case-variant duplicates. Verified `tests/iteration56_store_upload_test.py` (both casings, optional city, e2e upsert 0-skipped).

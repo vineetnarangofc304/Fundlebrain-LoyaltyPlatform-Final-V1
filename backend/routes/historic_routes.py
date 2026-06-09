@@ -190,27 +190,25 @@ async def _refresh_tier_rules_cache() -> None:
 
 
 def _derive_tier(lifetime_spend: float) -> str:
-    """Assign a tier from the CONFIGURED Tier Rules (cumulative-spend ranges). The customer
-    sits in the highest tier whose `min_lifetime_spend` they have reached. Falls back to a
-    sensible default ladder only when no tiers are configured / cache is empty."""
+    """Assign a tier STRICTLY from the CONFIGURED Tier Rules (the tiers defined in the
+    frontend Loyalty Logic editor — cumulative lifetime-spend ranges). The customer sits in
+    the highest tier whose `min_lifetime_spend` they have reached. NO hardcoded tier names:
+    when no tiers are configured we return "" (untiered) rather than inventing a tier the
+    brand hasn't defined (e.g. a phantom "diamond")."""
     rules = _TIER_RULES_CACHE
-    if rules:
-        rules = sorted(rules, key=lambda t: parse_float(t.get("min_lifetime_spend", 0)))
-        chosen = rules[0]
-        for t in rules:
-            if lifetime_spend >= parse_float(t.get("min_lifetime_spend", 0)):
-                chosen = t
-            else:
-                break
-        return chosen.get("tier") or rules[0].get("tier") or "silver"
-    # Fallback (no configured tiers loaded)
-    if lifetime_spend >= 200_000:
-        return "diamond"
-    if lifetime_spend >= 75_000:
-        return "platinum"
-    if lifetime_spend >= 25_000:
-        return "gold"
-    return "silver"
+    if not rules:
+        return ""
+    rules = [t for t in rules if t.get("is_active", True)]
+    if not rules:
+        return ""
+    rules = sorted(rules, key=lambda t: parse_float(t.get("min_lifetime_spend", 0)))
+    chosen = rules[0]
+    for t in rules:
+        if lifetime_spend >= parse_float(t.get("min_lifetime_spend", 0)):
+            chosen = t
+        else:
+            break
+    return chosen.get("tier") or rules[0].get("tier") or ""
 
 
 def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
