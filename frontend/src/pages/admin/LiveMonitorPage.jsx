@@ -98,17 +98,43 @@ export default function LiveMonitorPage() {
   const recalcPoints = async () => {
     setRecalcing(true);
     try {
-      const preview = (await api.post("/live-monitor/recalc-points", { dry_run: true })).data;
+      let preview = (await api.post("/live-monitor/recalc-points", { dry_run: true })).data;
+      let ignoreFlag = false;
+
       if (!preview.eligible) {
-        toast.info("No bills need recalculation — all eligible sale bills already have points.");
-        return;
+        const s = preview.skipped || {};
+        const reasons = [];
+        if (s.loyalty_flag_off) reasons.push(`${s.loyalty_flag_off} marked loyalty-flag OFF`);
+        if (s.below_min_or_zero_base) reasons.push(`${s.below_min_or_zero_base} below min-bill ₹${preview.min_bill_for_earn} (or no amount)`);
+        if (s.customer_not_found) reasons.push(`${s.customer_not_found} have no matched customer`);
+        if (s.computed_zero_rate) reasons.push(`${s.computed_zero_rate} compute 0 — earn rate/multiplier is 0`);
+        const reasonStr = reasons.join("; ") || "all eligible sale bills already have points";
+
+        if (s.loyalty_flag_off > 0) {
+          const force = window.confirm(
+            `No bills qualified normally.\nReason: ${reasonStr}.\n\n` +
+            `${s.loyalty_flag_off} bill(s) are marked loyalty-flag OFF (older bills may have been stored wrongly by a previous version).\n\n` +
+            `Force-credit these eligible sale bills regardless of the flag?\n(returns & below-min-bill are still skipped)`
+          );
+          if (!force) { toast.info(`No bills recalculated — ${reasonStr}.`); return; }
+          ignoreFlag = true;
+          preview = (await api.post("/live-monitor/recalc-points", { dry_run: true, ignore_loyalty_flag: true })).data;
+          if (!preview.eligible) {
+            toast.info(`Still 0 eligible. Likely earn rate/multiplier is 0, or all bills are below min-bill ₹${preview.min_bill_for_earn}. Fix Loyalty Rules, then retry.`);
+            return;
+          }
+        } else {
+          toast.info(`No bills recalculated — ${reasonStr}.`);
+          return;
+        }
       }
+
       const ok = window.confirm(
         `${preview.eligible} bill(s) currently have 0 points and qualify to earn ` +
-        `${preview.total_points.toLocaleString()} points total.\n\nApply now and credit the customers?`
+        `${preview.total_points.toLocaleString()} points total${ignoreFlag ? " (ignoring loyalty flag)" : ""}.\n\nApply now and credit the customers?`
       );
       if (!ok) return;
-      const res = (await api.post("/live-monitor/recalc-points", { dry_run: false })).data;
+      const res = (await api.post("/live-monitor/recalc-points", { dry_run: false, ignore_loyalty_flag: ignoreFlag })).data;
       toast.success(`Recalculated ${res.credited} bill(s) · credited ${res.total_points.toLocaleString()} points.`);
       load();
     } catch (e) {

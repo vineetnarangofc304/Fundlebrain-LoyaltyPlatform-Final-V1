@@ -334,6 +334,7 @@ class RecalcBody(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     limit: int = 20000
+    ignore_loyalty_flag: bool = False  # backfill bills wrongly stored as flag-off by older code
 
 
 @router.post("/recalc-points")
@@ -367,14 +368,19 @@ async def recalc_points(
         fil["bill_date"] = dr
 
     scanned = eligible = credited = total_points = 0
+    skipped = {"loyalty_flag_off": 0, "below_min_or_zero_base": 0,
+               "customer_not_found": 0, "computed_zero_rate": 0}
     samples: List[dict] = []
     async for t in transactions_col.find(fil, {"_id": 0}).limit(body.limit):
         scanned += 1
-        if str(t.get("loyalty_flag", "1")).strip().lower() in {"0", "false", "no", "n", "off"}:
+        if not body.ignore_loyalty_flag and \
+                str(t.get("loyalty_flag", "1")).strip().lower() in {"0", "false", "no", "n", "off"}:
+            skipped["loyalty_flag_off"] += 1
             continue
         base = float(t.get("loyalty_gross_amount") or t.get("amount")
                      or t.get("net_amount") or t.get("final_amount") or 0)
         if base <= 0 or base < min_bill:
+            skipped["below_min_or_zero_base"] += 1
             continue
         cust = None
         if t.get("customer_id"):
@@ -382,10 +388,12 @@ async def recalc_points(
         if not cust and t.get("customer_mobile"):
             cust = await customers_col.find_one({"mobile": t["customer_mobile"]}, {"_id": 0, "id": 1, "tier": 1})
         if not cust:
+            skipped["customer_not_found"] += 1
             continue
         mult = tier_mult.get(cust.get("tier") or "silver", 1.0)
         pts = _compute_earn_points(base, cfg, mult)
         if pts <= 0:
+            skipped["computed_zero_rate"] += 1
             continue
         eligible += 1
         total_points += pts
@@ -404,7 +412,11 @@ async def recalc_points(
             })
             credited += 1
     return {"dry_run": body.dry_run, "scanned": scanned, "eligible": eligible,
-            "credited": credited, "total_points": total_points, "samples": samples}
+            "credited": credited, "total_points": total_points, "samples": samples,
+            "skipped": skipped, "min_bill_for_earn": min_bill,
+            "earn_mode": cfg.get("earn_mode") or "points_per_spend",
+            "earn_ratio": cfg.get("earn_ratio"), "percent_of_spend": cfg.get("percent_of_spend"),
+            "ignore_loyalty_flag": body.ignore_loyalty_flag}
 
 
 
