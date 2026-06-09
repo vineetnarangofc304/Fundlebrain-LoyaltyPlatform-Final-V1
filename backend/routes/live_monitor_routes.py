@@ -430,6 +430,35 @@ async def rotate_pos_credential(cred_id: str,
     return await db["pos_credentials"].find_one({"id": cred_id}, {"_id": 0})
 
 
+class POSCredSetKey(BaseModel):
+    api_key: str
+
+
+@admin_router.post("/{cred_id}/set-key")
+async def set_pos_credential_key(cred_id: str, body: POSCredSetKey,
+                                  user: dict = Depends(require_roles("super_admin", "brand_admin"))):
+    """Set a SPECIFIC x-api-key (e.g. the key already provisioned at the POS /
+    stores) instead of rotating to a random one. Activates the credential and
+    makes /api/pos/* authenticate against this exact key immediately.
+    """
+    from database import db
+    key = (body.api_key or "").strip()
+    if len(key) < 16:
+        raise HTTPException(400, "x-api-key must be at least 16 characters")
+    # Block reusing a key that already belongs to a DIFFERENT credential.
+    clash = await db["pos_credentials"].find_one({"api_key": key, "id": {"$ne": cred_id}})
+    if clash:
+        raise HTTPException(400, "This x-api-key is already used by another credential")
+    res = await db["pos_credentials"].update_one(
+        {"id": cred_id},
+        {"$set": {"api_key": key, "is_active": True,
+                   "rotated_at": _now_iso(), "rotated_by": user.get("email")}},
+    )
+    if not res.matched_count:
+        raise HTTPException(404, "Credential not found")
+    return await db["pos_credentials"].find_one({"id": cred_id}, {"_id": 0})
+
+
 @admin_router.post("/{cred_id}/deactivate")
 async def deactivate_pos_credential(cred_id: str,
                                        user: dict = Depends(require_roles("super_admin", "brand_admin"))):

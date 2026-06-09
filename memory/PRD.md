@@ -32,7 +32,15 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
-### Iteration 51 (Jun 2026) — 🔴 PROD FIX: CRM customer file "skips everything" + Command Center 500 + Verify Load + mobile menu collapse
+### Iteration 52 (Jun 2026) — 🔴 LIVE-POS: settable POS x-api-key ("Set key")
+
+User (PRODUCTION): stores were re-provisioned with a new `x-api-key` (`ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI`). The system only validated against the OLD key → every live `/api/pos/*` call would 403. Existing UI only had **Rotate** (generates a *random* key), no way to set a *specific* one.
+- **Backend (`live_monitor_routes.py`):** new `POST /api/admin/pos-credentials/{cred_id}/set-key` (super_admin/brand_admin) — sets the credential's `api_key` to an exact value, activates it, blocks reuse of a key owned by another cred, min 16 chars.
+- **Frontend (`POSCredentialsPage.jsx`):** "Set key" button next to Rotate/Disable → inline editor **pre-filled with the provisioned key**, "Save key" applies it. POS authenticates against it immediately.
+- **Verified** (`tests/iteration52_pos_setkey_test.py`): set-key persists, `/api/pos/posCustomerCheck` passes auth with the new key (200) and rejects a wrong key (403); short keys 400. Test restores the original key.
+- **⚠️ ACTION:** redeploy → on prod POS Credentials page click **Set key → Save key** on the active credential to switch prod to the new key.
+
+
 
 User (LIVE, launch crunch): *"something wrong in your logic of ingestion for the CRM file… it's skipping everything"* + *"command centre still not loading (500s)"* + *"toggle/collapse for the left menu — can't see data full screen on mobile."*
 

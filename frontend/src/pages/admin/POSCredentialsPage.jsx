@@ -12,6 +12,13 @@ export default function POSCredentialsPage() {
   const [creds, setCreds] = useState([]);
   const [reveal, setReveal] = useState({});
   const [newOpen, setNewOpen] = useState(false);
+  // Inline "set custom key" editor — lets admins set the EXACT x-api-key that the
+  // stores/POS are already configured with (instead of rotating to a random one).
+  const [editKey, setEditKey] = useState(null);
+  const [keyInput, setKeyInput] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
+  // Key already provisioned at the stores — pre-filled so it's one click to apply.
+  const PROVISIONED_KEY = "ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI";
 
   const load = async () => {
     try {
@@ -22,6 +29,22 @@ export default function POSCredentialsPage() {
     }
   };
   useEffect(() => { load(); }, []);
+
+  const openSetKey = (id) => { setKeyInput(PROVISIONED_KEY); setEditKey(id); };
+  const saveKey = async (id) => {
+    const key = (keyInput || "").trim();
+    if (key.length < 16) { toast.error("x-api-key must be at least 16 characters"); return; }
+    if (!window.confirm("Set this exact x-api-key? KAZO POS must send this key on every call.")) return;
+    setSavingKey(true);
+    try {
+      await api.post(`/admin/pos-credentials/${id}/set-key`, { api_key: key });
+      toast.success("x-api-key updated — POS now authenticates with this key");
+      setEditKey(null);
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not update key");
+    } finally { setSavingKey(false); }
+  };
 
   const rotate = async (id) => {
     if (!window.confirm("Rotate this api_key? KAZO's POS will need the new key.")) return;
@@ -84,6 +107,9 @@ export default function POSCredentialsPage() {
                   </div>
                   {c.is_active && (
                     <div className="flex gap-2">
+                      <button onClick={() => openSetKey(c.id)} className="k-btn k-btn-ghost k-btn-sm" data-testid={`pos-cred-setkey-${c.id}`}>
+                        <KeyRound className="w-3 h-3" /> Set key
+                      </button>
                       <button onClick={() => rotate(c.id)} className="k-btn k-btn-ghost k-btn-sm" data-testid={`pos-cred-rotate-${c.id}`}>
                         <RotateCw className="w-3 h-3" /> Rotate
                       </button>
@@ -100,6 +126,25 @@ export default function POSCredentialsPage() {
                               onToggle={() => setReveal({ ...reveal, [c.id]: !reveal[c.id] })}
                               onCopy={() => copy(c.api_key)} />
                 </div>
+                {editKey === c.id && (
+                  <div className="mt-3 p-3 border border-burgundy-200" style={{ background: "#FBF1F3" }} data-testid={`pos-cred-setkey-editor-${c.id}`}>
+                    <div className="text-[10px] uppercase tracking-widest text-burgundy-800 mb-1.5">Set the exact x-api-key configured at the stores</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        className="k-input font-mono text-xs flex-1 min-w-[260px]"
+                        value={keyInput}
+                        onChange={(e) => setKeyInput(e.target.value)}
+                        spellCheck={false}
+                        data-testid={`pos-cred-key-input-${c.id}`}
+                      />
+                      <button onClick={() => saveKey(c.id)} disabled={savingKey} className="k-btn kazo-bg-burgundy k-btn-sm" data-testid={`pos-cred-key-save-${c.id}`}>
+                        {savingKey ? "Saving…" : "Save key"}
+                      </button>
+                      <button onClick={() => setEditKey(null)} className="k-btn k-btn-ghost k-btn-sm" data-testid={`pos-cred-key-cancel-${c.id}`}>Cancel</button>
+                    </div>
+                    <div className="text-[10px] text-neutral-500 mt-1.5">POS calls will authenticate against this exact key the moment you save. Make sure it matches what the stores send in the <code className="font-mono">x-api-key</code> header.</div>
+                  </div>
+                )}
                 {c.note && <div className="mt-2 text-[11px] text-neutral-500 italic">{c.note}</div>}
                 <div className="mt-2 text-[10px] text-neutral-500">Created {new Date(c.created_at).toLocaleString()} {c.created_by ? `by ${c.created_by}` : ""}</div>
               </div>
