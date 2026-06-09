@@ -32,6 +32,14 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 62 (Jun 2026) — 🟠 RECALC scoped to TODAY's LIVE-POS bills only
+User: *"RECALC should only give points to bills from today that came from Live POS, based on the rules configured."*
+
+**Change (`live_monitor_routes.py recalc_points`):** the recalc filter now (1) hard-restricts to `source == "pos_ewards"` so historic-upload bills are NEVER re-credited (they get points via opening balances), and (2) defaults the window to **today (IST)** when the caller passes no date range (the frontend "Recalc points" button passes none, so it's today-only). An explicit `start_date/end_date` override is still honoured for support, but it stays pos_ewards-only. Response now returns `source` + `window` for transparency. Earn math is unchanged (`_compute_earn_points`, fully config-driven).
+- **Frontend (`LiveMonitorPage.jsx`):** confirm dialog clarifies "Only today's Live-POS bills are recalculated — historic bills are never touched."
+- **Verified:** `tests/iteration62_recalc_today_livepos_only_test.py` — 3 seeded zero-point bills (today+pos ✓ eligible; today+historic ✗; yesterday+pos ✗ by default); with an explicit yesterday→today range, the historic-source bill still excluded while yesterday's live-POS bill appears. ⚠️ Redeploy required for production.
+
+
 ### Iteration 61 (Jun 2026) — 🔴 P0: Tiers assigned STRICTLY from frontend-configured Tier Rules (kill hardcoded tier names) · ⏱️ OTP validity 5→10 min
 User: *"there is no diamond tier.. tier names are as defined in the front end.. hope you are taking those"* (continuation of the tier-driven earning work).
 

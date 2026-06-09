@@ -130,8 +130,8 @@ export default function LiveMonitorPage() {
       }
 
       const ok = window.confirm(
-        `${preview.eligible} bill(s) currently have 0 points and qualify to earn ` +
-        `${preview.total_points.toLocaleString()} points total${ignoreFlag ? " (ignoring loyalty flag)" : ""}.\n\nApply now and credit the customers?`
+        `${preview.eligible} of today's Live-POS bill(s) currently have 0 points and qualify to earn ` +
+        `${preview.total_points.toLocaleString()} points total${ignoreFlag ? " (ignoring loyalty flag)" : ""}.\n\nApply now and credit the customers?\n(Only today's Live-POS bills are recalculated — historic bills are never touched.)`
       );
       if (!ok) return;
       const res = (await api.post("/live-monitor/recalc-points", { dry_run: false, ignore_loyalty_flag: ignoreFlag })).data;

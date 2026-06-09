@@ -22,6 +22,10 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# KAZO operates in IST; "today" for recalc means the current IST calendar day.
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+
 @router.get("/transactions")
 async def live_transactions(
     limit: int = Query(200, ge=1, le=2000),
@@ -355,17 +359,25 @@ async def recalc_points(
     min_bill = float(cfg.get("min_bill_for_earn", 0) or 0)
     tier_mult = {t.get("tier"): t.get("earn_multiplier", 1.0) for t in (cfg.get("tier_rules") or [])}
 
+    # RECALC is scoped to LIVE POS bills ONLY (source=pos_ewards): historic-upload bills
+    # get their points via opening balances and must never be touched by recalc. It also
+    # defaults to TODAY (IST) — recalc only back-credits the current day's live bills per
+    # the configured earn rules, so it can never re-touch older / historic data.
     fil: dict = {"is_return": {"$ne": True},
+                 "source": "pos_ewards",
                  "$or": [{"points_earned": {"$lte": 0}}, {"points_earned": None}]}
     if body.store_id:
         fil["store_id"] = body.store_id
-    if body.start_date or body.end_date:
-        dr: dict = {}
-        if body.start_date:
-            dr["$gte"] = body.start_date
-        if body.end_date:
-            dr["$lte"] = body.end_date + "T23:59:59.999Z"
-        fil["bill_date"] = dr
+    start_date = body.start_date
+    end_date = body.end_date
+    if not start_date and not end_date:
+        start_date = end_date = datetime.now(IST_TZ).strftime("%Y-%m-%d")  # today, IST
+    dr: dict = {}
+    if start_date:
+        dr["$gte"] = start_date
+    if end_date:
+        dr["$lte"] = end_date + "T23:59:59.999Z"
+    fil["bill_date"] = dr
 
     scanned = eligible = credited = total_points = 0
     skipped = {"loyalty_flag_off": 0, "below_min_or_zero_base": 0,
@@ -414,6 +426,7 @@ async def recalc_points(
     return {"dry_run": body.dry_run, "scanned": scanned, "eligible": eligible,
             "credited": credited, "total_points": total_points, "samples": samples,
             "skipped": skipped, "min_bill_for_earn": min_bill,
+            "source": "pos_ewards", "window": {"start": start_date, "end": end_date},
             "earn_mode": cfg.get("earn_mode") or "points_per_spend",
             "earn_ratio": cfg.get("earn_ratio"), "percent_of_spend": cfg.get("percent_of_spend"),
             "ignore_loyalty_flag": body.ignore_loyalty_flag}
