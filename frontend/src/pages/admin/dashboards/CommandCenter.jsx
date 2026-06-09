@@ -46,7 +46,7 @@ export default function CommandCenter() {
     return filterOpts.stores.filter((s) => s.city === city);
   }, [filterOpts.stores, city]);
 
-  const load = async () => {
+  const load = async (force = false) => {
     if (inFlight.current) return;   // don't stack concurrent loads (auto-refresh + clicks)
     inFlight.current = true;
     setLoading(true);
@@ -59,6 +59,7 @@ export default function CommandCenter() {
       }
       if (storeId) params.store_id = storeId;
       if (city && !storeId) params.city = city;
+      if (force) params.refresh = 1;   // explicit Refresh bypasses the 60s server cache
       const res = await api.get("/dashboard/command-center", { params });
       setData(res.data);
       setError(null);
@@ -72,7 +73,7 @@ export default function CommandCenter() {
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [period, range, storeId, city]);
   useEffect(() => {
-    const id = setInterval(load, 30000);
+    const id = setInterval(() => load(), 30000);
     return () => clearInterval(id);
     // eslint-disable-next-line
   }, [period, range, storeId, city]);
@@ -113,7 +114,7 @@ export default function CommandCenter() {
         <p className="text-sm text-neutral-600 mb-4">
           {error || "The request took too long while a large dataset is still being ingested. Your data is safe — please retry in a moment."}
         </p>
-        <button className="k-btn k-btn-primary" onClick={load} disabled={loading} data-testid="cc-retry">
+        <button className="k-btn k-btn-primary" onClick={() => load(true)} disabled={loading} data-testid="cc-retry">
           {loading ? "Retrying…" : "Retry"}
         </button>
       </div>
@@ -276,7 +277,7 @@ export default function CommandCenter() {
               }}
               testid="cc-date-range"
             />
-            <button className="k-btn k-btn-outline k-btn-sm" onClick={load} data-testid="cc-refresh">
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={() => load(true)} data-testid="cc-refresh">
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
             </button>
           </>

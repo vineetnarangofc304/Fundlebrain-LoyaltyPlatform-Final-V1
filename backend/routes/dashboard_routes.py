@@ -428,6 +428,7 @@ async def command_center(
     end_date: Optional[str] = None,
     store_id: Optional[str] = None,
     city: Optional[str] = None,
+    refresh: bool = False,
     user: dict = Depends(get_current_user),
 ):
     """Live Command Center KPIs + sparkline + cohort distribution + alerts.
@@ -439,9 +440,10 @@ async def command_center(
       - city: limit to stores in this city (resolves to a store_id list)
     """
     # Cached briefly (60s) — see _CC_CACHE note. Live POS bills appear within the TTL.
+    # An explicit user Refresh (refresh=true) bypasses the cache for fresh numbers.
     _ck = f"{period}|{start_date}|{end_date}|{store_id}|{city}"
     _hit = _CC_CACHE.get(_ck)
-    if _hit and (_time.monotonic() - _hit[0]) < _CC_TTL:
+    if not refresh and _hit and (_time.monotonic() - _hit[0]) < _CC_TTL:
         return _hit[1]
     # Custom date range takes precedence over preset period
     if start_date and end_date:

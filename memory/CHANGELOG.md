@@ -5,7 +5,43 @@ This file appends what was implemented, newest first.)
 
 ---
 
-## 2026-06-09 — Scheduler hardening + Customer 360 fix + Live Monitor numbers
+## 2026-06-09 (cont.) — Dashboards & reports fixed at production scale
+
+User report (full prod data loaded: ~1.1M customers, ~8.6L+ txns): raw reports all
+failing to load, Command Center "all zero" + slow, Sales Dashboard not loading.
+
+### Root cause
+- **42 of 45 aggregations** in `dashboard_routes.py`, `analytics_routes.py`,
+  `raw_reports_routes.py` lacked `allowDiskUse=True` → at scale a `$group`/`$sort`
+  over the 100MB pipeline cap throws → 500 → "failing to load" / silent zeros.
+- Command Center fires ~16 concurrent all-time scans capped at **8s `maxTimeMS`**;
+  at scale they timed out and `_safe_agg` returned 0 → "all zero + slow".
+
+### Fixes (verified: testing_agent iteration_24 = 40/40 backend + 12/12 dashboards +
+5/5 raw reports + Customer 360 + Live Monitor, 100%)
+- Added `allowDiskUse=True` to **all 45** aggregations (safe paren-matching pass).
+- `_safe_agg`/`_safe_count` `maxTimeMS` 8s → **25s** so all-time scans complete.
+- **60s TTL cache** on `/dashboard/command-center` (`_CC_CACHE`) — page auto-refreshes
+  every 30s + users navigate in/out, so it's slow at most once a minute. Explicit
+  **Refresh** button sends `refresh=1` to bypass the cache (fresh numbers on demand).
+- **Removed hardcode**: `burn_ratio` (₹/point liability) now read from `loyalty_config`
+  via `_burn_ratio()` (Loyalty Configurator drives it) instead of `= 0.25` literal.
+- Swept dashboards/reports for mock/dummy/sample data — none found; all numbers are
+  computed live from MongoDB.
+
+### Customer 360 (Raw Customer Data) — earlier in this session
+- Server-side **pagination** (Prev/Next, page X/Y) — was showing only the first 100.
+- **Points Balance** + **Churn** columns added on-screen (balance was export-only).
+
+### Notes / deferred
+- P2 cosmetic: `<span> cannot be a child of <option>` console warning on CommandCenter
+  store/city `<select>` — it's the emergent dev-tool's injected x-source spans inside
+  `<option>` (preview-only tooling artifact), not our markup. Non-blocking.
+- Reviewer note: ensure `loyalty_config` doc is seeded in every env so Liability KPI
+  isn't 0; confirm bill_date/customer_mobile indexes exist at prod scale (they do — see
+  server.ensure_indexes / iteration46).
+
+
 
 ### P0 — Historic ingest scheduler no longer hangs/loops on 126MB+ CSVs
 File: `backend/routes/historic_routes.py`
