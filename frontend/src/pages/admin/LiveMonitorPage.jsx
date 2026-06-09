@@ -164,7 +164,7 @@ export default function LiveMonitorPage() {
                   icon={PhoneOff} color={PALETTE.rose} testid="lm-kpi-lost" />
             <KPI label="Attach %" value={`${(stats.mobile_attach_rate_pct || 0).toFixed(1)}%`} icon={CheckCircle2} color={PALETTE.indigo} />
             <KPI label="Total Purchase" value={fmtCurrency(stats.revenue_total)} icon={ShoppingBag} color={PALETTE.teal} testid="lm-kpi-total-rev" />
-            <KPI label="Loyalty Purchase" value={fmtCurrency(stats.revenue_with_mobile)} icon={Award} color={PALETTE.emerald} testid="lm-kpi-loyalty-rev" />
+            <KPI label="Loyalty Purchase" value={fmtCurrency(stats.loyalty_revenue)} icon={Award} color={PALETTE.emerald} testid="lm-kpi-loyalty-rev" />
             <KPI label="Pts Earned" value={(stats.points_earned || 0).toLocaleString()} icon={Coins} color={PALETTE.amber} />
             <KPI label="Returns" value={(stats.returns || 0).toLocaleString()} icon={TrendingDown} color={PALETTE.rose} />
           </div>

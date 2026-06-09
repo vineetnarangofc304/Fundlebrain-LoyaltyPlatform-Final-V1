@@ -181,7 +181,7 @@ export default function CustomerDetail() {
               title: "All transactions",
               subtitle: "DRILLDOWN",
               collection: "transactions",
-              filter: { customer_id: id },
+              filter: { customer_mobile: c.mobile },
               sort: [["bill_date", -1]],
               columns: [
                 { key: "bill_number", label: "Bill #", mono: true },

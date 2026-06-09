@@ -10,6 +10,7 @@ from database import (
 from auth import get_current_user, log_audit
 from models import CustomerCreate, Customer
 import uuid
+import re
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -21,20 +22,38 @@ async def list_customers(
     user: dict = Depends(get_current_user)
 ):
     fil = {}
-    if q:
-        fil["$or"] = [
-            {"mobile": {"$regex": q, "$options": "i"}},
-            {"email": {"$regex": q, "$options": "i"}},
-            {"name": {"$regex": q, "$options": "i"}},
-        ]
+    search_mode = False
+    if q and q.strip():
+        search_mode = True
+        qs = q.strip()
+        if qs.isdigit():
+            # Mobile search — anchored PREFIX regex hits the {mobile:1} index, so it
+            # stays fast even at 1M+ customers (an unanchored /q/i regex was a full
+            # collection scan → the "searches forever / never returns" bug).
+            fil["mobile"] = {"$regex": f"^{re.escape(qs)}"}
+        else:
+            rx = {"$regex": f"^{re.escape(qs)}", "$options": "i"}
+            fil["$or"] = [
+                {"name": rx},
+                {"email": rx},
+                {"mobile": {"$regex": f"^{re.escape(qs)}"}},
+            ]
     if tier:
         fil["tier"] = tier
     if city:
         fil["city"] = city
     if churn_risk:
         fil["churn_risk"] = churn_risk
-    total = await customers_col.count_documents(fil)
-    customers = await customers_col.find(fil, {"_id": 0}).sort("lifetime_spend", -1).skip(skip).limit(limit).to_list(limit)
+
+    # In search mode, sort by mobile (the index already returns rows in that order so
+    # there's no costly in-memory sort of a large match set); otherwise rank by spend.
+    sort_key, sort_dir = ("mobile", 1) if search_mode else ("lifetime_spend", -1)
+    try:
+        total = await customers_col.count_documents(fil, maxTimeMS=6000)
+    except Exception:
+        total = -1  # count timed out on a heavy name scan; UI still shows the page
+    cursor = customers_col.find(fil, {"_id": 0}).sort(sort_key, sort_dir).skip(skip).limit(limit).max_time_ms(9000)
+    customers = await cursor.to_list(limit)
 
     # Enrich each customer with home_store_code + home_store_name from store master,
     # so the Raw Customer Data table can show the "Location code" column (docx #39).
@@ -139,6 +158,7 @@ async def award_points(customer_id: str, points: int, note: Optional[str] = None
     await points_ledger_col.insert_one({
         "id": uuid.uuid4().hex,
         "customer_id": customer_id,
+        "customer_mobile": cust.get("mobile"),
         "type": "bonus",
         "points": points,
         "reference_type": "manual",
@@ -166,6 +186,7 @@ async def deduct_points(customer_id: str, points: int, note: Optional[str] = Non
     await points_ledger_col.insert_one({
         "id": uuid.uuid4().hex,
         "customer_id": customer_id,
+        "customer_mobile": cust.get("mobile"),
         "type": "adjust",
         "points": -points,
         "reference_type": "manual",

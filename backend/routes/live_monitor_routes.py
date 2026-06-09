@@ -203,7 +203,10 @@ async def live_stats(
         {"$group": {
             "_id": None,
             "bills": {"$sum": 1},
-            "revenue": {"$sum": "$net_amount"},
+            # Total Purchase = GROSS SALES (gross_amount = MRP/billed value), returns
+            # EXCLUDED (they're surfaced in the separate Returns KPI) so Total Purchase
+            # stays a clean superset of Loyalty Purchase.
+            "revenue": {"$sum": {"$cond": ["$is_return", 0, "$gross_amount"]}},
             "bills_with_mobile": {
                 "$sum": {"$cond": [
                     {"$and": [{"$ne": ["$customer_mobile", None]},
@@ -213,9 +216,19 @@ async def live_stats(
             },
             "revenue_with_mobile": {
                 "$sum": {"$cond": [
-                    {"$and": [{"$ne": ["$customer_mobile", None]},
+                    {"$and": [{"$not": ["$is_return"]},
+                                {"$ne": ["$customer_mobile", None]},
                                 {"$ne": ["$customer_mobile", ""]}]},
-                    "$net_amount", 0,
+                    "$gross_amount", 0,
+                ]}
+            },
+            # Loyalty Purchase = gross purchase value of (non-return) bills on which
+            # points WERE given (points_earned > 0) — same gross basis as Total Purchase.
+            "loyalty_revenue": {
+                "$sum": {"$cond": [
+                    {"$and": [{"$not": ["$is_return"]},
+                                {"$gt": ["$points_earned", 0]}]},
+                    "$gross_amount", 0,
                 ]}
             },
             "points_earned": {"$sum": "$points_earned"},
@@ -230,6 +243,7 @@ async def live_stats(
     lost = bills - with_mob
     revenue = float(base.get("revenue") or 0)
     rev_with = float(base.get("revenue_with_mobile") or 0)
+    loyalty_rev = float(base.get("loyalty_revenue") or 0)
     attach_rate = (with_mob / bills * 100) if bills else 0.0
 
     # Repeat bills — bills whose customer_mobile appears 2+ times in the window
@@ -290,6 +304,7 @@ async def live_stats(
         "mobile_attach_rate_pct": round(attach_rate, 2),
         "revenue_total": round(revenue, 2),
         "revenue_with_mobile": round(rev_with, 2),
+        "loyalty_revenue": round(loyalty_rev, 2),
         "revenue_lost": round(revenue - rev_with, 2),
         "points_earned": int(base.get("points_earned") or 0),
         "points_redeemed": int(base.get("points_redeemed") or 0),

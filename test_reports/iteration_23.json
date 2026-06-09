@@ -1,0 +1,35 @@
+{
+  "summary": "Validated the two fixes in PREVIEW: (1) Customer 360 search + detail are now FAST and NOT BLANK, (2) Live Monitor defaults to 'today', exposes store LOC code, row legend, and KPI semantics (Total Purchase vs Loyalty Purchase). 7/7 backend pytest tests passed (1 skipped) and all 7 acceptance criteria verified in Playwright.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_results_detail": {
+    "login": "PASS — superadmin@fundle.io logged in via /crm/login, landed on /admin.",
+    "customer_search_600": "PASS — GET /api/customers?q=600 returned items in <0.1s; UI rendered 62 rows on customer-360-page; first row testid customer-row-3e3e6fe1c4e543589920b72be4a4e3c8. NO infinite loading.",
+    "customer_detail_target": "PASS — /admin/customers/a26865d9a69b48d48a9c1524e25041ef rendered customer-detail-page with cust-name=6000535682, cust-lts=₹3.0K, cust-points=2,980, cust-visits=2, RFM 455·Champions. Recent transactions table has rows (NOT blank). Backend GET /api/dashboard/customer-360/<id> returns lifetime.spend=2980.0, lifetime.visits=2, recent_transactions length=2.",
+    "live_monitor_default_window_today": "PASS — lm-fil-window default value = 'today'. All 9 options present: Today, Last 15m/1h/6h/24h/7d/30d/90d/365d (values today,15,60,360,1440,10080,43200,129600,525600).",
+    "live_monitor_store_cards_loc_code": "PASS — After switching to Last 365d, 10 top-store cards rendered with LOC code badges (KITERATIO, KTESTOUTL x3, KAJENTERP visible). No 'Unknown' store card with negative revenue.",
+    "live_monitor_loc_code_column": "PASS — Bills table contains a 'Loc Code' column (verified via TH text match).",
+    "live_monitor_row_legend_and_colors": "PASS — lm-row-legend present showing Repeat / New / Walk-in / Return chips; 85 lm-row-* rows rendered with type-based tinting (RETURN orange, REPEAT emerald, NEW amber, WALK-IN rose).",
+    "live_monitor_kpi_semantics": "PASS — UI shows Total Purchase ₹15.7K (lm-kpi-total-rev) and Loyalty Purchase ₹11.5K (lm-kpi-loyalty-rev). Backend GET /api/live-monitor/stats?minutes=525600 returns revenue_total >= loyalty_revenue (loyalty is a subset of gross sales excluding returns)."
+  },
+  "critical_code_review_comments": [
+    "Live Monitor uses query param name `minutes` for /stats and `since_minutes` for /transactions — inconsistent. Frontend handles it but external consumers may trip on this. Non-blocking.",
+    "GET /api/live-monitor/stats includes `by_store_top10` (empty in 365d window in preview), but the Top stores UI is sourced from a separate endpoint. Worth consolidating to avoid duplicate aggregation.",
+    "Customer 360 detail nests lifetime under `lifetime: {spend, gross, discount, visits, items, aov, first_purchase, last_purchase}` — good shape; ensure frontend handles missing keys gracefully (currently fine)."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/iteration58_customer360_livemon_test.py",
+    "/app/test_reports/pytest/iteration58.xml"
+  ],
+  "action_items": [],
+  "updated_files": [
+    "/app/backend/tests/iteration58_customer360_livemon_test.py"
+  ],
+  "success_rate": { "backend": "100% (7/7 executed; 1 skipped)", "frontend": "100% (7/7 acceptance criteria)" },
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (CRM portal)",
+  "seed_data_creation": "None. Read-only verification only.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Live Monitor /stats uses param `minutes` (max 525600 = 365d), /transactions uses `since_minutes` — NOT `window`. Target customer a26865d9a69b48d48a9c1524e25041ef (mobile 6000535682) has 2 bills + ₹2980 lifetime spend; useful for repeat smoke-tests. Customer 360 detail response shape: {customer, lifetime:{spend,gross,visits,aov,...}, rfm:{score,segment,r,f,m}, monthly_spend, store_affinity, category_affinity, recent_transactions, points_ledger, nps_history}.",
+  "rca of the issue": "Original blank Customer 360 detail was caused by querying transactions/points_ledger by 'customer_id' (null on legacy migrated bills) instead of 'customer_mobile' (indexed). Fix in /app/backend/routes/fundlebrain_routes.py:customer_360_v2() now correctly resolves by mobile — verified: target customer returns lifetime.spend=2980 and 2 recent_transactions. Original slow search at ~1.1M scale was unanchored regex; now anchored prefix regex + bounded count makes /api/customers?q=600 respond in <0.1s on preview (62 records)."
+}

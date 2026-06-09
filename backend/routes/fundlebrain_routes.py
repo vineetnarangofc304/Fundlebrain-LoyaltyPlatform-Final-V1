@@ -90,10 +90,14 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
     customer = await customers_col.find_one({"id": customer_id}, {"_id": 0})
     if not customer:
         raise HTTPException(404, "Customer not found")
+    # Loyalty bills/ledger are keyed by customer_mobile (the canonical identity) and
+    # customer_mobile is indexed — matching on customer_id was both WRONG (null on
+    # bulk-loaded history) and SLOW (full collection scan → timeout → blank page).
+    mobile = customer.get("mobile") or "__no_mobile__"
 
     # ---- monthly spend (last 24 months, live aggregate) ----
     pipe = [
-        {"$match": {"customer_id": customer_id}},
+        {"$match": {"customer_mobile": mobile}},
         {"$group": {
             "_id": {"$substr": ["$bill_date", 0, 7]},
             "spend": {"$sum": "$net_amount"},
@@ -115,7 +119,7 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
 
     # ---- store affinity (top stores by visit count) ----
     store_pipe = [
-        {"$match": {"customer_id": customer_id}},
+        {"$match": {"customer_mobile": mobile}},
         {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": "$net_amount"}}},
         {"$sort": {"visits": -1}}, {"$limit": 5},
     ]
@@ -132,7 +136,7 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
 
     # ---- category affinity ----
     cat_pipe = [
-        {"$match": {"customer_id": customer_id}},
+        {"$match": {"customer_mobile": mobile}},
         {"$unwind": "$items"},
         {"$group": {"_id": "$items.category", "qty": {"$sum": "$items.quantity"},
                     "spend": {"$sum": "$items.total"}}},
@@ -163,12 +167,12 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
 
     # ---- recent transactions (last 10) ----
     recent = await transactions_col.find(
-        {"customer_id": customer_id}, {"_id": 0}
+        {"customer_mobile": mobile}, {"_id": 0}
     ).sort("bill_date", -1).limit(10).to_list(10)
 
     # ---- points ledger (last 25) ----
     ledger = await points_ledger_col.find(
-        {"customer_id": customer_id}, {"_id": 0}
+        {"customer_mobile": mobile}, {"_id": 0}
     ).sort("created_at", -1).limit(25).to_list(25)
 
     # ---- NPS history ----
@@ -178,7 +182,7 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
 
     # ---- lifetime stats (live recompute, NOT cached counters) ----
     lifetime_pipe = [
-        {"$match": {"customer_id": customer_id}},
+        {"$match": {"customer_mobile": mobile}},
         {"$group": {
             "_id": None,
             "spend": {"$sum": "$net_amount"},
