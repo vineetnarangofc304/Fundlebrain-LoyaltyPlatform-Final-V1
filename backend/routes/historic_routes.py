@@ -106,6 +106,23 @@ def _norm_mobile(value: Any) -> str:
 
 
 # ---------------- Row mappers (per dataset) ----------------
+# CRM "Registred Account" column encodes the customer's REGISTRATION store as
+# "<STORECODE>@KAZO.com" (e.g. K00078@KAZO.com → K00078). Store codes are a
+# letter prefix + digits (K00078, K00055, F00028). System/online registrations
+# like "crm.loyalty@kazo.com" or "application@KAZO.com" are NOT stores.
+_STORE_CODE_RE = re.compile(r"^[A-Z]{1,4}\d{2,}$")
+
+
+def _store_code_from_account(account: Optional[str]) -> Optional[str]:
+    """Return the store code = the part BEFORE '@' in a CRM account string, only
+    when it matches the store-code pattern (letter prefix + digits). Otherwise
+    None (system/online accounts such as crm.loyalty@ / application@)."""
+    if not account or "@" not in account:
+        return None
+    local = account.split("@", 1)[0].strip().upper()
+    return local if _STORE_CODE_RE.match(local) else None
+
+
 def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     mobile = _norm_mobile(r.get("Mobile") or r.get("mobile") or r.get("Customer Mobile"))
     if not mobile or len(mobile) < 7:
@@ -125,6 +142,8 @@ def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
     city = (r.get("City") or "").strip() or None
     state = (r.get("State") or "").strip() or None
     online = (r.get("ONLINE") or "").strip().lower() in {"online", "1", "true", "yes"}
+    reg_account = (r.get("Registred Account") or r.get("Registered Account") or "").strip() or None
+    reg_store_code = _store_code_from_account(reg_account)
     return ({
         "mobile": mobile,
         "name": name,
@@ -132,7 +151,10 @@ def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
         "state": state,
         "country_code": (r.get("Country Code") or "91").strip(),
         "card_validity": (r.get("Card Validity") or "").strip() or None,
-        "registered_account": (r.get("Registred Account") or r.get("Registered Account") or "").strip() or None,
+        "registered_account": reg_account,
+        # Store code parsed from the registered account (before '@'). The
+        # customer post-pass resolves this to registered_store_id + home_store_id.
+        "registered_store_code": reg_store_code,
         "first_visit_account": (r.get("First Visit Account") or "").strip() or None,
         "last_visit_account": (r.get("Last Visit Account") or "").strip() or None,
         "last_visit_at": last_visit.isoformat() if last_visit else None,
@@ -958,6 +980,12 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                 await _write_opening_balance_ledger_for_job(job_id)
             except Exception as obe:
                 logger.exception(f"Opening-balance ledger post-pass failed: {obe}")
+            # R-STORE: attribute customers to their CRM registration store
+            # (store code = part before '@' in 'Registred Account').
+            try:
+                await _link_registered_stores_for_job(job_id)
+            except Exception as rse:
+                logger.exception(f"Registered-store link post-pass failed: {rse}")
 
         final = {
             "status": "completed" if not dry_run else "previewed",
@@ -1221,6 +1249,59 @@ async def _write_opening_balance_ledger_for_job(job_id: str) -> int:
     return written
 
 
+async def _link_registered_stores_for_job(job_id: str) -> int:
+    """R-STORE: resolve each customer's registered_store_code (parsed from the CRM
+    'Registred Account' column, e.g. K00078@KAZO.com → K00078) to a store, auto-
+    creating a stub store for any code not yet provisioned, then set the customer's
+    registered_store_id AND home_store_id so the whole system (Customer 360, store
+    filters, dashboards) attributes them to their registration store.
+    """
+    from pymongo import UpdateMany
+    codes = await customers_col.distinct(
+        "registered_store_code",
+        {"ingest_job_id": job_id, "registered_store_code": {"$nin": [None, ""]}},
+    )
+    if not codes:
+        return 0
+    # Map existing stores by code
+    code_to_id: Dict[str, str] = {}
+    async for s in stores_col.find({"code": {"$in": codes}}, {"_id": 0, "id": 1, "code": 1}):
+        if s.get("code"):
+            code_to_id[s["code"]] = s["id"]
+    # Auto-create stub stores for codes that don't exist yet
+    new_docs = []
+    for c in codes:
+        if c not in code_to_id:
+            sid = uuid.uuid4().hex
+            code_to_id[c] = sid
+            new_docs.append({
+                "id": sid, "code": c, "name": f"Store {c}", "city": "", "state": "",
+                "region": "", "is_active": True, "source": "registered_account",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+    if new_docs:
+        try:
+            await stores_col.insert_many(new_docs, ordered=False)
+        except Exception as e:
+            logger.warning(f"registered-store stub create partial failure: {e}")
+    # Set registered_store_id + home_store_id on the job's customers, per code
+    ops = [UpdateMany(
+        {"ingest_job_id": job_id, "registered_store_code": code},
+        {"$set": {"registered_store_id": sid, "home_store_id": sid}},
+    ) for code, sid in code_to_id.items()]
+    touched = 0
+    for i in range(0, len(ops), 500):
+        try:
+            res = await customers_col.bulk_write(ops[i:i + 500], ordered=False)
+            touched += res.modified_count
+        except Exception as e:
+            logger.warning(f"registered-store link partial failure: {e}")
+    logger.info(f"Registered-store link job {job_id}: {len(codes)} codes, "
+                f"{len(new_docs)} stub stores, {touched} customers attributed")
+    return touched
+
+
+
 
 async def _recompute_customer_aggregates(job_id: str) -> int:
     """R1+R2+R3: For every loyalty customer touched by this job, recompute
@@ -1254,13 +1335,16 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
     rows = await transactions_col.aggregate(agg_pipe).to_list(len(touched_mobiles))
 
     ops = []
+    home_ops = []
     now_iso = datetime.now(timezone.utc).isoformat()
     for r in rows:
         mobile = r["_id"]
         update_set: Dict[str, Any] = {
             "first_purchase_at": r["first_purchase_at"],
             "last_visit_at": r["last_visit_at"],
-            "home_store_id": r["first_store_id"],
+            # Keep the bill-derived store under its own name; home_store_id is set
+            # separately below so it never overrides the CRM registration store.
+            "first_purchase_store_id": r["first_store_id"],
             "visit_count": len(r["unique_bills"]),
             # Spend + tier are rebuilt from the FULL bill history for EVERY customer
             # (incl. those loaded from the CRM Report, which carries no spend column).
@@ -1273,6 +1357,7 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
             "name": None,
             "city": None,
             "state": None,
+            "home_store_id": r["first_store_id"],
             "points_balance": 0,
             "lifetime_points_earned": 0,
             "lifetime_points_redeemed": 0,
@@ -1282,11 +1367,22 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
         ops.append(UpdateOne({"mobile": mobile},
                               {"$set": update_set, "$setOnInsert": update_set_on_insert},
                               upsert=True))
+        # Set home_store_id from the first-purchase store ONLY for customers that
+        # do NOT have a CRM registration store ({field: None} matches null/missing).
+        # This keeps the registered store authoritative regardless of load order.
+        home_ops.append(UpdateOne(
+            {"mobile": mobile, "registered_store_id": None},
+            {"$set": {"home_store_id": r["first_store_id"]}}))
     if ops:
         try:
             await customers_col.bulk_write(ops, ordered=False)
         except Exception as e:
             logger.warning(f"Customer-aggregate bulk write partial failure: {e}")
+    if home_ops:
+        try:
+            await customers_col.bulk_write(home_ops, ordered=False)
+        except Exception as e:
+            logger.warning(f"Customer home-store bulk write partial failure: {e}")
     logger.info(f"Recomputed customer aggregates for {len(rows)} mobiles (job {job_id})")
     return len(rows)
 
