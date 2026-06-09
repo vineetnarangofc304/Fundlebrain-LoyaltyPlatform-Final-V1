@@ -32,6 +32,19 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 49 (Jun 2026) — 🔴 PROD FIX: every dashboard hangs on "Loading…" forever (no error handling)
+
+User (LIVE): *"Sales [dashboard] stuck on Loading… issues."* (screenshot of Sales spinning forever). The iter-47 fix only hardened Command Center; the other 11 dashboards each had `try{…}finally` with **no `catch`** (or inline `.then` with no `.catch`) and a guard of `if (!data) return <Loading>` / `return null`. So when their endpoint timed out under DB load, `data` stayed null → **infinite "Loading…" / blank** with no retry.
+
+**Fix (frontend, all dashboards):**
+- Added shared `DashboardError` (Retry card, `data-testid="dash-error"`/`dash-retry`) to `_shared.jsx`.
+- Hardened **all 11** remaining dashboards (Sales, Customer, Loyalty, Campaign, Store, NPS, RFM, Cohorts, Points, CampaignROI, ExecutiveSummary): each now catches fetch errors → sets `error` → renders the Retry card instead of hanging; a `reload`/`reloadKey` drives retry. Pattern: the existing `load()` swallows nothing (no inner catch), so a `.catch` at the call site surfaces the error.
+
+**Verified:** Playwright loaded all **12** dashboard routes after login — `ALL_DASHBOARDS_OK = True` (no error card, none stuck on Loading, all render). Frontend compiles clean. ⚠️ **Redeploy required.**
+
+**Deferred (follow-up):** add `maxTimeMS`/`allowDiskUse` to the ~42 analytics/dashboard aggregations as a server-side fail-fast cap (the new indexes already make them fast; frontend Retry covers residual slowness).
+
+
 ### Iteration 48 (Jun 2026) — 🔴 PROD FIX: SKU jobs never finish (O(n²) attach) → DB saturated → dashboards 500
 
 User (LIVE): *"the SKU both just keep running… also command centre not opening at all"* (Command Center now shows the new "Couldn't load… Retry" card with **HTTP 500** — so the iter-47 frontend guard works; the backend is erroring under load).

@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, CHART_SERIES, DashboardError } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
@@ -18,6 +18,7 @@ export default function CampaignROIDashboard() {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [drill, setDrill] = useState(null);
 
   const load = async () => {
@@ -27,9 +28,11 @@ export default function CampaignROIDashboard() {
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); }, []);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading campaign ROI…</div>;
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="Campaign ROI" />;
   if (!data) return null;
 
   const t = data.totals;

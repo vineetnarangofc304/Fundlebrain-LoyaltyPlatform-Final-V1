@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading, CHART_SERIES, mongoDateFilter } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, CHART_SERIES, mongoDateFilter, DashboardError } from "../_shared";
 import { fmtINR, fmtNum } from "@/lib/format";
 import { LineChart, Line, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
 import DateRangePicker from "../_date_range_picker";
@@ -19,6 +19,8 @@ export default function SalesDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [trend, setTrend] = useState([]);
+  const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [drill, setDrill] = useState(null);
 
   const openTxnDrill = () => setDrill({
@@ -44,9 +46,11 @@ export default function SalesDashboard() {
     Promise.all([
       api.get("/analytics/sales-dashboard", { params }),
       api.get("/dashboard/sales-trend", { params: trendParams }),
-    ]).then(([d, t]) => { setData(d.data); setTrend(t.data); });
-  }, [range]);
+    ]).then(([d, t]) => { setData(d.data); setTrend(t.data); setError(null); })
+      .catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load"));
+  }, [range, reloadKey]);
 
+  if (error && !data) return <DashboardError error={error} onRetry={() => setReloadKey((k) => k + 1)} title="the Sales dashboard" />;
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
 
   const totalRevenue = trend.reduce((s, r) => s + r.net, 0);

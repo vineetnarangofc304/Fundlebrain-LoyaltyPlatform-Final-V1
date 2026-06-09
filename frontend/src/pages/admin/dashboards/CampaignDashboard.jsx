@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard, StatusPill, SectionHeading, CHART_SERIES } from "../_shared";
+import { PageHeader, KPICard, StatusPill, SectionHeading, CHART_SERIES, DashboardError } from "../_shared";
 import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Cell } from "recharts";
 import DrillDownModal from "../DrillDownModal";
 
 export default function CampaignDashboard() {
   const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [drill, setDrill] = useState(null);
   const openCampaigns = () => setDrill({
     title: "All Campaigns",
@@ -22,7 +24,8 @@ export default function CampaignDashboard() {
       { key: "revenue_generated", label: "Revenue ₹", align: "right", render: (v) => fmtINR(v) },
     ],
   });
-  useEffect(() => { api.get("/analytics/campaign-dashboard").then((r) => setData(r.data)); }, []);
+  useEffect(() => { api.get("/analytics/campaign-dashboard").then((r) => { setData(r.data); setError(null); }).catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); /* eslint-disable-next-line */ }, [reloadKey]);
+  if (error && !data) return <DashboardError error={error} onRetry={() => setReloadKey((k) => k + 1)} title="Campaign Performance" />;
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
 
   const totalRev = data.all.reduce((s, c) => s + c.revenue_generated, 0);

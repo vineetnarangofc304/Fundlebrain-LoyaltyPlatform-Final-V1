@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { AlertTriangle } from "lucide-react";
 
 /* Build a Mongo date filter fragment for drilldowns from a DateRangePicker range
    (or a numeric period_days). Returns {} for "all time". */
@@ -122,5 +123,24 @@ export function BackLink({ to, label }) {
     <Link to={to} className="text-xs text-neutral-500 hover:text-black uppercase tracking-widest">
       ← {label}
     </Link>
+  );
+}
+
+/* Shared graceful error state for dashboards — replaces silent "Loading…"
+   hangs / blank screens when a heavy aggregation times out under load. */
+export function DashboardError({ error, onRetry, title }) {
+  return (
+    <div className="p-10" data-testid="dash-error">
+      <div className="max-w-lg mx-auto text-center border border-rose-200 bg-rose-50/60 p-8">
+        <AlertTriangle className="w-8 h-8 text-rose-600 mx-auto mb-3" />
+        <h3 className="font-display text-xl mb-1">Couldn’t load {title || "this dashboard"}</h3>
+        <p className="text-sm text-neutral-600 mb-4">
+          {error || "The request took too long over a large dataset. Your data is safe — please retry in a moment."}
+        </p>
+        {onRetry && (
+          <button className="k-btn k-btn-primary" onClick={onRetry} data-testid="dash-retry">Retry</button>
+        )}
+      </div>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, DashboardError } from "../_shared";
 import { fmtNum, fmtINR } from "@/lib/format";
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend, Area, AreaChart } from "recharts";
 import { RefreshCw } from "lucide-react";
@@ -20,6 +20,7 @@ export default function LoyaltyDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [drill, setDrill] = useState(null);
   const openTierCustomers = (tier, name) => setDrill({
     title: `${(name || tier || "").toUpperCase()} tier customers`,
@@ -49,7 +50,9 @@ export default function LoyaltyDashboard() {
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [range]);
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="the Loyalty dashboard" />;
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
   const totalSpend = data.tiers.reduce((s, t) => s + (t.total_spend || 0), 0);
   return (

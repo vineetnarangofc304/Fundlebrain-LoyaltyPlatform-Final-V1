@@ -2,7 +2,7 @@
    Live-computed, drilldown-enabled. */
 import { useEffect, useState, useMemo } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading, CHART_PALETTE } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, CHART_PALETTE, DashboardError } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
@@ -23,6 +23,7 @@ export default function StoreDashboard() {
   const [tab, setTab] = useState("leaderboard");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [drill, setDrill] = useState(null);
 
   const load = async () => {
@@ -35,7 +36,8 @@ export default function StoreDashboard() {
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [period]);
 
   const windowStartISO = useMemo(() => {
     const d = new Date();
@@ -44,6 +46,7 @@ export default function StoreDashboard() {
   }, [period]);
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading store performance…</div>;
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="Store Performance" />;
   if (!data) return null;
 
   // Defensive — production may return empty arrays before any bills/stores ingest

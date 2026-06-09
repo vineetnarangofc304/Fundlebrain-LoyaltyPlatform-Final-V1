@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, DashboardError } from "../_shared";
 import { fmtNum } from "@/lib/format";
 import { Area, AreaChart, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
 import { RefreshCw, MessageSquare, Star } from "lucide-react";
@@ -22,6 +22,7 @@ export default function NPSDashboard() {
   const [recent, setRecent] = useState([]);
   const [trend, setTrend] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [drill, setDrill] = useState(null);
   const openNps = (title, filter) => setDrill({
     title, subtitle: "NPS responses", collection: "nps_responses",
@@ -50,8 +51,10 @@ export default function NPSDashboard() {
       setLoading(false);
     }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [range]);
 
+  if (error && !summary) return <DashboardError error={error} onRetry={reload} title="NPS & Feedback" />;
   if (loading && !summary) return <div className="p-10 text-neutral-500">Loading NPS data…</div>;
 
   // Empty state — no NPS responses yet. Render an explanatory panel instead of a broken-looking dashboard.

@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, DashboardError } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
@@ -19,6 +19,7 @@ export default function PointsDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 90, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [drill, setDrill] = useState(null);
 
   const load = async () => {
@@ -33,9 +34,11 @@ export default function PointsDashboard() {
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [range]);
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading points economics…</div>;
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="Points Economics" />;
   if (!data) return null;
 
   // Legacy alias used in display strings — derived from the date range picker

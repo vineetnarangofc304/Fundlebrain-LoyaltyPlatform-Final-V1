@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, DashboardError } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
@@ -31,6 +31,7 @@ export default function RFMDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "", label: "All time" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [activeSeg, setActiveSeg] = useState(null);
   const [drill, setDrill] = useState(null);
 
@@ -48,7 +49,8 @@ export default function RFMDashboard() {
       setLoading(false);
     }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [range]);
 
   const exportSegmentsCsv = () => {
     if (!data) return;
@@ -63,6 +65,7 @@ export default function RFMDashboard() {
   };
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Computing RFM…</div>;
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="RFM & Churn" />;
   if (!data) return null;
 
   const champions = data.segments.find((s) => s.segment === "Champions");

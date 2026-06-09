@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, CHART_SERIES, DashboardError } from "../_shared";
 import { fmtINR, fmtNum, tierClass } from "@/lib/format";
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Area, AreaChart } from "recharts";
 import { RefreshCw } from "lucide-react";
@@ -32,6 +32,7 @@ export default function CustomerDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [drill, setDrill] = useState(null);
   const openCustomers = (title, filter) => setDrill({
     title, subtitle: "Customers", collection: "customers", filter,
@@ -50,7 +51,9 @@ export default function CustomerDashboard() {
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [range]);
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="Customer Analytics" />;
   if (!data) return <div className="p-10 text-neutral-500">Loading…</div>;
   const totalCust = data.churn_distribution.reduce((s, r) => s + r.count, 0);
   const life = data.lifecycle_split || { one_timer: { count: 0, lifetime_spend: 0 }, repeat: { count: 0, lifetime_spend: 0 } };

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, DashboardError } from "../_shared";
 import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
@@ -28,6 +28,7 @@ export default function CohortsDashboard() {
   const [range, setRange] = useState({ preset: "0", period_days: 0, start_date: "", end_date: "" });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [drill, setDrill] = useState(null);
 
   const load = async () => {
@@ -42,7 +43,8 @@ export default function CohortsDashboard() {
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [range]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [range]);
 
   const exportCsv = () => {
     if (!data) return;
@@ -74,6 +76,7 @@ export default function CohortsDashboard() {
   };
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Computing cohorts & segments…</div>;
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="Cohorts & Segments" />;
   if (!data) return null;
 
   const oneTimer = data.one_timer;

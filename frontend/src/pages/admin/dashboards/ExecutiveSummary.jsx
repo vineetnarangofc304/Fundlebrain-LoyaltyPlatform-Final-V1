@@ -1,7 +1,7 @@
 /* Executive Summary v2 — composite snapshot + branded PDF download. */
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { PageHeader, KPICard, SectionHeading, mongoDateFilter } from "../_shared";
+import { PageHeader, KPICard, SectionHeading, mongoDateFilter, DashboardError } from "../_shared";
 import { fmtINR, fmtNum } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import { Download, RefreshCw } from "lucide-react";
@@ -26,6 +26,7 @@ export default function ExecutiveSummary() {
   const [period, setPeriod] = useState(0);   // 0 = All time (default)
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(false);
   const [drill, setDrill] = useState(null);
   const openTxn = () => setDrill({
@@ -45,7 +46,8 @@ export default function ExecutiveSummary() {
       setData(r.data);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
+  const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [period]);
 
   const downloadPDF = async () => {
     setDownloading(true);
@@ -66,6 +68,7 @@ export default function ExecutiveSummary() {
   };
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Generating executive summary…</div>;
+  if (error && !data) return <DashboardError error={error} onRetry={reload} title="the Executive Summary" />;
   if (!data) return null;
 
   // Defensive — production may have empty arrays before backfill jobs run
