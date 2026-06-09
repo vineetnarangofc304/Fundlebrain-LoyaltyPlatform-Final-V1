@@ -521,7 +521,7 @@ async def pos_customer_check(payload: Dict[str, Any], request: Request,
                        api_key_label=cred.get("label"))
         return resp
 
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     if not cust:
         resp = _err(400, "This number is not registered in your database")
         await _log_api(endpoint=endpoint, method="POST", status=400,
@@ -598,6 +598,7 @@ async def _create_otp(*, purpose: str, mobile: str, payload: Dict[str, Any], cre
         "otp_id": otp_id,
         "otp": otp,
         "mobile": mobile,
+        "mobile_key": _mobile_key(mobile),
         "purpose": purpose,
         "verified": False,
         "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)).isoformat(),
@@ -614,6 +615,56 @@ async def _create_otp(*, purpose: str, mobile: str, payload: Dict[str, Any], cre
     except Exception as e:
         logger.warning(f"OTP SMS dispatch failed for {mobile}: {e}")
     return {"otp": otp, "otp_id": otp_id}
+
+
+def _mobile_key(value: Any) -> str:
+    """Canonical OTP-match key = the last 10 digits of the mobile. Makes OTP lookups robust
+    to formatting differences between the system that REQUESTED the OTP and the POS that
+    VERIFIES it (country code / leading 0 / spaces) — the #1 cause of spurious 'Invalid OTP'."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+async def _find_customer_by_mobile(mobile: str):
+    """Find a customer tolerant of mobile formatting: exact match first, then the canonical
+    last-10-digit key, then a trailing-digits match. Stops POS calls from failing with
+    'This number is not registered' just because the POS sent +91 / a leading 0 / spaces."""
+    if not mobile:
+        return None
+    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    if cust:
+        return cust
+    key = _mobile_key(mobile)
+    if key and key != mobile:
+        cust = await customers_col.find_one({"mobile": key}, {"_id": 0})
+        if cust:
+            return cust
+        cust = await customers_col.find_one({"mobile": {"$regex": f"{re.escape(key)}$"}}, {"_id": 0})
+    return cust
+
+
+async def _otp_failure_reason(mobile: str, mob_key: str, otp: str, purpose: str) -> str:
+    """Diagnose WHY an OTP lookup failed so production logs show the real cause (no blind
+    'Invalid OTP')."""
+    by_mobile = await pos_otp_col.find_one(
+        {"purpose": purpose, "$or": [{"mobile_key": mob_key}, {"mobile": mobile}]},
+        {"_id": 0, "otp": 1, "created_at": 1, "expires_at": 1, "redeemed": 1},
+        sort=[("created_at", -1)])
+    by_otp = await pos_otp_col.find_one(
+        {"purpose": purpose, "otp": otp},
+        {"_id": 0, "mobile": 1, "created_at": 1},
+        sort=[("created_at", -1)])
+    if by_mobile and not by_otp:
+        expired = " (expired)" if (by_mobile.get("expires_at", "") or "") < _now_iso() else ""
+        return (f"OTP value mismatch — latest OTP for this mobile was issued at "
+                f"{by_mobile.get('created_at')}{expired}; POS sent '{otp}' which is not it")
+    if by_otp and not by_mobile:
+        return (f"mobile mismatch — OTP '{otp}' was issued for mobile '{by_otp.get('mobile')}', "
+                f"but the POS request sent '{mobile}'")
+    if not by_mobile and not by_otp:
+        return f"no OTP session for '{mobile}' — expired (>10 min) or never requested"
+    return "OTP/mobile/purpose did not match an active session"
+
 
 
 @router.post("/posCustomerCheckRequest")
@@ -638,7 +689,7 @@ async def pos_customer_check_request(payload: Dict[str, Any], request: Request,
                        api_key_label=cred.get("label"))
         return resp
 
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     if not cust:
         resp = _err(400, "This number is not registered in your database")
         await _log_api(endpoint=endpoint, method="POST", status=400,
@@ -727,15 +778,18 @@ async def pos_customer_otp_check(payload: Dict[str, Any], request: Request,
                        ms=int((time.time() - t0) * 1000), payload=payload, response=resp)
         return resp
 
+    mob_key = _mobile_key(mobile)
     session = await pos_otp_col.find_one({
-        "mobile": mobile, "otp": otp, "purpose": "customer_check",
-    }, {"_id": 0})
+        "otp": otp, "purpose": "customer_check",
+        "$or": [{"mobile_key": mob_key}, {"mobile": mobile}],
+    }, {"_id": 0}, sort=[("created_at", -1)])
     test_bypass = ALLOW_TEST_OTP and otp == TEST_OTP
     if not session and not test_bypass:
+        reason = await _otp_failure_reason(mobile, mob_key, otp, "customer_check")
         resp = _err(400, "Invalid OTP")
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                       error="invalid OTP", payload=payload, response=resp,
+                       error=f"invalid OTP — {reason}", payload=payload, response=resp,
                        api_key_label=cred.get("label"))
         return resp
     # Check expiry (test bypass skips expiry — there is no session)
@@ -751,7 +805,7 @@ async def pos_customer_otp_check(payload: Dict[str, Any], request: Request,
     audit_label = (cred.get("label") or "") + (" [TEST_OTP_BYPASS]" if test_bypass else "")
 
     # Return same shape as posCustomerCheck
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     if not cust:
         resp = _err(400, "This number is not registered in your database")
         await _log_api(endpoint=endpoint, method="POST", status=400,
@@ -907,7 +961,7 @@ async def pos_redeem_point_request(payload: Dict[str, Any], request: Request,
                        api_key_label=cred.get("label"))
         return resp
 
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     if not cust:
         resp = _err(400, "This number is not registered in your database")
         await _log_api(endpoint=endpoint, method="POST", status=400,
@@ -1043,7 +1097,7 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
     txn = payload.get("transaction") or {}
     bill_number = (txn.get("number") or txn.get("id") or "").strip()
 
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     if not cust:
         resp = _err(400, "This number is not registered in your database")
         await _log_api(endpoint=endpoint, method="POST", status=400,
@@ -1072,14 +1126,17 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         # response) is handled idempotently instead of failing as "Invalid OTP" — the
         # 2nd call would otherwise miss a now-verified session. Only a genuinely-unknown
         # OTP value is treated as Invalid.
+        mob_key = _mobile_key(mobile)
         session = await pos_otp_col.find_one({
-            "mobile": mobile, "otp": otp, "purpose": "redeem_points",
-        }, {"_id": 0})
+            "otp": otp, "purpose": "redeem_points",
+            "$or": [{"mobile_key": mob_key}, {"mobile": mobile}],
+        }, {"_id": 0}, sort=[("created_at", -1)])
         if not session:
+            reason = await _otp_failure_reason(mobile, mob_key, otp, "redeem_points")
             resp = _err(400, "Invalid OTP.")
             await _log_api(endpoint=endpoint, method="POST", status=400,
                            ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number, error="invalid OTP",
+                           bill_number=bill_number, error=f"invalid OTP — {reason}",
                            payload=payload, response=resp, api_key_label=cred.get("label"))
             return resp
 
@@ -1792,7 +1849,7 @@ async def return_order(payload: Dict[str, Any], request: Request,
 
     # Resolve the customer by mobile (canonical). Fall back to the original bill's
     # customer when the mobile master hasn't been populated yet.
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     if not cust and mobile.isdigit():
         cust = await customers_col.find_one({"mobile": int(mobile)}, {"_id": 0})
     if not cust and original and original.get("customer_id"):
@@ -1885,7 +1942,7 @@ async def request_wallet_redemption(payload: Dict[str, Any], request: Request,
     bill_guid = payload.get("billGUID")
     bill_value = _parse_float(payload.get("billValue"))
     proposed = _parse_float(payload.get("proposedDebitAmount"))
-    cust = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
+    cust = await _find_customer_by_mobile(mobile)
     if not cust:
         body = {"errorCode": "800",
                 "ReturnMessage": "Mobile number does not exist in your database"}
