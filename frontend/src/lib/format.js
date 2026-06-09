@@ -38,26 +38,33 @@ export const fmtPct = (n, digits = 1) => {
 // Indian Standard Time regardless of the viewer's machine timezone.
 const IST_TZ = "Asia/Kolkata";
 
-// Tolerant date parser. Handles ISO strings AND the day-first formats some POS
-// terminals send (DD-MM-YYYY / DD/MM/YYYY, optional HH:MM[:SS]) which `new Date()`
-// rejects as "Invalid Date". Day-first naive values are treated as IST (+05:30).
+// Tolerant date parser. Handles ISO strings AND the formats some POS terminals send:
+//  - year-first "YYYY-MM-DD[ T]HH:MM[:SS][tz]"  (space-separated naive form is what
+//    Safari rejects via new Date(); we rebuild it as proper ISO)
+//  - day-first  "DD-MM-YYYY / DD/MM/YYYY[ HH:MM[:SS]]"
+// A value with NO timezone is treated as IST (+05:30); an explicit tz is preserved.
 const parseDate = (s) => {
   if (s === null || s === undefined || s === "") return null;
   const str = String(s).trim();
-  // ISO-like (YYYY-MM-DD…) — reliable, identical across all browsers.
-  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(str)) {
-    const d = new Date(str);
-    if (!Number.isNaN(d.getTime())) return d;
+  // Year-first / ISO: YYYY-MM-DD optionally with time and timezone.
+  const iso = str.match(
+    /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?/
+  );
+  if (iso) {
+    const [, y, mo, d, hh = "00", mi = "00", ss = "00", tz] = iso;
+    const tzPart = tz ? tz.replace(/([+-]\d{2})(\d{2})$/, "$1:$2") : "+05:30";
+    const norm = `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}T${hh.padStart(2, "0")}:${mi}:${ss}${tzPart}`;
+    const dt = new Date(norm);
+    if (!Number.isNaN(dt.getTime())) return dt;
   }
-  // Day-first DD-MM-YYYY / DD/MM/YYYY (optional HH:MM[:SS]) — what some POS send.
-  // Treated as IST so it renders correctly. (Safari rejects these via new Date().)
+  // Day-first DD-MM-YYYY / DD/MM/YYYY (optional HH:MM[:SS]) — treated as IST.
   const m = str.match(
     /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/
   );
   if (m) {
     const [, dd, mm, yyyy, hh = "00", mi = "00", ss = "00"] = m;
-    const iso = `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}T${hh.padStart(2, "0")}:${mi}:${ss}+05:30`;
-    const d = new Date(iso);
+    const norm = `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}T${hh.padStart(2, "0")}:${mi}:${ss}+05:30`;
+    const d = new Date(norm);
     if (!Number.isNaN(d.getTime())) return d;
   }
   const fallback = new Date(str);
@@ -74,6 +81,17 @@ export const fmtDateTime = (s) => {
   const d = parseDate(s);
   if (!d) return s ? s : "—";
   return d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: IST_TZ });
+};
+
+// Year-month-date format in IST: "YYYY-MM-DD HH:MM" (24-hour).
+export const fmtDateTimeISO = (s) => {
+  const d = parseDate(s);
+  if (!d) return s ? s : "—";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: IST_TZ,
+  }).formatToParts(d).reduce((a, p) => ((a[p.type] = p.value), a), {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 };
 
 export const tierClass = (t) => `pill pill-${(t || "silver").toLowerCase()}`;
