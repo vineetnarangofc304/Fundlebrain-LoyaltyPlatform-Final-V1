@@ -109,6 +109,10 @@ export default function LoyaltyConfigurator() {
                   ? "Each rupee spent earns N points (tier multiplier applies)."
                   : "Each bill earns N% of its value as points (tier multiplier applies)."}
               </p>
+              <p className="text-xs text-amber-700 mt-1" data-testid="cfg-tier-driven-hint">
+                💡 Tier-driven: leave the rate at <b>0</b> and each tier's <b>multiplier</b> becomes
+                its <b>% of the bill</b> (e.g. mult 2 → 2%, 3 → 3%). No Earn Engine value needed.
+              </p>
             </div>
             {cfg.earn_mode === "points_per_spend" ? (
               <NumField label="Points per ₹" value={cfg.earn_ratio} step="0.05"

@@ -189,13 +189,13 @@ async def issue_points(body: dict):
         await _log_api("/api/pos/issue-points", "POST", 409, int((time.time() - t0) * 1000), error="duplicate bill", payload=body, bill_number=bill_number, customer_mobile=mobile)
         raise HTTPException(409, "Bill already exists")
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {"earn_ratio": 1.0, "min_bill_for_earn": 0}
-    earn_ratio = cfg.get("earn_ratio", 1.0)
+    from routes.pos_ewards_routes import _compute_earn_points
     multiplier = 1.0
     for tr in cfg.get("tier_rules", []):
         if tr.get("tier") == cust.get("tier"):
             multiplier = tr.get("earn_multiplier", 1.0)
             break
-    points = int(net_amount * earn_ratio * multiplier) if net_amount >= cfg.get("min_bill_for_earn", 0) else 0
+    points = _compute_earn_points(net_amount, cfg, multiplier) if net_amount >= cfg.get("min_bill_for_earn", 0) else 0
 
     txn_id = uuid.uuid4().hex
     txn_doc = {

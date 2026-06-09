@@ -259,19 +259,32 @@ def _gst_from_taxes(taxes: Any) -> float:
 
 
 def _compute_earn_points(base: float, cfg: Dict[str, Any], multiplier: float = 1.0) -> int:
-    """Points earned for a loyalty `base` amount, honouring the configured earn mode
-       (set from the Loyalty Logic editor):
-         - points_per_spend : base × earn_ratio
-         - percent_of_spend : base × (percent_of_spend / 100)
-       Then × the customer's tier earn multiplier."""
+    """Points earned for a loyalty `base` amount.
+
+    Two ways to configure earning from the Loyalty Rules editor:
+
+    1) Global rate + tier multiplier (when an Earn Engine rate IS set):
+         points_per_spend : base × earn_ratio   × tier_multiplier
+         percent_of_spend : base × (percent/100) × tier_multiplier
+
+    2) TIER-DRIVEN (when the Earn Engine rate is left blank / 0):
+         The per-tier multiplier itself IS the % of the bill for that tier
+         (e.g. Kazo Insider mult 2 -> 2% of bill, Trendsetter 3 -> 3%, Style Icon 5 -> 5%).
+         Lets earning be driven purely by Tier Rules with nothing in the Earn Engine.
+    """
     if base <= 0:
         return 0
     mode = (cfg.get("earn_mode") or "points_per_spend").strip()
     if mode == "percent_of_spend":
         rate = _parse_float(cfg.get("percent_of_spend", 0)) / 100.0
     else:
-        rate = _parse_float(cfg.get("earn_ratio", 1.0))
-    return int(round(base * rate * (multiplier or 1.0)))
+        rate = _parse_float(cfg.get("earn_ratio", 0))
+    if rate > 0:
+        return int(round(base * rate * (multiplier or 1.0)))
+    # Tier-driven: no global earn rate configured -> the tier multiplier is the
+    # percent-of-spend for that tier (mult 2 -> 2% of bill, etc.).
+    tier_pct = (multiplier or 0) / 100.0
+    return int(round(base * tier_pct))
 
 
 def _loyalty_paused(cfg: Dict[str, Any], kind: str, when_iso: Optional[str] = None) -> tuple:
@@ -1247,8 +1260,9 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     else:
         points_earned = _compute_earn_points(loyalty_base, cfg, multiplier)
         if points_earned <= 0:
-            earn_skip_reason = ("computed_zero — check earn_ratio / percent_of_spend "
-                                "in Loyalty Rules")
+            earn_skip_reason = ("computed_zero — both the Earn Engine rate AND this "
+                                "tier's multiplier are 0; set a tier multiplier (e.g. 2) "
+                                "or an Earn Engine rate in Loyalty Rules")
 
     redemption = txn.get("redemption") or {}
     points_redeemed = _parse_int(redemption.get("redeemed_points"))

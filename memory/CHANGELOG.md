@@ -5,6 +5,45 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-09 (cont.2) — 🟢 TIER-DRIVEN earning + full POS flow correctness (iter 60)
+
+Client confirmed the canonical flow: bill → (auto-register if new) → earn by TIER → SMS;
+redemption → OTP to the redeeming mobile → validate by mobile+OTP → reduce points live.
+Everything reads from the saved DB config (Loyalty Rules / Templates / Provider Settings);
+no dummy/fallback at send time (verified loyalty_config id="default", templates by
+event+active, provider_config singleton). All preview-verified; needs production redeploy.
+
+### 🔴 ROOT CAUSE of "no points": earn rate was 0
+Recalc breakdown on prod reported `19,821 bills compute 0 — earn rate/multiplier is 0`.
+The engine was `base × (% of Spend) × tier-MULT`; the client's "% of Spend" = 0, so every
+bill × 0 = 0. The client's model is purely tier-driven (per-tier MULT = the rate).
+- **Fix:** `_compute_earn_points` — when the Earn Engine rate is blank/0, the per-tier
+  multiplier itself IS the % of the bill (mult 2 → 2%, 3 → 3%, 5 → 5%). Global-rate behaviour
+  (base × rate × mult) preserved when a rate IS set. Applied to the SHARED function so
+  posAddPoint, returns, Recalc, the Earn Simulator (loyalty_routes) and /pos/issue-points
+  (stores_routes) are all consistent. Verified ₹5000 → 100/150/250 for mult 2/3/5
+  (`tests/iteration60_tier_driven_earn_test.py`, live posAddPoint test).
+
+### Other flow fixes (iter 59-60)
+- **Auto-register → registration SMS:** posAddPoint auto-created members silently; now fires
+  the front-end "registration" template on first registration.
+- **loyalty_flag robustness:** earn unless POS explicitly sends 0/false/no/off (was strict
+  "1"/"true" only → truthy values like "Y" wrongly suppressed earning).
+- **Earn SMS:** posAddPoint fires both `purchase` and `points_earned` triggers.
+- **OTP idempotency:** redeem-OTP verify matches by mobile+otp regardless of verified state;
+  a retry returns success (already_redeemed) without double-deducting; atomic claim prevents
+  concurrent double-deduct; only an unknown OTP is "Invalid".
+- **Sender ID = Provider Settings is authoritative** (a stale per-template sender can no
+  longer override it).
+- **Recalc upgrade:** dry-run returns a skip breakdown (flag-off / below-min / no-customer /
+  zero-rate) + earn config; new `ignore_loyalty_flag` (Force-credit) backfills bills wrongly
+  stored as flag-off; UI surfaces the reason + offers Force-credit.
+- **earn_skip_reason** written to API Monitor on every 0-point bill.
+- **Dates:** POS `order_time` parsed strictly year-first (year-month-date) → stored ISO+IST;
+  Live Monitor shows consistent `YYYY-MM-DD HH:MM`; tolerant frontend parser for old bills.
+
+---
+
 ## 2026-06-09 (cont.) — 🔴 POS earning/SMS gaps + OTP "Invalid" idempotency (iter 59)
 
 Preview-verified (`tests/iteration59_otp_idempotency_earn_diag_test.py` PASS + curl).

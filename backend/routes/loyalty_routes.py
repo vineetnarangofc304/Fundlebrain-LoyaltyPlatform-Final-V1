@@ -371,27 +371,36 @@ async def simulate_earn(payload: dict, user: dict = Depends(get_current_user)):
         return {"points": 0, "breakdown": [],
                 "explanation": f"Bill ₹{bill} below min earn threshold of ₹{cfg.get('min_bill_for_earn', 0)}."}
 
-    # Step 1: base points
-    if cfg.get("earn_mode") == "percent_of_spend":
-        base = bill * (cfg.get("percent_of_spend", 5) / 100.0)
-        mode_explain = f"{cfg.get('percent_of_spend', 5)}% of ₹{bill}"
-    else:
-        base = bill * cfg.get("earn_ratio", 1.0)
-        mode_explain = f"{cfg.get('earn_ratio', 1.0)} pts × ₹{bill}"
-    breakdown = [{"step": "Base earn", "detail": mode_explain, "points": round(base, 2)}]
-    pts = base
-
-    # Step 2: tier multiplier
+    # Resolve the tier rule first (needed for the tier-driven mode).
     tier_rule = next((t for t in (cfg.get("tier_rules") or [])
                        if t.get("tier", "").lower() == tier_slug and t.get("is_active", True)), None)
-    if tier_rule:
-        mult = tier_rule.get("earn_multiplier", 1.0)
-        if mult != 1.0:
-            extra = pts * (mult - 1)
+    tier_mult = tier_rule.get("earn_multiplier", 1.0) if tier_rule else 1.0
+
+    # Step 1: base points
+    if cfg.get("earn_mode") == "percent_of_spend":
+        rate = float(cfg.get("percent_of_spend") or 0) / 100.0
+        mode_explain = f"{cfg.get('percent_of_spend', 0)}% of ₹{bill}"
+    else:
+        rate = float(cfg.get("earn_ratio") or 0)
+        mode_explain = f"{cfg.get('earn_ratio', 0)} pts × ₹{bill}"
+
+    if rate > 0:
+        base = bill * rate
+        breakdown = [{"step": "Base earn", "detail": mode_explain, "points": round(base, 2)}]
+        pts = base
+        # Step 2: tier multiplier
+        if tier_rule and tier_mult != 1.0:
+            extra = pts * (tier_mult - 1)
             breakdown.append({"step": "Tier multiplier",
-                              "detail": f"{tier_rule.get('name', tier_slug)} ×{mult}",
+                              "detail": f"{tier_rule.get('name', tier_slug)} ×{tier_mult}",
                               "points": round(extra, 2)})
-            pts *= mult
+            pts *= tier_mult
+    else:
+        # Tier-driven: no global earn rate set → the tier multiplier IS the % of the bill.
+        pts = bill * (tier_mult / 100.0)
+        breakdown = [{"step": "Tier-driven earn",
+                      "detail": f"{(tier_rule or {}).get('name', tier_slug) or 'tier'}: {tier_mult}% of ₹{bill}",
+                      "points": round(pts, 2)}]
 
     # Step 3: store-type multiplier
     store_type = payload.get("store_type")
