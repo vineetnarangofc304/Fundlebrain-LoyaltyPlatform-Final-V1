@@ -1,4 +1,5 @@
 """Executive cockpit dashboard - real KPIs from MongoDB."""
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Depends, Query
@@ -14,12 +15,14 @@ logger = logging.getLogger("kazo-fundle")
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
-async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=22000):
+async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=8000):
     """Run a dashboard aggregation that must NEVER 500 the endpoint.
 
     On timeout (pymongo ExecutionTimeout from maxTimeMS) or any error we log and
     return `default` so the dashboard degrades gracefully (partial data) instead
-    of returning a 500 that blanks the whole page.
+    of returning a 500 that blanks the whole page. The short 8s cap keeps the
+    worst case bounded; the command-center fires these CONCURRENTLY (gather) so
+    even under a running ingest job the endpoint returns in seconds, not minutes.
     """
     try:
         return await col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=max_ms).to_list(limit)
@@ -28,7 +31,7 @@ async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=22000):
         return [] if default is None else default
 
 
-async def _safe_count(col, filt, default=0, max_ms=22000):
+async def _safe_count(col, filt, default=0, max_ms=8000):
     try:
         return await col.count_documents(filt, maxTimeMS=max_ms)
     except Exception as e:
@@ -452,8 +455,15 @@ async def command_center(
             txn_scope_match["store_id"] = {"$in": scoped_store_ids}
         else:
             txn_scope_match["city"] = scoped_city_value
-        mobs = await transactions_col.distinct("customer_mobile", txn_scope_match)
-        scoped_customer_mobiles = [m for m in mobs if m]
+        # distinct() is unguarded by maxTimeMS and has a hard 16MB cap; under a
+        # running ingest job it can hang / throw → 500. Wrap it so a scope filter
+        # degrades to "no scope match" instead of taking down Command Center.
+        try:
+            mobs = await transactions_col.distinct("customer_mobile", txn_scope_match)
+            scoped_customer_mobiles = [m for m in mobs if m]
+        except Exception as e:
+            logger.warning(f"command-center scope distinct degraded: {e}")
+            scoped_customer_mobiles = []
 
     def _txn_match(time_field: str, gte, lt=None) -> dict:
         # R5: loyalty data only
@@ -517,37 +527,19 @@ async def command_center(
         {"$match": _txn_match("bill_date", prev_start.isoformat(), lt=start.isoformat())},
         {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
-    cur = (await _safe_agg(transactions_col, cur_sales_pipe, default=[{}])) or [{}]
-    prev = (await _safe_agg(transactions_col, prev_sales_pipe, default=[{}])) or [{}]
-    cur = cur[0] if cur else {}
-    prev = prev[0] if prev else {}
-    net = cur.get("net", 0) or 0
-    txns = cur.get("txns", 0) or 0
-    aov = (net / txns) if txns else 0
-    upt = ((cur.get("units", 0) or 0) / txns) if txns else 0
-    prev_net = prev.get("net", 0) or 0
-    prev_txns = prev.get("txns", 0) or 0
-    sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
-    txn_delta = round(((txns - prev_txns) / prev_txns) * 100, 1) if prev_txns else None
+    # ── Pre-build every match/pipe so the independent queries run CONCURRENTLY ──
+    # Under a running ingest job Mongo is busy; running ~16 dashboard queries
+    # sequentially (each up to 8s on timeout) would blow past the gateway's
+    # ~100s limit → "Command Center not loading". asyncio.gather collapses the
+    # wall-clock to ≈ the slowest single query instead of the SUM of all of them.
 
-    # --- Active customers in window (distinct loyalty mobiles that transacted) ---
-    # Count distinct customer_mobile via aggregation instead of distinct()+$in.
-    # distinct() has a hard 16MB cap and a huge $in count is O(n·m) — both blow
-    # up at 1M+ bills and were a primary cause of command-center timeouts / the
-    # blank screen. This stays index-backed and bounded.
-    active_match = _txn_match("bill_date", start.isoformat())
+    # active customers in window (distinct loyalty mobiles that transacted)
     active_pipe = [
-        {"$match": active_match},
+        {"$match": _txn_match("bill_date", start.isoformat())},
         {"$group": {"_id": "$customer_mobile"}},
         {"$count": "n"},
     ]
-    active_rows = await _safe_agg(transactions_col, active_pipe)
-    active = int(active_rows[0]["n"]) if active_rows else 0
-    total_customers = await _safe_count(customers_col, _cust_match())
-    # Invariant: active must never exceed total.
-    active = min(active, total_customers)
-
-    # --- Repeat rate window (customers with >=2 txns in window) ---
+    # repeat rate window (customers with >=2 txns in window)
     repeat_pipe = [
         {"$match": _txn_match("bill_date", start.isoformat())},
         {"$group": {"_id": "$customer_mobile", "n": {"$sum": 1}}},
@@ -555,11 +547,7 @@ async def command_center(
                     "repeat": {"$sum": {"$cond": [{"$gte": ["$n", 2]}, 1, 0]}},
                     "unique": {"$sum": 1}}},
     ]
-    rr = (await _safe_agg(transactions_col, repeat_pipe, default=[{}])) or [{}]
-    rr = rr[0] if rr else {}
-    repeat_rate = round((rr.get("repeat", 0) / rr["unique"]) * 100, 1) if rr.get("unique") else 0
-
-    # --- NPS in window (filter by scoped store_ids if present) ---
+    # NPS in window (filter by scoped store_ids if present)
     nps_match: Dict[str, Any] = {"created_at": {"$gte": start.isoformat()}}
     if scoped_store_ids:
         nps_match["store_id"] = {"$in": scoped_store_ids}
@@ -570,61 +558,93 @@ async def command_center(
                     "detractors": {"$sum": {"$cond": [{"$lte": ["$score", 6]}, 1, 0]}},
                     "total": {"$sum": 1}}},
     ]
-    nps_rows = (await nps_col.aggregate(nps_pipe).to_list(1)) or []
-    if nps_rows and nps_rows[0]["total"]:
-        nps_score = round(((nps_rows[0]["promoters"] - nps_rows[0]["detractors"]) / nps_rows[0]["total"]) * 100)
-    else:
-        nps_score = None
-
-    # --- API health in window (scoped by store_id when filter active) ---
+    # API health in window (scoped by store_id when filter active)
     api_match: Dict[str, Any] = {"timestamp": {"$gte": start.isoformat()}}
     if scoped_store_ids:
         api_match["store_id"] = {"$in": scoped_store_ids}
-    api_total = await api_logs_col.count_documents(api_match)
-    api_failed = await api_logs_col.count_documents({**api_match, "status_code": {"$gte": 400}})
-    api_health = round(((api_total - api_failed) / api_total) * 100, 2) if api_total else 100.0
-
-    # --- Outstanding loyalty liability (scoped customers when filter active) ---
+    # Outstanding loyalty liability (scoped customers when filter active)
     liab_pipe = [
         {"$match": _cust_match()},
         {"$group": {"_id": None, "points": {"$sum": "$points_balance"}}},
     ]
-    liab = (await _safe_agg(customers_col, liab_pipe, default=[{}])) or [{}]
-    liab = liab[0] if liab else {}
-    burn_ratio = 0.25
-    outstanding_points = int(liab.get("points", 0) or 0)
-    outstanding_inr = round(outstanding_points * burn_ratio, 2)
-
-    # --- Cohort distribution: customers acquired today, 7d, 30d, 90d, >90d
-    # R1: acquisition = customer's FIRST bill date (first_purchase_at), NOT ingest time.
+    # Cohort buckets — acquisition = customer's FIRST bill date (first_purchase_at)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     d7 = now - timedelta(days=7)
     d30 = now - timedelta(days=30)
     d90 = now - timedelta(days=90)
-    cohort = {
-        "today": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": today_start.isoformat()}})),
-        "last_7d": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}})),
-        "last_30d": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}})),
-        "last_90d": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}})),
-        "older": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$lt": d90.isoformat()}})),
-    }
-
-    # --- Sparkline: daily/monthly net sales for the window ---
-    # For long windows ("1y", "all") aggregate by month to keep payload small;
-    # short windows stay daily.
-    spark_bucket = "$substr"
-    spark_length = 10  # daily YYYY-MM-DD
-    if period in {"1y", "all", "ytd"}:
-        spark_length = 7  # monthly YYYY-MM
+    # Sparkline: daily for short windows, monthly for 1y/all/ytd to keep it small
+    spark_length = 7 if period in {"1y", "all", "ytd"} else 10
     spark_pipe = [
         {"$match": _txn_match("bill_date", start.isoformat())},
-        {"$group": {"_id": {spark_bucket: ["$bill_date", 0, spark_length]},
+        {"$group": {"_id": {"$substr": ["$bill_date", 0, spark_length]},
                     "net": {"$sum": "$net_amount"},
                     "txns": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    spark_rows = await _safe_agg(transactions_col, spark_pipe, limit=2000)
-    sparkline = [{"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in spark_rows]
+    # Open complaints
+    tickets_match: Dict[str, Any] = {"status": {"$in": ["open", "in_progress", "escalated"]}}
+    if scoped_store_ids:
+        tickets_match["store_id"] = {"$in": scoped_store_ids}
+
+    (cur, prev, active_rows, total_customers, rr, nps_rows,
+     api_total, api_failed, liab, c_today, c_7d, c_30d, c_90d, c_older,
+     spark_rows, open_tickets) = await asyncio.gather(
+        _safe_agg(transactions_col, cur_sales_pipe, default=[{}]),
+        _safe_agg(transactions_col, prev_sales_pipe, default=[{}]),
+        _safe_agg(transactions_col, active_pipe),
+        _safe_count(customers_col, _cust_match()),
+        _safe_agg(transactions_col, repeat_pipe, default=[{}]),
+        _safe_agg(nps_col, nps_pipe, default=[{}]),
+        _safe_count(api_logs_col, api_match),
+        _safe_count(api_logs_col, {**api_match, "status_code": {"$gte": 400}}),
+        _safe_agg(customers_col, liab_pipe, default=[{}]),
+        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": today_start.isoformat()}})),
+        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}})),
+        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}})),
+        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}})),
+        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$lt": d90.isoformat()}})),
+        _safe_agg(transactions_col, spark_pipe, limit=2000),
+        _safe_count(tickets_col, tickets_match),
+    )
+
+    # ── Derive KPIs from the gathered results ──
+    cur = (cur[0] if cur else {}) or {}
+    prev = (prev[0] if prev else {}) or {}
+    net = cur.get("net", 0) or 0
+    txns = cur.get("txns", 0) or 0
+    aov = (net / txns) if txns else 0
+    upt = ((cur.get("units", 0) or 0) / txns) if txns else 0
+    prev_net = prev.get("net", 0) or 0
+    prev_txns = prev.get("txns", 0) or 0
+    sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
+    txn_delta = round(((txns - prev_txns) / prev_txns) * 100, 1) if prev_txns else None
+
+    active = int(active_rows[0]["n"]) if active_rows else 0
+    # Invariant: active must never exceed total.
+    active = min(active, total_customers)
+
+    rr = (rr[0] if rr else {}) or {}
+    repeat_rate = round((rr.get("repeat", 0) / rr["unique"]) * 100, 1) if rr.get("unique") else 0
+
+    nps_rows = nps_rows or []
+    if nps_rows and nps_rows[0].get("total"):
+        nps_score = round(((nps_rows[0]["promoters"] - nps_rows[0]["detractors"]) / nps_rows[0]["total"]) * 100)
+    else:
+        nps_score = None
+
+    api_health = round(((api_total - api_failed) / api_total) * 100, 2) if api_total else 100.0
+
+    liab = (liab[0] if liab else {}) or {}
+    burn_ratio = 0.25
+    outstanding_points = int(liab.get("points", 0) or 0)
+    outstanding_inr = round(outstanding_points * burn_ratio, 2)
+
+    cohort = {
+        "today": c_today, "last_7d": c_7d, "last_30d": c_30d,
+        "last_90d": c_90d, "older": c_older,
+    }
+    sparkline = [{"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]}
+                 for r in (spark_rows or [])]
 
     # --- Alerts (live computed) ---
     alerts = []
@@ -636,10 +656,6 @@ async def command_center(
         alerts.append({"severity": "medium", "title": "API health degraded",
                        "detail": f"{api_failed} of {api_total} requests failed ({api_health}% healthy).",
                        "link": "/admin/api-monitor"})
-    tickets_match: Dict[str, Any] = {"status": {"$in": ["open", "in_progress", "escalated"]}}
-    if scoped_store_ids:
-        tickets_match["store_id"] = {"$in": scoped_store_ids}
-    open_tickets = await tickets_col.count_documents(tickets_match)
     if open_tickets > 10:
         alerts.append({"severity": "medium", "title": "Open complaints",
                        "detail": f"{open_tickets} support tickets need attention.",

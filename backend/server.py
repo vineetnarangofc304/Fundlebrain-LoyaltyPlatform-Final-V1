@@ -373,6 +373,11 @@ async def ensure_indexes():
         # small collections
         (coupon_redemptions_col, [("created_at", -1)], {"name": "ix_cr_created"}),
         (nps_col, [("created_at", -1)], {"name": "ix_nps_created"}),
+        # api_logs — Command Center computes API health via count_documents on
+        # timestamp (+status_code). Without this it COLLSCANs every logged API
+        # call (millions of rows) and the count hangs under load. Compound covers
+        # both the total-in-window and the failed-in-window counts.
+        (db["api_logs"], [("timestamp", -1), ("status_code", 1)], {"name": "ix_apilog_ts_status"}),
         # chunk lookups for large historic uploads
         (db["historic_chunks"], [("job_id", 1), ("chunk_index", 1)], {"name": "ix_chunk_job_idx"}),
         (db["historic_ingest_jobs"], [("status", 1), ("queued_at", 1)], {"name": "ix_job_status_queued"}),
