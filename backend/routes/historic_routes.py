@@ -532,18 +532,40 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                 if buffer_insert:
                     # Use bulk upsert for customers (by mobile)
                     from pymongo import UpdateOne
-                    ops = [UpdateOne({"mobile": d["mobile"]},
+                    from pymongo.errors import BulkWriteError
+                    # CRITICAL: de-dupe the batch by mobile (keep LAST occurrence).
+                    # CRM exports are heavily duplicated on mobile, so without this
+                    # two rows with the same mobile in one unordered batch both try
+                    # to upsert-insert → E11000 DuplicateKeyError → BulkWriteError →
+                    # the whole ingest job fails. Collapsing to one op per mobile
+                    # eliminates the intra-batch key collision.
+                    by_mobile: Dict[str, Dict[str, Any]] = {}
+                    for d in buffer_insert:
+                        by_mobile[d["mobile"]] = d
+                    collapsed = len(buffer_insert) - len(by_mobile)
+                    ops = [UpdateOne({"mobile": m},
                                       {"$set": {**d, "ingest_job_id": job_id}, "$setOnInsert": {
                                           "id": uuid.uuid4().hex,
                                           "created_at": now(),
                                       }},
-                                      upsert=True) for d in buffer_insert]
-                    res = await customers_col.bulk_write(ops, ordered=False)
-                    inserted += res.upserted_count
-                    # matched_count = rows that matched the filter (incl. no-op upserts where data
-                    # didn't change). MongoDB's modified_count is misleading because it returns 0
-                    # for upserts with identical values — making re-uploads look like 'data is lost'.
-                    updated += res.matched_count
+                                      upsert=True) for m, d in by_mobile.items()]
+                    try:
+                        res = await customers_col.bulk_write(ops, ordered=False)
+                        inserted += res.upserted_count
+                        # matched_count = rows that matched the filter (incl. no-op upserts where data
+                        # didn't change). MongoDB's modified_count is misleading because it returns 0
+                        # for upserts with identical values — making re-uploads look like 'data is lost'.
+                        # collapsed duplicate-mobile rows are counted as 'touched' so reconciliation
+                        # (new + touched + skipped == total rows) stays exact.
+                        updated += res.matched_count + collapsed
+                    except BulkWriteError as bwe:
+                        # Tolerate residual duplicate-key races; only re-raise on a real error.
+                        details = bwe.details or {}
+                        inserted += details.get("nUpserted", 0)
+                        updated += details.get("nMatched", 0) + collapsed
+                        real_errors = [e for e in details.get("writeErrors", []) if e.get("code") != 11000]
+                        if real_errors:
+                            raise
                     buffer_insert.clear()
             elif dataset == "transactions":
                 if buffer_insert:

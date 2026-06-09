@@ -8,8 +8,32 @@ from database import (
 )
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
+import logging
 
+logger = logging.getLogger("kazo-fundle")
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=22000):
+    """Run a dashboard aggregation that must NEVER 500 the endpoint.
+
+    On timeout (pymongo ExecutionTimeout from maxTimeMS) or any error we log and
+    return `default` so the dashboard degrades gracefully (partial data) instead
+    of returning a 500 that blanks the whole page.
+    """
+    try:
+        return await col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=max_ms).to_list(limit)
+    except Exception as e:
+        logger.warning(f"dashboard agg degraded ({col.name}): {e}")
+        return [] if default is None else default
+
+
+async def _safe_count(col, filt, default=0, max_ms=22000):
+    try:
+        return await col.count_documents(filt, maxTimeMS=max_ms)
+    except Exception as e:
+        logger.warning(f"dashboard count degraded ({col.name}): {e}")
+        return default
 
 
 def _date_range(period: str = "30d"):
@@ -493,8 +517,8 @@ async def command_center(
         {"$match": _txn_match("bill_date", prev_start.isoformat(), lt=start.isoformat())},
         {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
-    cur = (await transactions_col.aggregate(cur_sales_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
-    prev = (await transactions_col.aggregate(prev_sales_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
+    cur = (await _safe_agg(transactions_col, cur_sales_pipe, default=[{}])) or [{}]
+    prev = (await _safe_agg(transactions_col, prev_sales_pipe, default=[{}])) or [{}]
     cur = cur[0] if cur else {}
     prev = prev[0] if prev else {}
     net = cur.get("net", 0) or 0
@@ -517,9 +541,9 @@ async def command_center(
         {"$group": {"_id": "$customer_mobile"}},
         {"$count": "n"},
     ]
-    active_rows = await transactions_col.aggregate(active_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)
+    active_rows = await _safe_agg(transactions_col, active_pipe)
     active = int(active_rows[0]["n"]) if active_rows else 0
-    total_customers = await customers_col.count_documents(_cust_match(), maxTimeMS=25000)
+    total_customers = await _safe_count(customers_col, _cust_match())
     # Invariant: active must never exceed total.
     active = min(active, total_customers)
 
@@ -531,7 +555,7 @@ async def command_center(
                     "repeat": {"$sum": {"$cond": [{"$gte": ["$n", 2]}, 1, 0]}},
                     "unique": {"$sum": 1}}},
     ]
-    rr = (await transactions_col.aggregate(repeat_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
+    rr = (await _safe_agg(transactions_col, repeat_pipe, default=[{}])) or [{}]
     rr = rr[0] if rr else {}
     repeat_rate = round((rr.get("repeat", 0) / rr["unique"]) * 100, 1) if rr.get("unique") else 0
 
@@ -565,7 +589,7 @@ async def command_center(
         {"$match": _cust_match()},
         {"$group": {"_id": None, "points": {"$sum": "$points_balance"}}},
     ]
-    liab = (await customers_col.aggregate(liab_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
+    liab = (await _safe_agg(customers_col, liab_pipe, default=[{}])) or [{}]
     liab = liab[0] if liab else {}
     burn_ratio = 0.25
     outstanding_points = int(liab.get("points", 0) or 0)
@@ -578,11 +602,11 @@ async def command_center(
     d30 = now - timedelta(days=30)
     d90 = now - timedelta(days=90)
     cohort = {
-        "today": await customers_col.count_documents(_cust_match({"first_purchase_at": {"$gte": today_start.isoformat()}})),
-        "last_7d": await customers_col.count_documents(_cust_match({"first_purchase_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}})),
-        "last_30d": await customers_col.count_documents(_cust_match({"first_purchase_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}})),
-        "last_90d": await customers_col.count_documents(_cust_match({"first_purchase_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}})),
-        "older": await customers_col.count_documents(_cust_match({"first_purchase_at": {"$lt": d90.isoformat()}})),
+        "today": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": today_start.isoformat()}})),
+        "last_7d": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}})),
+        "last_30d": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}})),
+        "last_90d": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}})),
+        "older": await _safe_count(customers_col, _cust_match({"first_purchase_at": {"$lt": d90.isoformat()}})),
     }
 
     # --- Sparkline: daily/monthly net sales for the window ---
@@ -599,7 +623,7 @@ async def command_center(
                     "txns": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    spark_rows = await transactions_col.aggregate(spark_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(2000)
+    spark_rows = await _safe_agg(transactions_col, spark_pipe, limit=2000)
     sparkline = [{"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in spark_rows]
 
     # --- Alerts (live computed) ---

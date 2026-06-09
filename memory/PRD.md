@@ -32,6 +32,20 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 50 (Jun 2026) — 🔴 PROD FIX: CUSTOMERS upsert fails (E11000) + Command Center still 500s
+
+User (LIVE): CUSTOMERS upload in **upsert** mode → `Failed` (0/0/0); Command Center → the new Retry card with **HTTP 500**. (deployment_agent only runs static checks — no runtime logs available, so diagnosed from code + reproduced in preview.)
+
+**Bug 1 — customer upsert E11000 (the blocker; customers never load):** the customers flush builds `UpdateOne({"mobile": d["mobile"]}, …, upsert=True)` for **every** row in a 500-row batch. CRM exports are ~98.5% duplicated on mobile, so nearly every batch has the *same new mobile twice* → both attempt an upsert-insert → **E11000 DuplicateKeyError → BulkWriteError** (uncaught) → job `failed`. (Skip mode dodged it via per-row `find_one`.)
+- **Fix (`historic_routes.py` `_flush`):** de-dupe each batch by mobile (keep LAST = "upsert last-wins") before `bulk_write`, so one op per mobile → no intra-batch key collision; wrap in `try/except BulkWriteError` that swallows residual 11000 races and re-raises real errors; count collapsed dupes as `touched` so reconciliation (`new+touched+skipped == total`) stays exact.
+- **Verified:** `tests/iteration50_customer_upsert_dupe_test.py` — 40k rows / 80 unique mobiles / upsert+live: job **completed**, 80 new + 39,920 touched = 40,000 reconciled (previously `failed`). Cleaned up.
+
+**Bug 2 — Command Center 500 under load:** the iter-47 `maxTimeMS=25000` converts a slow all-time aggregation into `ExecutionTimeout` → 500 (frontend already shows Retry, but it never succeeds while busy).
+- **Fix (`dashboard_routes.py`):** added `_safe_agg` / `_safe_count` helpers (log + return default on timeout/error) and wrapped all heavy command-center calls (sales, prev, active, repeat, liability, 5 cohort counts, sparkline). Endpoint now **degrades gracefully (200 with partial data)** instead of 500. Verified 200 in ~0.1s for `period=all` and `30d`.
+
+⚠️ **Redeploy required.** After redeploy the customer upsert will succeed (DB frees) and Command Center won't 500.
+
+
 ### Iteration 49 (Jun 2026) — 🔴 PROD FIX: every dashboard hangs on "Loading…" forever (no error handling)
 
 User (LIVE): *"Sales [dashboard] stuck on Loading… issues."* (screenshot of Sales spinning forever). The iter-47 fix only hardened Command Center; the other 11 dashboards each had `try{…}finally` with **no `catch`** (or inline `.then` with no `.catch`) and a guard of `if (!data) return <Loading>` / `return null`. So when their endpoint timed out under DB load, `data` stayed null → **infinite "Loading…" / blank** with no retry.
