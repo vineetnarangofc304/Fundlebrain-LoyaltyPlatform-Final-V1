@@ -32,6 +32,10 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 56 (Jun 2026) — 🔴 Historical "stores" upload skipped ALL rows (header-casing mismatch)
+User: Historical → Stores (upsert) **skipped everything**; the Stores-module bulk upload worked fine. Root cause: `_map_store_row` only read **TitleCase** headers (`Name`/`City`) AND **required City**, but the user's CSV used the Stores-page **lowercase** format (`code,name,city,...`) → no `Name` found → "Missing Store Name" → all skipped.
+- **Fix (`historic_routes.py`):** mapper now does **case-insensitive** header lookup (works with both formats), **City is optional**, accepts code-only/name-only rows (derives the other), and **uppercases codes** so the two upload paths can't create case-variant duplicates. Verified `tests/iteration56_store_upload_test.py` (both casings, optional city, e2e upsert 0-skipped).
+
 ### Iteration 55 (Jun 2026) — 🔴 LIVE-POS: store master upload path + POS store-code resolution
 
 User (PRODUCTION): a fresh POS bill was REJECTED ("Unknown store code") because store codes weren't provisioned; confused by TWO store-upload entry points.

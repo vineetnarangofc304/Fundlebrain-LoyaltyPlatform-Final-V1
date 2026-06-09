@@ -284,22 +284,41 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
 
 
 def _map_store_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    name = (r.get("Name") or r.get("Store Name") or r.get("Outlet") or "").strip()
+    # Case-insensitive, whitespace-tolerant header lookup so the SAME CSV works in
+    # both the Historical loader and the Stores-page bulk upload (which uses
+    # lowercase headers like code,name,city,...). Previously this only read
+    # TitleCase headers AND required City, so a lowercase/no-city file skipped
+    # every row ("Missing Store Name").
+    g = {(k or "").strip().lower(): (str(v).strip() if v is not None else "") for k, v in r.items()}
+
+    def pick(*keys: str) -> str:
+        for k in keys:
+            val = g.get(k.strip().lower())
+            if val:
+                return val
+        return ""
+
+    code = pick("Store Code", "Code", "store_code")
+    name = pick("Name", "Store Name", "Outlet", "store")
+    if not code and not name:
+        return None, "Missing Store Code and Name"
+    # A store needs a code for POS matching; derive one from the name if absent.
+    if not code:
+        code = _make_store_code(name)
+    # Normalise code to UPPERCASE so the two upload paths can't create case-variant
+    # duplicates (POS matching is case-insensitive, so this is safe).
+    code = code.upper()
     if not name:
-        return None, "Missing Store Name"
-    code = (r.get("Code") or r.get("Store Code") or _make_store_code(name)).strip()
-    city = (r.get("City") or "").strip()
-    if not city:
-        return None, "Missing City"
+        name = f"Store {code}"
     return ({
         "code": code,
         "name": name,
-        "city": city,
-        "state": (r.get("State") or "").strip() or None,
-        "region": (r.get("Region") or r.get("Zone") or "").strip() or None,
-        "address": (r.get("Address") or "").strip() or None,
-        "phone": (r.get("Phone") or "").strip() or None,
-        "manager_name": (r.get("Manager") or "").strip() or None,
+        "city": pick("City", "city") or None,            # City is now OPTIONAL
+        "state": pick("State", "state") or None,
+        "region": pick("Region", "Zone", "region", "zone") or None,
+        "address": pick("Address", "address") or None,
+        "phone": pick("Phone", "phone") or None,
+        "manager_name": pick("Manager", "Manager Name", "manager_name") or None,
         "is_active": True,
         "source": "historic_upload",
     }, None)
