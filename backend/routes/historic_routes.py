@@ -459,14 +459,17 @@ MAPPERS = {
 
 
 # ---------------- Background job ----------------
-async def _bulk_upsert_resilient(col, ops):
-    """Run a batch upsert; on ANY batch-level failure (write timeout /
-    WriteConflict under load / residual duplicate-key race) retry each op
-    individually so a transient error never loses the whole 500-op batch or
-    fails the entire ingest job.
+async def _bulk_upsert_resilient(col, ops, _depth=0):
+    """Run a batch upsert robustly.
 
-    All ops MUST be idempotent upserts keyed on a unique field (mobile /
-    bill_number) so per-op retry is safe. Returns (upserted, matched, failed).
+    Happy path = a single bulk_write (fast). On a transient batch-level failure
+    (write timeout / WriteConflict / a Mongo failover during a tier resize) we
+    RETRY THE WHOLE BATCH ONCE after a short pause — crucially BEFORE falling
+    back to per-op writes. Without that, a brief blip would degrade a 2000-row
+    batch into 2000 one-at-a-time writes and the ingest would crawl ("500 by
+    500"). Only if the batch still fails do we isolate the genuinely-bad rows
+    one by one. All ops are idempotent upserts on a unique key, so retrying is
+    safe. Returns (upserted, matched, failed).
     """
     from pymongo.errors import BulkWriteError
     if not ops:
@@ -481,9 +484,14 @@ async def _bulk_upsert_resilient(col, ops):
             # only duplicate-key races → already applied, treat dupes as matched
             we = details.get("writeErrors", [])
             return details.get("nUpserted", 0), details.get("nMatched", 0) + len(we), 0
+        # genuine write errors on some ops → isolate them below
     except Exception as e:
-        logger.warning(f"bulk_write batch failed ({col.name}) — retrying per-op: {e}")
-    # Per-op retry (idempotent upserts) so a batch-level error doesn't drop rows
+        # transient batch-level failure → retry the WHOLE batch once before per-op
+        if _depth == 0:
+            await asyncio.sleep(0.5)
+            return await _bulk_upsert_resilient(col, ops, _depth=1)
+        logger.warning(f"bulk_write batch failed twice ({col.name}) — isolating per-op: {e}")
+    # Per-op retry to isolate the bad rows (rare path)
     up = ma = failed = 0
     for op in ops:
         try:
@@ -563,6 +571,11 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         sku_bill_keys: Dict[str, set] = {}
         sku_item_master: Dict[str, Dict[str, Any]] = {}
         buffer_insert: List[Dict[str, Any]] = []
+        # Write-heavy datasets do a real DB bulk_write per batch, so a bigger batch
+        # = far fewer network round trips (4x fewer flushes than the old 500) → much
+        # faster on multi-lakh CRM/billing files. SKU only accumulates in memory, so
+        # its batch size is irrelevant to throughput; keep it modest.
+        flush_threshold = 2000 if dataset in {"customers", "transactions", "points_ledger"} else CHUNK_SIZE
 
         # Pre-pass: count rows
         # (csv.DictReader iterates lazily; we count as we go)
@@ -750,7 +763,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                 buffer_insert.append(doc)
                 processed += 1
 
-                if len(buffer_insert) >= CHUNK_SIZE:
+                if len(buffer_insert) >= flush_threshold:
                     try:
                         await _flush()
                     except Exception as fe:

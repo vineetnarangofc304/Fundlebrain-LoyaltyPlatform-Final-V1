@@ -32,7 +32,22 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
-### Iteration 52 (Jun 2026) — 🔴 LIVE-POS: settable POS x-api-key ("Set key")
+### Iteration 53 (Jun 2026) — 🔴🔴 ROOT CAUSE: CRM ingest crawled "500 by 500" (COLLSCAN per upsert)
+
+User (PRODUCTION, upgraded Mongo to M20): *"CRM file loading 500 by 500 WHY… SKU jumped by lakhs… something wrong at your end."*
+
+**Two findings:**
+1. **SKU vs CRM is by design, not a regression:** the SKU loop only accumulates line items *in memory* (writes happen once in the post-pass) → counter rockets by lakhs; the customer loop does a real DB `bulk_write` per batch → advances at write pace. Explained to user.
+2. **🎯 REAL ROOT CAUSE — partial unique index forces a COLLSCAN on every customer upsert.** `uniq_customer_mobile` is a PARTIAL index (`partialFilterExpression={"mobile":{"$type":"string"}}`). MongoDB **cannot** use a partial index for a bare `{mobile: <val>}` equality query → the upsert existence-check did a **full collection scan PER ROW**. Measured: partial-index upsert **1004 ops/s (COLLSCAN)** vs plain-index **20,548 ops/s (IXSCAN)** — and it got *worse* as the collection grew (at 1.1M customers each row scanned 1.1M docs). That is the "500 by 500" crawl.
+   - **Fix (`server.py`):** always create a **plain non-unique `{mobile:1}` index** (`ix_cust_mobile_lookup`) alongside the partial-unique one. Upserts now use IXSCAN; uniqueness still enforced by the partial index. Additive — no risky index drop in prod. Confirmed: query plan FETCH/IXSCAN, isolated customer upsert **880 → 14,414 ops/s (16x)**, full-job 162 → 791 rows/s end-to-end (preview; M20 faster).
+
+**Also this iteration:**
+- **Bigger write batches** (`historic_routes.py`): write-heavy datasets (customers/transactions/points_ledger) flush every **2000** rows (was 500) → 4x fewer round trips.
+- **Smarter resilient flush:** on a transient batch failure (e.g., a Mongo failover during the M20 resize) it now **retries the whole batch once** before ever dropping to per-op writes — prevents a blip from degrading a 2000-row batch into 2000 one-at-a-time writes (the other "crawl" trigger).
+- **Post-pass indexes:** `customers.ingest_job_id` (opening-balance query) + `points_ledger (customer_mobile, reference_type)` (opening-balance upsert key). 25 startup indexes total.
+- **⚠️ Needs redeploy.** After redeploy the new indexes auto-build on startup and the CRM load runs ~16x faster.
+
+
 
 User (PRODUCTION): stores were re-provisioned with a new `x-api-key` (`ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI`). The system only validated against the OLD key → every live `/api/pos/*` call would 403. Existing UI only had **Rotate** (generates a *random* key), no way to set a *specific* one.
 - **Backend (`live_monitor_routes.py`):** new `POST /api/admin/pos-credentials/{cred_id}/set-key` (super_admin/brand_admin) — sets the credential's `api_key` to an exact value, activates it, blocks reuse of a key owned by another cred, min 16 chars.

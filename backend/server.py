@@ -365,11 +365,17 @@ async def ensure_indexes():
         (customers_col, [("city", 1)], {"name": "ix_cust_city"}),
         (customers_col, [("created_at", -1)], {"name": "ix_cust_created"}),
         (customers_col, [("visit_count", -1)], {"name": "ix_cust_visit_count"}),
+        # ingest_job_id — the customer post-pass (opening-balance ledger) finds all
+        # rows loaded by a job; without this it COLLSCANs 1M+ customers each load.
+        (customers_col, [("ingest_job_id", 1)], {"name": "ix_cust_ingest_job"}),
         # points ledger — economics / expiry
         (points_ledger_col, [("customer_mobile", 1)], {"name": "ix_pl_mobile"}),
         (points_ledger_col, [("type", 1), ("expires_at", 1)], {"name": "ix_pl_type_expiry"}),
         (points_ledger_col, [("created_at", -1)], {"name": "ix_pl_created"}),
         (points_ledger_col, [("source_bill_id", 1)], {"name": "ix_pl_bill"}),
+        # opening-balance post-pass upserts keyed on (customer_mobile, reference_type);
+        # this makes each of the ~1M upserts an index hit instead of a scan.
+        (points_ledger_col, [("customer_mobile", 1), ("reference_type", 1)], {"name": "ix_pl_mobile_reftype"}),
         # small collections
         (coupon_redemptions_col, [("created_at", -1)], {"name": "ix_cr_created"}),
         (nps_col, [("created_at", -1)], {"name": "ix_nps_created"}),
@@ -389,8 +395,7 @@ async def ensure_indexes():
             created += 1
         except Exception as e:
             logger.warning(f"index {opts.get('name')} warn: {e}")
-    # customers.mobile equality lookups (skip-mode ingest + Customer 360).
-    # Prefer the partial-unique index; fall back to a plain index if dupes exist.
+    # customers.mobile uniqueness constraint (partial: only string mobiles).
     try:
         await customers_col.create_index(
             [("mobile", 1)], unique=True,
@@ -399,12 +404,18 @@ async def ensure_indexes():
         )
         created += 1
     except Exception as e:
-        logger.warning(f"unique mobile index warn ({e}); trying non-unique fallback")
-        try:
-            await customers_col.create_index([("mobile", 1)], name="ix_cust_mobile")
-            created += 1
-        except Exception as e2:
-            logger.warning(f"mobile index fallback warn: {e2}")
+        logger.warning(f"unique mobile index warn: {e}")
+    # CRITICAL PERF: a PARTIAL index canNOT serve a bare {mobile: <val>} equality
+    # query — Mongo falls back to a COLLSCAN, so every customer UPSERT scanned the
+    # WHOLE collection (~1k ops/s, getting worse as it grows → the multi-lakh CRM
+    # load crawled "500 by 500"). A plain non-unique index on mobile lets the
+    # upsert existence-check use an IXSCAN (~20k ops/s, 20x faster). Uniqueness is
+    # still enforced by uniq_customer_mobile above; this exists purely for lookups.
+    try:
+        await customers_col.create_index([("mobile", 1)], name="ix_cust_mobile_lookup")
+        created += 1
+    except Exception as e:
+        logger.warning(f"mobile lookup index warn: {e}")
     logger.info(f"ensure_indexes complete — {created} indexes ensured")
 
 
