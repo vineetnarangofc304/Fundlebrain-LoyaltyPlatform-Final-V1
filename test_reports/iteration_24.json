@@ -1,0 +1,51 @@
+{
+  "summary": "Validated the production-scale fixes (allowDiskUse=True on all 45 aggregations, Command Center 25s timeout + 60s cache, burn_ratio from config) on PREVIEW. 40/40 backend pytest assertions pass (no 500s on ANY dashboard / raw-report / sales endpoint). All 12 admin dashboards load with content (no blank/infinite-spinner/error overlay), all 5 raw-report tabs render tables, Customer 360 list shows points-balance + pagination + drill-down, Live Monitor 365d shows KPIs + legend + LOC code cards. Functional correctness verified end-to-end.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "CommandCenter store/city <select>",
+        "issues": [
+          "React hydration warning: '<span> cannot be a child of <option>' — emergent-injected x-source spans are being rendered inside <option> elements. Cosmetic devtools warning only; UI works. Suggest stripping x-source spans from option children."
+        ]
+      }
+    ]
+  },
+  "test_results_detail": {
+    "command_center": "PASS — period=all returns 200 with kpis{net_sales,aov,active_customers,repeat_rate_pct,api_health_pct,transactions,outstanding_points,outstanding_liability_inr,total_customers,...}; UI renders Net Sales ₹54.3K. Periods today/7d/30d/90d/1y/mtd/ytd all return 200. City filter combo returns 200.",
+    "analytics_dashboards": "PASS — /api/analytics/sales-dashboard, customer-dashboard, loyalty-dashboard, campaign-dashboard, store-dashboard, nps-dashboard all 200 with period=all.",
+    "fundlebrain_dashboards": "PASS — /api/dashboard/rfm, cohorts-segmentation, points-economics, campaign-roi, executive-summary, store-performance-v2 all 200 with period=all.",
+    "sales_aux": "PASS — /api/dashboard/sales-trend, filter-options, city-performance all 200.",
+    "raw_reports": "PASS — POST /api/raw-reports/customer-data with group_by in {city,tier,month,state,zone} → 200; transaction-data with group_by in {city,month,location} → 200; repeat-purchases, earn-redeem, customers-by-visit → 200. UI: all 5 tabs (Customer Data, Transaction Data, Repeat Purchases, Earn-Redeem, Customers by Visit) render tables.",
+    "live_monitor": "PASS — /api/live-monitor/stats?minutes=1440 returns 200 with revenue_total >= loyalty_revenue. Default window 'today'. Switching to 365d shows lm-kpi-total-rev=₹15.7K, lm-kpi-loyalty-rev=₹11.5K, lm-row-legend rendered, top-store cards with LOC code badges (KITERATIO/KTESTOUTL/KAJENTERP).",
+    "customer_360": "PASS — /admin/customers shows 62 rows, 62 cust-points-balance-<id> cells, customer-pagination + page-prev/page-next/page-indicator (Page 1/1, next disabled because <100 rows). Drill into first row opens /admin/customers/3e3e6fe1c4e543589920b72be4a4e3c8 with customer-detail-page testid rendered (body length=1235, not blank).",
+    "dashboards_loaded_no_error": "PASS — visited /admin/dashboards/{command-center,sales,customers,loyalty,campaigns,stores,nps,rfm,cohorts,points,campaign-roi,executive-summary} — all rendered with body text >450 chars, no error overlay, no infinite 'Loading…' state."
+  },
+  "critical_code_review_comments": [
+    "CommandCenter: hard-coded 30s auto-refresh + 60s server-side cache means clicking 'Refresh' inside the 60s window returns a stale cached payload. Consider passing a cache-bust flag on explicit refresh.",
+    "CommandCenter: when an aggregation actually times out the failure surface is a generic 'Couldn't load the Command Center' card with no error detail except backend `detail`. Add structured error logging + a correlation id to the response for support ticket triage.",
+    "Raw reports `group_by` UI control: on the Customer Data tab there is no <select> element — group_by is likely a custom dropdown (no native <select>), so screen-reader / keyboard-nav UX may be poor. Verify accessibility on the custom control.",
+    "Live Monitor /stats and /transactions use inconsistent param names (`minutes` vs `since_minutes`) — flagged in prior iteration 23 and still present; non-blocking for the user but technical debt.",
+    "Burn ratio is now sourced from loyalty_config (good); ensure the loyalty_config doc has a sensible default seeded for fresh deployments so the Liability KPI doesn't collapse to 0 × points = 0.",
+    "Dashboard endpoints accept `period=all` which translates to a 20-year window; on production scale ensure the relevant indexes exist on bill_date / created_at / customer_mobile (covered by iteration46_indexes_test) to keep aggregations under the 25s maxTimeMS ceiling."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/iteration59_dashboards_smoke_test.py",
+    "/app/test_reports/pytest/iteration59.xml"
+  ],
+  "action_items": [
+    "Optional: strip emergent x-source <span> nodes from inside <option> children in CommandCenter store/city selects to remove the hydration console warning."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration59_dashboards_smoke_test.py"
+  ],
+  "success_rate": { "backend": "100% (40/40)", "frontend": "100% (12/12 dashboards + 5/5 raw report tabs + Customer 360 + Live Monitor)" },
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (CRM portal /crm/login).",
+  "seed_data_creation": "None. Read-only verification of existing preview data (~62 customers, ~46 txns).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration59 smoke test (40 cases) covers EVERY dashboard + raw report + live monitor + customer 360 list/detail in <3s on preview. Use it as a regression. Backend route map: dashboard_router → /api/dashboard/*, analytics_router → /api/analytics/*, fundlebrain_router also mounted under /api/dashboard so /api/dashboard/rfm, /cohorts-segmentation, /points-economics, /campaign-roi, /executive-summary, /store-performance-v2 live there. Raw reports are POST with body {period,page,page_size,group_by?}. Live Monitor default window today=1440min; 365d=525600min. Preview customer with bills: a26865d9a69b48d48a9c1524e25041ef (mobile 6000535682). Production-only concern: at 1.1M customers / 8.6L txns aggregations must use allowDiskUse=True (now done everywhere) — preview cannot reproduce the >100MB memory cap.",
+  "rca of the issue": "Original prod failures were caused by (a) 42/45 mongo aggregations missing allowDiskUse=True hitting the 100MB pipeline memory cap at production scale → 500s, and (b) Command Center 8s maxTimeMS being too tight, returning empty/zero KPIs. Fixes verified in PREVIEW: every dashboard/report endpoint tested returns 200, frontend renders content for all 12 dashboards + all 5 raw report tabs + Customer 360 + Live Monitor. Functional correctness validated; data magnitude cannot be validated on preview (sparse data) but the same code paths now used by 8.6L+ prod data are 200-status across the board on the preview path."
+}

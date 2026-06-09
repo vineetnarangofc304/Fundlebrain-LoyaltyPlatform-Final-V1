@@ -193,7 +193,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
                 "avg_visit_count": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
                                                               {"$divide": ["$total_visit_count", "$total_customers"]}, 0]}, 2]},
             }},
-        ])
+        ], allowDiskUse=True)
     elif gb == "month":
         # Customers' first_purchase_at month — handle string and datetime types
         agg = customers_col.aggregate([
@@ -217,7 +217,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
                 "avg_visit_count": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
                                                               {"$divide": ["$total_visit_count", "$total_customers"]}, 0]}, 2]},
             }},
-        ])
+        ], allowDiskUse=True)
     else:
         # location / city / state / zone — group transactions by store/city/state/zone,
         # then enrich with per-group customer roll-ups
@@ -262,7 +262,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
                 "repeat_pct": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
                                                           {"$multiply": [{"$divide": ["$repeat_customers", "$total_customers"]}, 100]}, 0]}, 1]},
             }},
-        ])
+        ], allowDiskUse=True)
 
     raw = [r async for r in agg]
     raw = [r for r in raw if r.get("group_key") not in (None, "")]
@@ -337,7 +337,7 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
             "discount_pct": {"$round": [{"$cond": [{"$gt": ["$total_gross_purchase", 0]},
                                                        {"$multiply": [{"$divide": ["$total_discount", "$total_gross_purchase"]}, 100]}, 0]}, 1]},
         }},
-    ])
+    ], allowDiskUse=True)
     raw = [r async for r in agg if r.get("group_key") not in (None, "")]
     rows, total = _apply_sort_and_paginate(raw, f, default_key="total_purchase")
     totals = {
@@ -540,7 +540,7 @@ async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
             "total_redeem_points": {"$round": ["$total_redeem_points", 2]},
             "total_bonus_points":  {"$round": ["$total_bonus_points", 2]},
         }},
-    ])
+    ], allowDiskUse=True)
     txn_rows = {r["group_key"]: r async for r in agg if r.get("group_key") not in (None, "")}
 
     # Expired points from points_ledger (type=expire entries)
@@ -552,7 +552,7 @@ async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
                                             if _parse_iso(f.end_date) else None}}
                        if (f.start_date or f.end_date) else {})}},
         {"$group": {"_id": None, "total": {"$sum": {"$abs": "$points"}}}},
-    ])
+    ], allowDiskUse=True)
     expired_total = 0
     async for r in expired_agg:
         expired_total = abs(r.get("total") or 0)
@@ -714,7 +714,7 @@ async def drill(body: DrillIn, user: dict = Depends(get_current_user)):
             {"$group": {"_id": {"m": "$customer_mobile", "b": "$bill_number"}}},
             {"$group": {"_id": "$_id.m", "visits": {"$sum": 1}}},
             {"$match": {"visits": body.visits}},
-        ])
+        ], allowDiskUse=True)
         mobiles = [r["_id"] async for r in agg]
     else:
         mobiles = await transactions_col.distinct("customer_mobile", match)

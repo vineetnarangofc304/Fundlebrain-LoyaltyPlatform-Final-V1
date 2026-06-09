@@ -56,7 +56,7 @@ async def sales_dashboard(
         {"$group": {"_id": "$hour", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    hourly = await transactions_col.aggregate(hourly_pipe).to_list(24)
+    hourly = await transactions_col.aggregate(hourly_pipe, allowDiskUse=True).to_list(24)
 
     # Weekday
     weekday_pipe = [
@@ -65,7 +65,7 @@ async def sales_dashboard(
         {"$group": {"_id": "$dow", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    weekday = await transactions_col.aggregate(weekday_pipe).to_list(7)
+    weekday = await transactions_col.aggregate(weekday_pipe, allowDiskUse=True).to_list(7)
     day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
     # Payment mode mix
@@ -73,7 +73,7 @@ async def sales_dashboard(
         {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$group": {"_id": "$payment_mode", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
     ]
-    pay = await transactions_col.aggregate(pay_pipe).to_list(10)
+    pay = await transactions_col.aggregate(pay_pipe, allowDiskUse=True).to_list(10)
 
     # Discount distribution
     disc_pipe = [
@@ -93,7 +93,7 @@ async def sales_dashboard(
         }},
         {"$group": {"_id": "$bucket", "count": {"$sum": 1}, "net": {"$sum": "$net_amount"}}},
     ]
-    disc = await transactions_col.aggregate(disc_pipe).to_list(10)
+    disc = await transactions_col.aggregate(disc_pipe, allowDiskUse=True).to_list(10)
 
     return {
         "hourly": [{"hour": r["_id"], "net": round(r["net"], 2), "count": r["count"]} for r in hourly],
@@ -129,12 +129,12 @@ async def customer_dashboard(
         {"$group": {"_id": {"$substr": ["$first_purchase_at", 0, 10]}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    new_cust = await customers_col.aggregate(new_pipe).to_list(120)
+    new_cust = await customers_col.aggregate(new_pipe, allowDiskUse=True).to_list(120)
 
     # Churn risk distribution (loyalty members only)
     churn_pipe = [{"$match": {"mobile": {"$nin": [None, ""]}}},
                    {"$group": {"_id": "$churn_risk", "count": {"$sum": 1}}}]
-    churn = await customers_col.aggregate(churn_pipe).to_list(10)
+    churn = await customers_col.aggregate(churn_pipe, allowDiskUse=True).to_list(10)
 
     # Visit frequency buckets (loyalty members only — R3: by actual bill count)
     freq_pipe = [
@@ -154,7 +154,7 @@ async def customer_dashboard(
         }},
         {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
     ]
-    freq = await customers_col.aggregate(freq_pipe).to_list(10)
+    freq = await customers_col.aggregate(freq_pipe, allowDiskUse=True).to_list(10)
 
     # Top spending customers (loyalty members only)
     top_pipe = [
@@ -162,7 +162,7 @@ async def customer_dashboard(
         {"$sort": {"lifetime_spend": -1}}, {"$limit": 10},
         {"$project": {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1, "lifetime_spend": 1, "visit_count": 1}},
     ]
-    top = await customers_col.aggregate(top_pipe).to_list(10)
+    top = await customers_col.aggregate(top_pipe, allowDiskUse=True).to_list(10)
 
     # City distribution (loyalty members only)
     city_pipe = [
@@ -170,7 +170,7 @@ async def customer_dashboard(
         {"$group": {"_id": "$city", "count": {"$sum": 1}, "spend": {"$sum": "$lifetime_spend"}}},
         {"$sort": {"spend": -1}}, {"$limit": 15},
     ]
-    city = await customers_col.aggregate(city_pipe).to_list(20)
+    city = await customers_col.aggregate(city_pipe, allowDiskUse=True).to_list(20)
 
     # Customer Health Distribution (R6 — bucket by RECENCY of last bill)
     # Healthy: last bill within 30 days · Slipping: 31-90 · At Risk: 91-180 · Lost: > 180
@@ -194,7 +194,7 @@ async def customer_dashboard(
         }},
         {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
     ]
-    health_rows = await customers_col.aggregate(health_pipe).to_list(10)
+    health_rows = await customers_col.aggregate(health_pipe, allowDiskUse=True).to_list(10)
     HEALTH_ORDER = ["Healthy", "Slipping", "At Risk", "Lost", "Never transacted"]
     health_map = {r["_id"]: r["count"] for r in health_rows}
     health_distribution = [{"bucket": b, "count": health_map.get(b, 0)} for b in HEALTH_ORDER]
@@ -218,7 +218,7 @@ async def customer_dashboard(
         }},
         {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
     ]
-    rec_rows = await customers_col.aggregate(recency_pipe).to_list(10)
+    rec_rows = await customers_col.aggregate(recency_pipe, allowDiskUse=True).to_list(10)
     REC_ORDER = ["0-7d", "8-30d", "31-90d", "91-180d", "181-365d", "365d+"]
     rec_map = {r["_id"]: r["count"] for r in rec_rows}
     recency_distribution = [{"bucket": b, "count": rec_map.get(b, 0)} for b in REC_ORDER]
@@ -242,7 +242,7 @@ async def customer_dashboard(
         }},
         {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
     ]
-    ot_rows = await customers_col.aggregate(onetimer_pipe).to_list(10)
+    ot_rows = await customers_col.aggregate(onetimer_pipe, allowDiskUse=True).to_list(10)
     ot_map = {r["_id"]: r["count"] for r in ot_rows}
     one_timer_recency_distribution = [{"bucket": b, "count": ot_map.get(b, 0)} for b in REC_ORDER]
 
@@ -255,7 +255,7 @@ async def customer_dashboard(
             "lifetime_spend": {"$sum": "$lifetime_spend"},
         }},
     ]
-    life_rows = await customers_col.aggregate(lifecycle_pipe).to_list(5)
+    life_rows = await customers_col.aggregate(lifecycle_pipe, allowDiskUse=True).to_list(5)
     life_map = {r["_id"]: r for r in life_rows}
     lifecycle_split = {
         "one_timer": {
@@ -324,7 +324,7 @@ async def loyalty_dashboard(
                      "total_spend": {"$sum": "$lifetime_spend"}, "total_points": {"$sum": "$points_balance"}}},
         {"$sort": {"avg_spend": -1}},
     ]
-    tiers = await customers_col.aggregate(tier_pipe).to_list(10)
+    tiers = await customers_col.aggregate(tier_pipe, allowDiskUse=True).to_list(10)
 
     # Points issued vs redeemed trend — by BILL DATE (R1) — last 90 days
     start = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
@@ -339,7 +339,7 @@ async def loyalty_dashboard(
         {"$group": {"_id": {"date": "$date", "type": "$type"}, "points": {"$sum": "$points"}}},
         {"$sort": {"_id.date": 1}},
     ]
-    rows = await points_ledger_col.aggregate(issued_pipe).to_list(2000)
+    rows = await points_ledger_col.aggregate(issued_pipe, allowDiskUse=True).to_list(2000)
     by_date = {}
     for r in rows:
         d = r["_id"]["date"]
@@ -374,7 +374,7 @@ async def store_dashboard(period_days: int = 30, user: dict = Depends(get_curren
         }},
         {"$sort": {"net": -1}},
     ]
-    rows = await transactions_col.aggregate(pipe).to_list(100)
+    rows = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(100)
     store_ids = [r["_id"] for r in rows]
     stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}}, {"_id": 0})}
 
@@ -383,7 +383,7 @@ async def store_dashboard(period_days: int = 30, user: dict = Depends(get_curren
         {"$match": {"home_store_id": {"$in": store_ids}, "mobile": {"$nin": [None, ""]}}},
         {"$group": {"_id": "$home_store_id", "count": {"$sum": 1}}},
     ]
-    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe)}
+    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe, allowDiskUse=True)}
 
     out = []
     for r in rows:
@@ -406,7 +406,7 @@ async def store_dashboard(period_days: int = 30, user: dict = Depends(get_curren
         {"$group": {"_id": "$store.region", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
         {"$sort": {"net": -1}},
     ]
-    regions = await transactions_col.aggregate(region_pipe).to_list(20)
+    regions = await transactions_col.aggregate(region_pipe, allowDiskUse=True).to_list(20)
     return {
         "stores": out,
         "regions": [{"region": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in regions],
@@ -441,7 +441,7 @@ async def nps_dashboard(
         }},
         {"$sort": {"_id": 1}},
     ]
-    rows = await nps_col.aggregate(trend_pipe).to_list(120)
+    rows = await nps_col.aggregate(trend_pipe, allowDiskUse=True).to_list(120)
     return [
         {
             "date": r["_id"],
@@ -464,5 +464,5 @@ async def coupon_detail(coupon_id: str, user: dict = Depends(get_current_user)):
         {"$group": {"_id": {"$substr": ["$redeemed_at", 0, 10]}, "count": {"$sum": 1}, "discount": {"$sum": "$discount"}}},
         {"$sort": {"_id": 1}},
     ]
-    trend = await coupon_redemptions_col.aggregate(by_date_pipe).to_list(120)
+    trend = await coupon_redemptions_col.aggregate(by_date_pipe, allowDiskUse=True).to_list(120)
     return {"coupon": c, "redemptions": redemptions, "trend": [{"date": r["_id"], "count": r["count"], "discount": round(r["discount"], 2)} for r in trend]}

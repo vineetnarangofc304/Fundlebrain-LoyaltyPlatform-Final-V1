@@ -5,7 +5,7 @@ from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Depends, Query
 from database import (
     customers_col, transactions_col, stores_col, campaigns_col, coupons_col,
-    points_ledger_col, nps_col, tickets_col, api_logs_col
+    points_ledger_col, nps_col, tickets_col, api_logs_col, loyalty_config_col
 )
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
@@ -14,8 +14,18 @@ import logging
 logger = logging.getLogger("kazo-fundle")
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
+# ── Command Center response cache ──────────────────────────────────────────
+# The all-time ("period=all") view scans the full transactions collection
+# (8L+ rows) across ~16 concurrent aggregations. That's a few seconds even when
+# healthy, so we cache the assembled response briefly: the page auto-refreshes
+# every 30s and users navigate in/out, so a 60s TTL turns "slow every time" into
+# "slow at most once a minute" while keeping live POS bills near-real-time.
+import time as _time
+_CC_CACHE: Dict[str, tuple] = {}
+_CC_TTL = 60.0
 
-async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=8000):
+
+async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=25000):
     """Run a dashboard aggregation that must NEVER 500 the endpoint.
 
     On timeout (pymongo ExecutionTimeout from maxTimeMS) or any error we log and
@@ -31,12 +41,25 @@ async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=8000):
         return [] if default is None else default
 
 
-async def _safe_count(col, filt, default=0, max_ms=8000):
+async def _safe_count(col, filt, default=0, max_ms=25000):
     try:
         return await col.count_documents(filt, maxTimeMS=max_ms)
     except Exception as e:
         logger.warning(f"dashboard count degraded ({col.name}): {e}")
         return default
+
+
+async def _burn_ratio() -> float:
+    """₹ value of 1 loyalty point for liability — sourced from the loyalty config
+    (the Loyalty Configurator drives it) instead of being hardcoded. Falls back to
+    0.25 only if the config doc is somehow absent (it's seeded in every env)."""
+    try:
+        cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "burn_ratio": 1})
+        if cfg and cfg.get("burn_ratio") is not None:
+            return float(cfg["burn_ratio"])
+    except Exception as e:
+        logger.warning(f"burn_ratio config read degraded: {e}")
+    return 0.25
 
 
 def _date_range(period: str = "30d"):
@@ -134,7 +157,7 @@ async def kpis(
             "unique_customers": {"$addToSet": "$customer_mobile"},  # R4: mobile is identity
         }}
     ]
-    cur = await transactions_col.aggregate(pipeline).to_list(1)
+    cur = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(1)
     sales = cur[0] if cur else {"gross_sales": 0, "net_sales": 0, "discount": 0,
                                    "txn_count": 0, "items_count": 0, "units_count": 0,
                                    "unique_customers": []}
@@ -143,7 +166,7 @@ async def kpis(
         {"$match": prev_filter},
         {"$group": {"_id": None, "net_sales": {"$sum": "$net_amount"}, "txn_count": {"$sum": 1}}}
     ]
-    prev_cur = await transactions_col.aggregate(prev_pipeline).to_list(1)
+    prev_cur = await transactions_col.aggregate(prev_pipeline, allowDiskUse=True).to_list(1)
     prev = prev_cur[0] if prev_cur else {"net_sales": 0, "txn_count": 0}
 
     aov = (sales["net_sales"] / sales["txn_count"]) if sales["txn_count"] else 0
@@ -159,7 +182,7 @@ async def kpis(
                             {"bill_date": {"$exists": False}, "created_at": {"$gte": start.isoformat()}}]}},
         {"$group": {"_id": None, "total": {"$sum": "$points"}}}
     ]
-    pi = await points_ledger_col.aggregate(points_issued_pipe).to_list(1)
+    pi = await points_ledger_col.aggregate(points_issued_pipe, allowDiskUse=True).to_list(1)
     points_issued = pi[0]["total"] if pi else 0
     points_redeem_pipe = [
         {"$match": {"type": "redeem",
@@ -167,15 +190,15 @@ async def kpis(
                             {"bill_date": {"$exists": False}, "created_at": {"$gte": start.isoformat()}}]}},
         {"$group": {"_id": None, "total": {"$sum": "$points"}}}
     ]
-    pr = await points_ledger_col.aggregate(points_redeem_pipe).to_list(1)
+    pr = await points_ledger_col.aggregate(points_redeem_pipe, allowDiskUse=True).to_list(1)
     points_redeemed = abs(pr[0]["total"]) if pr else 0
 
     # Outstanding liability = sum of all points_balance (loyalty members only)
     liab_pipe = [{"$match": loyalty_cust_q},
                  {"$group": {"_id": None, "total": {"$sum": "$points_balance"}}}]
-    liab = await customers_col.aggregate(liab_pipe).to_list(1)
+    liab = await customers_col.aggregate(liab_pipe, allowDiskUse=True).to_list(1)
     outstanding_points = liab[0]["total"] if liab else 0
-    burn_ratio = 0.25
+    burn_ratio = await _burn_ratio()
     outstanding_liability = outstanding_points * burn_ratio
 
     loyalty_customers = await customers_col.count_documents({**loyalty_cust_q, "lifetime_points_earned": {"$gt": 0}})
@@ -193,12 +216,12 @@ async def kpis(
     campaign_pipe = [
         {"$group": {"_id": None, "revenue": {"$sum": "$revenue_generated"}, "count": {"$sum": 1}}}
     ]
-    cp = await campaigns_col.aggregate(campaign_pipe).to_list(1)
+    cp = await campaigns_col.aggregate(campaign_pipe, allowDiskUse=True).to_list(1)
     campaign_revenue = cp[0]["revenue"] if cp else 0
     campaign_count = cp[0]["count"] if cp else 0
 
     coupon_pipe = [{"$group": {"_id": None, "used": {"$sum": "$times_used"}, "issued": {"$sum": "$times_issued"}}}]
-    cu = await coupons_col.aggregate(coupon_pipe).to_list(1)
+    cu = await coupons_col.aggregate(coupon_pipe, allowDiskUse=True).to_list(1)
     coupon_usage = cu[0]["used"] if cu else 0
 
     # NPS
@@ -211,7 +234,7 @@ async def kpis(
             "total": {"$sum": 1},
         }}
     ]
-    npsr = await nps_col.aggregate(nps_pipe).to_list(1)
+    npsr = await nps_col.aggregate(nps_pipe, allowDiskUse=True).to_list(1)
     if npsr and npsr[0]["total"]:
         nps_score = round(((npsr[0]["promoters"] - npsr[0]["detractors"]) / npsr[0]["total"]) * 100)
     else:
@@ -281,7 +304,7 @@ async def sales_trend(period: str = "30d", user: dict = Depends(get_current_user
         }},
         {"$sort": {"_id": 1}},
     ]
-    rows = await transactions_col.aggregate(pipeline).to_list(500)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(500)
     return [
         {"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"], "customers": len(r["customers"])}
         for r in rows
@@ -306,7 +329,7 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
         {"$sort": {"net": -1}},
         {"$limit": 20},
     ]
-    rows = await transactions_col.aggregate(pipeline).to_list(50)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(50)
     store_ids = [r["_id"] for r in rows]
     stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}}, {"_id": 0})}
 
@@ -315,7 +338,7 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
         {"$match": {"home_store_id": {"$in": store_ids}, "mobile": {"$nin": [None, ""]}}},
         {"$group": {"_id": "$home_store_id", "count": {"$sum": 1}}},
     ]
-    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe)}
+    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe, allowDiskUse=True)}
 
     out = []
     for r in rows:
@@ -343,7 +366,7 @@ async def category_mix(period: str = "30d", user: dict = Depends(get_current_use
         {"$group": {"_id": "$items.category", "revenue": {"$sum": "$items.total"}, "qty": {"$sum": "$items.quantity"}}},
         {"$sort": {"revenue": -1}},
     ]
-    rows = await transactions_col.aggregate(pipeline).to_list(50)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(50)
     return [{"category": r["_id"], "revenue": round(r["revenue"], 2), "quantity": r["qty"]} for r in rows]
 
 
@@ -354,7 +377,7 @@ async def tier_distribution(user: dict = Depends(get_current_user)):
         {"$group": {"_id": "$tier", "count": {"$sum": 1}, "spend": {"$sum": "$lifetime_spend"}}},
         {"$sort": {"spend": -1}},
     ]
-    rows = await customers_col.aggregate(pipeline).to_list(20)
+    rows = await customers_col.aggregate(pipeline, allowDiskUse=True).to_list(20)
     return [{"tier": r["_id"], "count": r["count"], "lifetime_spend": round(r["spend"], 2)} for r in rows]
 
 
@@ -372,7 +395,7 @@ async def top_skus(period: str = "30d", limit: int = 10, user: dict = Depends(ge
         {"$sort": {"revenue": -1}},
         {"$limit": limit},
     ]
-    rows = await transactions_col.aggregate(pipeline).to_list(limit)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(limit)
     return [
         {"sku": r["_id"]["sku"], "name": r["_id"]["name"], "category": r["_id"]["category"],
          "revenue": round(r["revenue"], 2), "quantity": r["qty"]}
@@ -415,6 +438,11 @@ async def command_center(
       - store_id: limit to a single store
       - city: limit to stores in this city (resolves to a store_id list)
     """
+    # Cached briefly (60s) — see _CC_CACHE note. Live POS bills appear within the TTL.
+    _ck = f"{period}|{start_date}|{end_date}|{store_id}|{city}"
+    _hit = _CC_CACHE.get(_ck)
+    if _hit and (_time.monotonic() - _hit[0]) < _CC_TTL:
+        return _hit[1]
     # Custom date range takes precedence over preset period
     if start_date and end_date:
         try:
@@ -635,7 +663,7 @@ async def command_center(
     api_health = round(((api_total - api_failed) / api_total) * 100, 2) if api_total else 100.0
 
     liab = (liab[0] if liab else {}) or {}
-    burn_ratio = 0.25
+    burn_ratio = await _burn_ratio()
     outstanding_points = int(liab.get("points", 0) or 0)
     outstanding_inr = round(outstanding_points * burn_ratio, 2)
 
@@ -673,7 +701,7 @@ async def command_center(
     if city:
         filter_meta["city"] = city
 
-    return {
+    result = {
         "period": period,
         "filters": filter_meta,
         "generated_at": now.isoformat(),
@@ -699,6 +727,8 @@ async def command_center(
         "sparkline": sparkline,
         "alerts": alerts,
     }
+    _CC_CACHE[_ck] = (_time.monotonic(), result)
+    return result
 
 
 @router.get("/city-performance")
@@ -711,5 +741,5 @@ async def city_performance(period: str = "30d", user: dict = Depends(get_current
         {"$group": {"_id": "$store.city", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
         {"$sort": {"net": -1}},
     ]
-    rows = await transactions_col.aggregate(pipeline).to_list(50)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(50)
     return [{"city": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in rows]
