@@ -137,8 +137,9 @@ def _normalize_order_time(value: Any) -> str:
         return datetime.fromtimestamp(int(s) / 1000, tz=IST_TZ).isoformat()
     try:
         from dateutil import parser as _dtp
-        iso_like = bool(re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", s))
-        dt = _dtp.parse(s, dayfirst=not iso_like, yearfirst=iso_like)
+        # The POS always sends year-month-date (e.g. "2026-06-09 18:03:30"). Parse
+        # year-first and NEVER day-first so 2026-06-09 is unambiguously 09 June 2026.
+        dt = _dtp.parse(s, yearfirst=True, dayfirst=False)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=IST_TZ)
         return dt.isoformat()
