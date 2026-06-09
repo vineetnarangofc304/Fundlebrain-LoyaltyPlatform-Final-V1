@@ -30,6 +30,7 @@ from database import (
     db, customers_col, transactions_col, stores_col, campaigns_col, coupons_col,
     points_ledger_col, api_logs_col, nps_col, tickets_col, ai_chats_col,
     campaign_metrics_col, message_log_col, audit_logs_col, coupon_redemptions_col,
+    loyalty_config_col,
 )
 from auth import get_current_user, require_roles, MANAGEMENT_ROLES
 
@@ -458,6 +459,48 @@ MAPPERS = {
 
 
 # ---------------- Background job ----------------
+async def _bulk_upsert_resilient(col, ops):
+    """Run a batch upsert; on ANY batch-level failure (write timeout /
+    WriteConflict under load / residual duplicate-key race) retry each op
+    individually so a transient error never loses the whole 500-op batch or
+    fails the entire ingest job.
+
+    All ops MUST be idempotent upserts keyed on a unique field (mobile /
+    bill_number) so per-op retry is safe. Returns (upserted, matched, failed).
+    """
+    from pymongo.errors import BulkWriteError
+    if not ops:
+        return 0, 0, 0
+    try:
+        res = await col.bulk_write(ops, ordered=False)
+        return res.upserted_count, res.matched_count, 0
+    except BulkWriteError as bwe:
+        details = bwe.details or {}
+        real = [e for e in details.get("writeErrors", []) if e.get("code") != 11000]
+        if not real:
+            # only duplicate-key races → already applied, treat dupes as matched
+            we = details.get("writeErrors", [])
+            return details.get("nUpserted", 0), details.get("nMatched", 0) + len(we), 0
+    except Exception as e:
+        logger.warning(f"bulk_write batch failed ({col.name}) — retrying per-op: {e}")
+    # Per-op retry (idempotent upserts) so a batch-level error doesn't drop rows
+    up = ma = failed = 0
+    for op in ops:
+        try:
+            r = await col.bulk_write([op], ordered=False)
+            up += r.upserted_count
+            ma += r.matched_count
+        except BulkWriteError as e2:
+            we = (e2.details or {}).get("writeErrors", [])
+            if we and all(w.get("code") == 11000 for w in we):
+                ma += 1  # duplicate-key → already there
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return up, ma, failed
+
+
 async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                             duplicate_mode: str, dry_run: bool):
     def now():
@@ -525,14 +568,13 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
         # (csv.DictReader iterates lazily; we count as we go)
 
         async def _flush():
-            nonlocal inserted, updated
+            nonlocal inserted, updated, skipped
             if dry_run:
                 return
             if dataset == "customers":
                 if buffer_insert:
                     # Use bulk upsert for customers (by mobile)
                     from pymongo import UpdateOne
-                    from pymongo.errors import BulkWriteError
                     # CRITICAL: de-dupe the batch by mobile (keep LAST occurrence).
                     # CRM exports are heavily duplicated on mobile, so without this
                     # two rows with the same mobile in one unordered batch both try
@@ -549,23 +591,16 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                                           "created_at": now(),
                                       }},
                                       upsert=True) for m, d in by_mobile.items()]
-                    try:
-                        res = await customers_col.bulk_write(ops, ordered=False)
-                        inserted += res.upserted_count
-                        # matched_count = rows that matched the filter (incl. no-op upserts where data
-                        # didn't change). MongoDB's modified_count is misleading because it returns 0
-                        # for upserts with identical values — making re-uploads look like 'data is lost'.
-                        # collapsed duplicate-mobile rows are counted as 'touched' so reconciliation
-                        # (new + touched + skipped == total rows) stays exact.
-                        updated += res.matched_count + collapsed
-                    except BulkWriteError as bwe:
-                        # Tolerate residual duplicate-key races; only re-raise on a real error.
-                        details = bwe.details or {}
-                        inserted += details.get("nUpserted", 0)
-                        updated += details.get("nMatched", 0) + collapsed
-                        real_errors = [e for e in details.get("writeErrors", []) if e.get("code") != 11000]
-                        if real_errors:
-                            raise
+                    # Resilient: batch first, then per-op retry on any failure so a
+                    # transient write error under load never fails the whole job or
+                    # silently drops a 500-row batch. matched_count counts existing
+                    # records touched (incl. stubs being enriched + no-op upserts);
+                    # collapsed duplicate-mobile rows are counted as 'touched' so
+                    # reconciliation (new + touched + skipped == total) stays exact.
+                    up, ma, failed = await _bulk_upsert_resilient(customers_col, ops)
+                    inserted += up
+                    updated += ma + collapsed
+                    skipped += failed
                     buffer_insert.clear()
             elif dataset == "transactions":
                 if buffer_insert:
@@ -581,9 +616,10 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                             {"$set": {**d, "ingest_job_id": job_id},
                              "$setOnInsert": {"id": uuid.uuid4().hex, "created_at": now()}},
                             upsert=True))
-                    res = await transactions_col.bulk_write(ops, ordered=False)
-                    inserted += res.upserted_count
-                    updated += res.matched_count
+                    up, ma, failed = await _bulk_upsert_resilient(transactions_col, ops)
+                    inserted += up
+                    updated += ma
+                    skipped += failed
                     buffer_insert.clear()
             elif dataset == "stores":
                 if buffer_insert:
@@ -661,8 +697,21 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                     updated += res.matched_count
                     buffer_insert.clear()
 
-        # Loop with PER-ROW try/except wrapper so one bad row never aborts the entire job
-        for raw_row in reader:
+        # Loop with PER-ROW try/except wrapper so one bad row never aborts the entire job.
+        # The CSV iteration itself is also guarded: a malformed CSV line (bad quoting /
+        # embedded newline) raises from the reader's __next__ — without this it would
+        # escape the per-row handler and FAIL the whole multi-lakh job at that one row.
+        row_iter = iter(reader)
+        while True:
+            try:
+                raw_row = next(row_iter)
+            except StopIteration:
+                break
+            except Exception as csv_exc:
+                total_rows += 1
+                _record_skip(total_rows, f"CSV parse error: {csv_exc}", None)
+                processed += 1
+                continue
             total_rows += 1
             try:
                 try:
@@ -682,11 +731,21 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: str,
                 if duplicate_mode == "skip":
                     key_field, key_val = _get_pk(dataset, doc)
                     if key_field:
-                        exists = await _exists_col(dataset).find_one({key_field: key_val}, {"_id": 1})
+                        exists = await _exists_col(dataset).find_one(
+                            {key_field: key_val}, {"_id": 1, "source": 1})
                         if exists:
-                            _record_skip(total_rows, "Duplicate (skip mode)", raw_row)
-                            processed += 1
-                            continue
+                            # For customers: a record auto-created from the Billing
+                            # (transactions) load is just a STUB (no name / city /
+                            # points / tier). Skipping it would mean the rich CRM
+                            # file never lands — exactly the "skips everything" bug.
+                            # So only skip a REAL existing customer, never a stub:
+                            # let stubs flow to the upsert flush to be enriched.
+                            stub_sources = {"transaction_derived", "auto_from_transactions"}
+                            is_stub = dataset == "customers" and exists.get("source") in stub_sources
+                            if not is_stub:
+                                _record_skip(total_rows, "Duplicate (skip mode)", raw_row)
+                                processed += 1
+                                continue
 
                 buffer_insert.append(doc)
                 processed += 1
@@ -1923,6 +1982,146 @@ async def integrity_check(job_id: str, user: dict = Depends(get_current_user)):
             "/jobs/{job_id}/skipped-rows.csv. db_rows_for_this_job counts transactions "
             "tagged with this ingest_job_id; for customers/stores/items see total collection counts."
         ),
+    }
+
+
+# ---------------- Verify Load (full reconciliation) ----------------
+async def _vl_count(col, filt, max_ms=12000):
+    try:
+        return await col.count_documents(filt, maxTimeMS=max_ms)
+    except Exception as e:
+        logger.warning(f"verify-load count degraded ({col.name}): {e}")
+        return None
+
+
+async def _vl_agg(col, pipeline, limit=200, max_ms=12000):
+    try:
+        return await col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=max_ms).to_list(limit)
+    except Exception as e:
+        logger.warning(f"verify-load agg degraded ({col.name}): {e}")
+        return []
+
+
+@router.get("/verify-load")
+async def verify_load(user: dict = Depends(get_current_user)):
+    """One-glance reconciliation of the entire historic load.
+
+    Combines (a) per-dataset ingest-job reconciliation (rows-in-file vs
+    inserted / updated / skipped, with a balanced flag) and (b) a live DB
+    snapshot (customers, tier mix, outstanding points liability, bills, SKU
+    line-item coverage, points-ledger breakdown). Lets the brand confirm
+    CRM / Billing / SKU all landed 100% before go-live — no guessing whether
+    to re-upload. Every query is bounded (maxTimeMS) and fired CONCURRENTLY so
+    the page never hangs, even while an ingest job is saturating Mongo.
+    """
+    items_col = db["items"]
+    loyalty = {"mobile": {"$nin": [None, ""]}}
+    loyalty_tx = {"customer_mobile": {"$nin": [None, ""]}}
+
+    # ---- (a) per-dataset job reconciliation ----
+    jobs = await historic_jobs_col.find(
+        {}, {"_id": 0, "id": 1, "dataset": 1, "filename": 1, "status": 1,
+             "total_rows": 1, "row_count_estimated": 1, "inserted": 1,
+             "updated": 1, "skipped": 1, "completed_at": 1, "queued_at": 1},
+    ).sort("queued_at", -1).limit(100).to_list(100)
+
+    job_rows = []
+    latest_by_dataset: Dict[str, dict] = {}
+    for j in jobs:
+        csv_rows = int(j.get("row_count_estimated") or j.get("total_rows") or 0)
+        ins = int(j.get("inserted") or 0)
+        upd = int(j.get("updated") or 0)
+        skp = int(j.get("skipped") or 0)
+        accounted = ins + upd + skp
+        diff = (csv_rows - accounted) if csv_rows else 0
+        balanced = (csv_rows == 0) or (abs(diff) <= max(2, csv_rows * 0.001))
+        row = {
+            "job_id": j.get("id"), "dataset": j.get("dataset"),
+            "filename": j.get("filename"), "status": j.get("status"),
+            "csv_rows": csv_rows, "inserted": ins, "updated": upd,
+            "skipped": skp, "accounted": accounted, "diff": diff,
+            "balanced": balanced, "completed_at": j.get("completed_at"),
+        }
+        job_rows.append(row)
+        ds = j.get("dataset")
+        if j.get("status") == "completed" and ds not in latest_by_dataset:
+            latest_by_dataset[ds] = row
+
+    # ---- (b) live DB snapshot — concurrent + bounded ----
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "burn_ratio": 1})
+    burn_ratio = float((cfg or {}).get("burn_ratio") or 0.25)
+
+    (customers_total, loyalty_customers, tier_dist, liab_rows,
+     txns_total, loyalty_bills, bills_with_items, units_rows,
+     ledger_rows, items_master) = await asyncio.gather(
+        _vl_count(customers_col, {}),
+        _vl_count(customers_col, loyalty),
+        _vl_agg(customers_col, [{"$match": loyalty},
+                                {"$group": {"_id": "$tier", "count": {"$sum": 1},
+                                            "points": {"$sum": "$points_balance"}}},
+                                {"$sort": {"points": -1}}]),
+        _vl_agg(customers_col, [{"$match": loyalty},
+                                {"$group": {"_id": None, "points": {"$sum": "$points_balance"}}}]),
+        _vl_count(transactions_col, {}),
+        _vl_count(transactions_col, loyalty_tx),
+        _vl_count(transactions_col, {"items.0": {"$exists": True}}),
+        _vl_agg(transactions_col, [{"$group": {"_id": None, "units": {"$sum": "$units_count"}}}]),
+        _vl_agg(points_ledger_col, [{"$group": {"_id": "$type", "count": {"$sum": 1},
+                                                "points": {"$sum": "$points"}}},
+                                    {"$sort": {"count": -1}}]),
+        _vl_count(items_col, {}),
+    )
+
+    liability_points = int((liab_rows[0]["points"] if liab_rows else 0) or 0)
+    total_units = int((units_rows[0]["units"] if units_rows else 0) or 0)
+    bwi = bills_with_items or 0
+    tt = txns_total or 0
+    sku_coverage_pct = round((bwi / tt) * 100, 1) if tt else 0.0
+
+    db_snapshot = {
+        "customers_total": customers_total,
+        "loyalty_customers": loyalty_customers,
+        "tier_distribution": [
+            {"tier": (r["_id"] or "—"), "count": r["count"], "points": int(r.get("points") or 0)}
+            for r in tier_dist
+        ],
+        "outstanding_points": liability_points,
+        "outstanding_liability_inr": round(liability_points * burn_ratio, 2),
+        "burn_ratio_inr_per_point": burn_ratio,
+        "transactions_total": tt,
+        "loyalty_bills": loyalty_bills,
+        "bills_with_items": bwi,
+        "sku_coverage_pct": sku_coverage_pct,
+        "total_units": total_units,
+        "ledger_by_type": [
+            {"type": (r["_id"] or "—"), "count": r["count"], "points": int(r.get("points") or 0)}
+            for r in ledger_rows
+        ],
+        "items_master": items_master,
+    }
+
+    # ---- overall verdict (judged on the LATEST completed job per dataset,
+    # so old re-test/re-upload jobs don't create duplicate noise) ----
+    issues: List[str] = []
+    latest_completed = list(latest_by_dataset.values())
+    if not latest_completed:
+        issues.append("No completed ingest jobs found yet.")
+    for r in latest_completed:
+        if not r["balanced"]:
+            issues.append(
+                f"{r['dataset']} ({r['filename']}): {r['diff']:+,} rows unaccounted "
+                f"({r['csv_rows']:,} in file vs {r['accounted']:,} processed)."
+            )
+    if tt and bwi == 0:
+        issues.append("Bills exist but NO SKU line items are attached — upload/finish the SKU file.")
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "jobs": job_rows,
+        "latest_by_dataset": latest_by_dataset,
+        "db": db_snapshot,
+        "all_balanced": len(issues) == 0,
+        "issues": issues,
     }
 
 

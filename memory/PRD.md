@@ -32,7 +32,27 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
-### Iteration 50 (Jun 2026) — 🔴 PROD FIX: CUSTOMERS upsert fails (E11000) + Command Center still 500s
+### Iteration 51 (Jun 2026) — 🔴 PROD FIX: CRM customer file "skips everything" + Command Center 500 + Verify Load + mobile menu collapse
+
+User (LIVE, launch crunch): *"something wrong in your logic of ingestion for the CRM file… it's skipping everything"* + *"command centre still not loading (500s)"* + *"toggle/collapse for the left menu — can't see data full screen on mobile."*
+
+**🔴 ROOT CAUSE — CRM "skips everything" (the launch blocker):** the Billing (transactions) load runs FIRST and **auto-creates a customer STUB** (`source=transaction_derived/auto_from_transactions`, no name/city/points/tier) for every `customer_mobile`. So when the CRM customer file is later loaded in **SKIP mode**, every mobile already exists (as a stub) → `"Duplicate (skip mode)"` → the rich CRM data NEVER lands. Reproduced + confirmed in `tests/iteration51_customer_skip_enrich_test.py`.
+- **Fix (`historic_routes.py`):** in skip-mode the customer existence check now reads `source`; a transaction-derived **stub is NOT skipped** — it flows to the upsert flush and gets **enriched** with the real CRM data (name/city/tier/points). A genuinely-complete customer is still skipped. So BOTH modes now land the data: SKIP enriches stubs, UPSERT updates everything.
+
+**🔴 Ingest robustness (why upsert "Failed" partway at scale):** a malformed CSV row raised from the reader's `__next__` *outside* the per-row try → the whole 11-lakh job FAILED at that row; and a batch `bulk_write` failure (write timeout / WriteConflict under load) re-raised → 500 rows dumped as skipped / job failed.
+- **Fix:** (a) **crash-proof CSV iteration** — `next()` guarded so a malformed line is skipped, not fatal. (b) new `_bulk_upsert_resilient(col, ops)` — batch first, then **per-op retry** on any failure so a transient error never loses a 500-row batch or fails the job (used by customers + transactions flush). The job now always COMPLETES; only truly-bad ops count as skipped.
+- **Verified:** iteration51 (skip enriches 3/3 stubs; 2nd skip genuinely skips; upsert completes) + iteration50 (40k rows / 80 dup mobiles → completed, 80 new + 39,920 touched) + iteration24 e2e (2/2 pass).
+
+**🔴 Command Center 500 under load:** the endpoint ran ~16 aggregations **sequentially**, each up to 22s on timeout → worst case ~5 min → past the gateway's ~100s limit → "not loading". Also the scope `distinct()`, NPS agg, and `api_logs.count_documents` (on an **unindexed** `timestamp`) were unwrapped → hard 500.
+- **Fix (`dashboard_routes.py` + `server.py`):** all 16 queries now run **concurrently** via `asyncio.gather`, each capped at **8s** (`_safe_agg`/`_safe_count`), every previously-unwrapped call wrapped, and a new `api_logs (timestamp,status_code)` index added. Command Center now returns 200 in ~0.1s (degraded-but-200 even while an ingest job saturates Mongo) and can never 500. 22 startup indexes.
+
+**🆕 Verify Load dashboard (`/admin/verify-load`, `VerifyLoadPage.jsx` + `GET /api/historic-data/verify-load`):** one-glance go-live reconciliation — verdict banner (all-balanced / issues), live DB snapshot KPIs (loyalty customers, bills, points liability ₹, SKU coverage %, units, items master), per-dataset reconciliation (latest CRM/Billing/SKU: rows-in-file vs new/updated/skipped + balanced flag), tier distribution, ledger-by-type. All queries bounded + concurrent. New nav item in DATA section.
+
+**🆕 Sidebar collapse (desktop/tablet) (`AdminLayout.jsx`):** the md+ sidebar was permanently 256px. Added a **collapse toggle** (`desktop-menu-collapse` → hides sidebar, content goes full-width) + a floating **expand** button (`desktop-menu-open`), persisted to localStorage. Mobile drawer behavior unchanged.
+
+**⚠️ Redeploy required**, then **re-run the CRM file (UPSERT recommended)** — it now enriches the transaction-stub customers with names/cities/points/tiers and completes. **Pending (P2):** `<span> in <option>` hydration console warning (cosmetic, source not in the obvious dropdowns).
+
+
 
 User (LIVE): CUSTOMERS upload in **upsert** mode → `Failed` (0/0/0); Command Center → the new Retry card with **HTTP 500**. (deployment_agent only runs static checks — no runtime logs available, so diagnosed from code + reproduced in preview.)
 

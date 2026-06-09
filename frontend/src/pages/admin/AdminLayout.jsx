@@ -4,7 +4,8 @@ import {
   LayoutDashboard, TrendingUp, UserRound, Award, BarChart3, Store as StoreIcon, MessageCircle,
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
   Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound,
-  Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter, Cake
+  Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter, Cake, ClipboardCheck,
+  PanelLeftClose, PanelLeftOpen
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { BRAND } from "@/brand.config";
@@ -64,6 +65,7 @@ const SECTIONS = [
     items: [
       { to: "/admin/raw-reports", icon: BarChart3, label: "Raw Data Reports", testid: "nav-raw-reports" },
       { to: "/admin/historic-data", icon: Database, label: "Historical Upload", testid: "nav-historic-data" },
+      { to: "/admin/verify-load", icon: ClipboardCheck, label: "Verify Load", testid: "nav-verify-load" },
       { to: "/admin/reconciliation", icon: ShieldCheck, label: "Data Reconciliation", testid: "nav-reconciliation" },
     ],
   },
@@ -151,6 +153,16 @@ export default function AdminLayout() {
   });
   // Mobile sidebar drawer state — closed by default on small screens
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Desktop/tablet (md+) sidebar collapse — lets the user reclaim full-width for
+  // data tables. Persisted so the choice survives navigation / reload.
+  const [railCollapsed, setRailCollapsed] = useState(() => {
+    try { return localStorage.getItem("kazo_sidebar_collapsed") === "1"; } catch { return false; }
+  });
+  const toggleRail = () => setRailCollapsed((v) => {
+    const nv = !v;
+    try { localStorage.setItem("kazo_sidebar_collapsed", nv ? "1" : "0"); } catch { /* ignore */ }
+    return nv;
+  });
 
   // Close drawer whenever route changes (so a nav-click on mobile dismisses it)
   useEffect(() => { setDrawerOpen(false); }, [location.pathname]);
@@ -177,6 +189,19 @@ export default function AdminLayout() {
         <MenuIcon className="w-5 h-5" />
       </button>
 
+      {/* Desktop/tablet EXPAND button — only shown (md+) when the sidebar is collapsed */}
+      {railCollapsed && (
+        <button
+          type="button"
+          onClick={toggleRail}
+          className="hidden md:flex fixed top-3 left-3 z-40 w-10 h-10 rounded-full items-center justify-center bg-black/85 text-white shadow-lg backdrop-blur hover:scale-105 transition-transform"
+          aria-label="Open menu"
+          data-testid="desktop-menu-open"
+        >
+          <PanelLeftOpen className="w-5 h-5" />
+        </button>
+      )}
+
       {/* Backdrop — only when drawer is open on mobile */}
       {drawerOpen && (
         <button
@@ -192,6 +217,7 @@ export default function AdminLayout() {
         className={`admin-sidebar w-64 m-3 flex flex-col z-50 transition-transform duration-300
           md:relative md:translate-x-0
           fixed top-0 left-0 bottom-0 max-h-screen
+          ${railCollapsed ? "md:hidden" : ""}
           ${drawerOpen ? "translate-x-0" : "-translate-x-[110%] md:translate-x-0"}`}
         data-testid="admin-sidebar"
       >
@@ -212,6 +238,16 @@ export default function AdminLayout() {
             data-testid="mobile-menu-close"
           >
             <CloseIcon className="w-5 h-5" />
+          </button>
+          {/* Collapse button — desktop/tablet only (frees full-width for data) */}
+          <button
+            type="button"
+            onClick={toggleRail}
+            className="hidden md:flex text-white/60 hover:text-white"
+            aria-label="Collapse menu"
+            data-testid="desktop-menu-collapse"
+          >
+            <PanelLeftClose className="w-5 h-5" />
           </button>
         </div>
         <nav className="flex-1 py-3 overflow-y-auto">
