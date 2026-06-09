@@ -17,6 +17,7 @@ const CHANNELS = [
 const EVENTS = [
   { key: "none", label: "On-demand only" },
   { key: "otp", label: "OTP / verification" },
+  { key: "registration", label: "On registration / welcome" },
   { key: "purchase", label: "On purchase" },
   { key: "coupon_issued", label: "Coupon issued" },
   { key: "points_earned", label: "Points earned" },

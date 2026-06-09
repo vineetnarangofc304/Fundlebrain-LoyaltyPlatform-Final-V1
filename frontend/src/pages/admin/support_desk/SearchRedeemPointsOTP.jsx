@@ -3,6 +3,7 @@
    Mirrors newu.fundlezone.com /supportdesk/searchrdmptsdtl */
 import { useState } from "react";
 import api from "@/lib/api";
+import { fmtDateTime } from "@/lib/format";
 import { PageHeader } from "../_shared";
 import { MobileSearchBar, Pill } from "./_shared";
 import { Search, Calendar } from "lucide-react";
@@ -88,7 +89,7 @@ export default function SearchRedeemPointsOTP() {
                 <tbody>
                   {rows.map((r, i) => (
                     <tr key={r.otp_id || i} className="border-b border-black/5 hover:bg-amber-50/40">
-                      <td className="py-2 px-2 text-xs text-neutral-600">{(r.created_at || "").replace("T", " ").slice(0, 19)}</td>
+                      <td className="py-2 px-2 text-xs text-neutral-600">{fmtDateTime(r.created_at)}</td>
                       <td className="py-2 px-2 font-mono">{r.mobile}</td>
                       <td className="py-2 px-2 font-mono text-xs">{r.otp_id}</td>
                       <td className="py-2 px-2 font-mono">{r.bill_number || "—"}</td>

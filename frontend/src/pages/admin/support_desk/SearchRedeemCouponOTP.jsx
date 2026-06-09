@@ -1,6 +1,7 @@
 /* Search Redeem Coupon OTP — same pattern as SearchRedeemPointsOTP. */
 import { useState } from "react";
 import api from "@/lib/api";
+import { fmtDateTime } from "@/lib/format";
 import { PageHeader } from "../_shared";
 import { Pill } from "./_shared";
 import { Search } from "lucide-react";
@@ -85,7 +86,7 @@ export default function SearchRedeemCouponOTP() {
                 <tbody>
                   {rows.map((r, i) => (
                     <tr key={r.otp_id || i} className="border-b border-black/5 hover:bg-amber-50/40">
-                      <td className="py-2 px-2 text-xs text-neutral-600">{(r.created_at || "").replace("T", " ").slice(0, 19)}</td>
+                      <td className="py-2 px-2 text-xs text-neutral-600">{fmtDateTime(r.created_at)}</td>
                       <td className="py-2 px-2 font-mono">{r.mobile}</td>
                       <td className="py-2 px-2 font-mono text-xs">{r.otp_id}</td>
                       <td className="py-2 px-2 font-mono">{r.coupon_code || "—"}</td>

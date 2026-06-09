@@ -29,8 +29,8 @@ logger = logging.getLogger("kazo-fundle.communications")
 router = APIRouter(tags=["communications"])
 
 CHANNELS = {"sms", "whatsapp", "rcs"}
-EVENTS = {"none", "otp", "purchase", "coupon_issued", "points_earned", "tier_upgrade", "birthday",
-          "win_back", "abandoned_visit", "campaign_bulk"}
+EVENTS = {"none", "otp", "registration", "purchase", "coupon_issued", "points_earned",
+          "tier_upgrade", "birthday", "win_back", "abandoned_visit", "campaign_bulk"}
 
 
 # ---------------- Pydantic models ----------------

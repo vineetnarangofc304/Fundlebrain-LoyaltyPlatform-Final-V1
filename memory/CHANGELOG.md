@@ -5,6 +5,48 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-09 (cont.) — 🔴 POS earning/SMS gaps + OTP "Invalid" idempotency (iter 59)
+
+Preview-verified (`tests/iteration59_otp_idempotency_earn_diag_test.py` PASS + curl).
+ALL need a production **redeploy** to take effect.
+
+### 🔴 POS OTP "Invalid" at billing counter — ROOT CAUSE = non-idempotent verify
+`posRedeemPointOtpCheck` matched the OTP session with `verified:False`. First submit
+worked (200 + deduct), but ANY retry/double-submit (POS network retry, cashier re-tap,
+slow response) hit the now-`verified:True` session → `400 "Invalid OTP"`. api_logs showed
+a 200 immediately followed ~150ms later by a 400 for the same mobile.
+- **Fix (`pos_ewards_routes.py`):** match the session by mobile+otp+purpose REGARDLESS of
+  verified state; if it was already `redeemed`, return the SAME success (`already_redeemed:true`)
+  WITHOUT deducting again; atomically CLAIM the redemption (`find_one_and_update` on
+  `redeemed != true`) so concurrent duplicates can never double-deduct; only a genuinely
+  unknown OTP is still "Invalid". Same `verified:False` filter dropped from
+  `posCustomerOTPCheck` so customer-check retries don't false-fail.
+
+### 🔴 Earning shows 0 for new POS bills — added self-diagnosis (code earns correctly in preview)
+Earning math is correct (₹1000 → points in preview). Zero-point bills are caused by
+config/payload (earn switch off / min_bill / loyalty_flag / missing `amount`). posAddPoint
+now records an **`earn_skip_reason`** in the response AND the API Monitor log whenever a bill
+earns 0: `loyalty_flag_off` / `earn_paused` / `zero_base` (no amount/loyalty_gross_amount/
+net_amount sent) / `below_min_bill` / `computed_zero`. Lets the user see WHY on production
+without server access.
+
+### 🔴 Registration + post-transaction SMS not going
+- **Registration was NEVER wired:** `posAddCustomer` fired no event. Now a NEW member fires
+  `fire_event("registration", …)`. Added `"registration"` to backend `EVENTS` and to the
+  Templates UI event dropdown ("On registration / welcome").
+- **Post-transaction:** `posAddPoint` already fired `"purchase"` (works in preview — Karix
+  returns "Platform Accepted"). It now ALSO fires `"points_earned"` so the message goes out
+  regardless of which trigger the template was saved under.
+- Reminder surfaced to user: `fire_event` only fires templates whose **status == "active"**
+  (a "draft" template never sends); sender ID / DLT / api-key all read from saved Provider
+  Settings (no dummy/fallback used at send time).
+
+### OTP panel time → IST
+`SearchRedeemPointsOTP.jsx` + `SearchRedeemCouponOTP.jsx` rendered raw UTC `created_at`.
+Now use `fmtDateTime()` (Asia/Kolkata) → shows correct +05:30 India time.
+
+---
+
 ## 2026-06-09 (cont.) — Dashboards & reports fixed at production scale
 
 User report (full prod data loaded: ~1.1M customers, ~8.6L+ txns): raw reports all

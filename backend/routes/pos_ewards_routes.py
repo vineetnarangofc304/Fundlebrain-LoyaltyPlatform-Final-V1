@@ -645,7 +645,7 @@ async def pos_customer_otp_check(payload: Dict[str, Any], request: Request,
         return resp
 
     session = await pos_otp_col.find_one({
-        "mobile": mobile, "otp": otp, "purpose": "customer_check", "verified": False,
+        "mobile": mobile, "otp": otp, "purpose": "customer_check",
     }, {"_id": 0})
     test_bypass = ALLOW_TEST_OTP and otp == TEST_OTP
     if not session and not test_bypass:
@@ -761,6 +761,18 @@ async def pos_add_customer(payload: Dict[str, Any], request: Request,
         })
         await customers_col.insert_one(update)
         resp = _ok({"message": "Member successfully registered"})
+        # Welcome / registration SMS (best-effort, non-blocking — only on first
+        # registration). Fires every active template registered for the
+        # "registration" event_trigger; reads sender ID / DLT / api key from the
+        # configured Provider Settings (no dummy/fallback values).
+        try:
+            from routes.communications_routes import fire_event
+            _fire_and_forget(fire_event("registration", mobile, {
+                "name": name.split(" ")[0] or "there",
+                "mobile": mobile,
+            }))
+        except Exception:
+            pass
 
     await _log_api(endpoint=endpoint, method="POST", status=200,
                    ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
@@ -951,63 +963,75 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
-    if otp:
-        test_bypass = ALLOW_TEST_OTP and otp == TEST_OTP
-        if test_bypass:
-            # Test-OTP bypass — skip the random-OTP session lookup, expiry
-            # and parameter-tampering defenses. We DO still enforce:
-            #   • valid x-api-key + merchant_id + customer_key (already done)
-            #   • customer exists (already done above)
-            #   • sufficient points balance (enforced below)
-            session = None
-        else:
-            session = await pos_otp_col.find_one({
-                "mobile": mobile, "otp": otp, "purpose": "redeem_points", "verified": False,
-            }, {"_id": 0})
-            if not session:
-                resp = _err(400, "Invalid OTP.")
-                await _log_api(endpoint=endpoint, method="POST", status=400,
-                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                               bill_number=bill_number, error="invalid OTP",
-                               payload=payload, response=resp, api_key_label=cred.get("label"))
-                return resp
-            if session.get("expires_at", "") < _now_iso():
-                resp = _err(400, "OTP expired. Please request a new one.")
-                await _log_api(endpoint=endpoint, method="POST", status=400,
-                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                               bill_number=bill_number, error="OTP expired",
-                               payload=payload, response=resp, api_key_label=cred.get("label"))
-                return resp
+    session = None
+    test_bypass = ALLOW_TEST_OTP and otp == TEST_OTP
+    if otp and not test_bypass:
+        # Match the OTP session for this mobile+otp REGARDLESS of verified state, so a
+        # legitimate POS retry / double-submit (network retry, cashier re-tap, slow
+        # response) is handled idempotently instead of failing as "Invalid OTP" — the
+        # 2nd call would otherwise miss a now-verified session. Only a genuinely-unknown
+        # OTP value is treated as Invalid.
+        session = await pos_otp_col.find_one({
+            "mobile": mobile, "otp": otp, "purpose": "redeem_points",
+        }, {"_id": 0})
+        if not session:
+            resp = _err(400, "Invalid OTP.")
+            await _log_api(endpoint=endpoint, method="POST", status=400,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number, error="invalid OTP",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
 
-            # SECURITY: parameter-tampering defense — points must equal the value the OTP was issued for
-            snapshot = session.get("payload_snapshot") or {}
-            original_points = _parse_int(snapshot.get("points"))
-            if original_points and original_points != points_requested:
-                resp = _err(400,
-                             f"Redemption amount mismatch — OTP was issued for {original_points} "
-                             f"points but the request is for {points_requested} points. "
-                             f"Please re-initiate the redemption with the correct amount.")
-                await _log_api(endpoint=endpoint, method="POST", status=400,
-                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                               bill_number=bill_number,
-                               error=f"points tamper: otp={original_points} req={points_requested}",
-                               payload=payload, response=resp, api_key_label=cred.get("label"))
-                return resp
+        # IDEMPOTENCY: this OTP's redemption already completed (POS retry / double-tap).
+        # Return the SAME success WITHOUT deducting points again.
+        if session.get("redeemed"):
+            resp = _ok({
+                "points_value": str(session.get("redeemed_points", points_requested)),
+                "points_monetary_value": str(session.get(
+                    "redeemed_value", round(points_requested * burn_ratio, 2))),
+                "already_redeemed": True,
+            })
+            await _log_api(endpoint=endpoint, method="POST", status=200,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number, error="idempotent retry (already redeemed)",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
 
-            # Bill-number tampering defense (when both sides have a bill)
-            orig_bill = ((snapshot.get("transaction") or {}).get("number")
-                           or (snapshot.get("transaction") or {}).get("id") or "").strip()
-            if orig_bill and bill_number and orig_bill != bill_number:
-                resp = _err(400,
-                             "Bill number mismatch — OTP was issued for a different transaction.")
-                await _log_api(endpoint=endpoint, method="POST", status=400,
-                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                               bill_number=bill_number,
-                               error=f"bill tamper: otp={orig_bill} req={bill_number}",
-                               payload=payload, response=resp, api_key_label=cred.get("label"))
-                return resp
+        if session.get("expires_at", "") < _now_iso():
+            resp = _err(400, "OTP expired. Please request a new one.")
+            await _log_api(endpoint=endpoint, method="POST", status=400,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number, error="OTP expired",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
 
-            await pos_otp_col.update_one({"otp_id": session["otp_id"]}, {"$set": {"verified": True, "verified_at": _now_iso()}})
+        # SECURITY: parameter-tampering defense — points must equal the value the OTP was issued for
+        snapshot = session.get("payload_snapshot") or {}
+        original_points = _parse_int(snapshot.get("points"))
+        if original_points and original_points != points_requested:
+            resp = _err(400,
+                         f"Redemption amount mismatch — OTP was issued for {original_points} "
+                         f"points but the request is for {points_requested} points. "
+                         f"Please re-initiate the redemption with the correct amount.")
+            await _log_api(endpoint=endpoint, method="POST", status=400,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number,
+                           error=f"points tamper: otp={original_points} req={points_requested}",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
+
+        # Bill-number tampering defense (when both sides have a bill)
+        orig_bill = ((snapshot.get("transaction") or {}).get("number")
+                       or (snapshot.get("transaction") or {}).get("id") or "").strip()
+        if orig_bill and bill_number and orig_bill != bill_number:
+            resp = _err(400,
+                         "Bill number mismatch — OTP was issued for a different transaction.")
+            await _log_api(endpoint=endpoint, method="POST", status=400,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number,
+                           error=f"bill tamper: otp={orig_bill} req={bill_number}",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
 
     if int(cust.get("points_balance") or 0) < points_requested:
         resp = _err(400, "Customer does not have Sufficient Balance to Redeem")
@@ -1018,6 +1042,28 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         return resp
 
     points_value = round(points_requested * burn_ratio, 2)
+
+    # Atomically CLAIM the redemption for a real OTP session so two concurrent
+    # duplicate submissions can never both deduct points. The winner sets
+    # redeemed=True; any loser falls into the idempotent-success path below.
+    if session is not None:
+        claimed = await pos_otp_col.find_one_and_update(
+            {"otp_id": session["otp_id"], "redeemed": {"$ne": True}},
+            {"$set": {"verified": True, "verified_at": _now_iso(), "redeemed": True,
+                       "redeemed_points": points_requested, "redeemed_value": points_value}},
+        )
+        if not claimed:
+            resp = _ok({
+                "points_value": str(points_requested),
+                "points_monetary_value": str(points_value),
+                "already_redeemed": True,
+            })
+            await _log_api(endpoint=endpoint, method="POST", status=200,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number, error="idempotent race (already redeemed)",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
+
     await customers_col.update_one(
         {"id": cust["id"]},
         {"$inc": {"points_balance": -points_requested,
@@ -1150,9 +1196,23 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             break
 
     points_earned = 0
+    earn_skip_reason = None
     earn_paused, earn_pause_reason = _loyalty_paused(cfg, "earn", order_time)
-    if loyalty_flag and not earn_paused and loyalty_base >= min_bill_for_earn:
+    if not loyalty_flag:
+        earn_skip_reason = "loyalty_flag_off — POS sent loyalty_flag != 1"
+    elif earn_paused:
+        earn_skip_reason = f"earn_paused — {earn_pause_reason}"
+    elif loyalty_base <= 0:
+        earn_skip_reason = ("zero_base — POS bill 'amount' is 0 / not sent "
+                            "(no amount, loyalty_gross_amount or net_amount)")
+    elif loyalty_base < min_bill_for_earn:
+        earn_skip_reason = (f"below_min_bill — base {loyalty_base:.0f} < "
+                            f"min_bill_for_earn {min_bill_for_earn:.0f}")
+    else:
         points_earned = _compute_earn_points(loyalty_base, cfg, multiplier)
+        if points_earned <= 0:
+            earn_skip_reason = ("computed_zero — check earn_ratio / percent_of_spend "
+                                "in Loyalty Rules")
 
     redemption = txn.get("redemption") or {}
     points_redeemed = _parse_int(redemption.get("redeemed_points"))
@@ -1313,14 +1373,23 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
                 "created_at": _now_iso(),
             })
 
-    resp = _ok({"message": "Transaction details captured by Fundle successfully",
-                "order_id": txn_id, "points_earned": points_earned,
-                "new_balance": new_balance, "new_tier": new_tier})
+    resp_body = {"message": "Transaction details captured by Fundle successfully",
+                 "order_id": txn_id, "points_earned": points_earned,
+                 "new_balance": new_balance, "new_tier": new_tier}
+    # Surface WHY a bill earned 0 points so it is visible in the API Monitor
+    # (lets admins self-diagnose a misconfigured earn switch / min-bill / payload
+    # without server access).
+    if points_earned <= 0 and earn_skip_reason:
+        resp_body["earn_skip_reason"] = earn_skip_reason
+    resp = _ok(resp_body)
 
-    # Fire transactional comms (best-effort, non-blocking — never delays POS response)
+    # Fire transactional comms (best-effort, non-blocking — never delays POS response).
+    # BOTH the "purchase" and "points_earned" triggers fire so the post-transaction
+    # message goes out regardless of which event the template was configured under.
+    # Sender ID / DLT entity / API key all come from the saved Provider Settings.
     try:
         from routes.communications_routes import fire_event
-        _fire_and_forget(fire_event("purchase", mobile, {
+        comms_params = {
             "name": (cust.get("name") or "").split(" ")[0] or "there",
             "amount": f"{final_amount:,.0f}",
             "bill_no": bill_number,
@@ -1328,13 +1397,17 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "points_earned": points_earned,
             "points_balance": new_balance,
             "tier": new_tier,
-        }))
+        }
+        _fire_and_forget(fire_event("purchase", mobile, comms_params))
+        if points_earned > 0:
+            _fire_and_forget(fire_event("points_earned", mobile, comms_params))
     except Exception:
         pass
 
     await _log_api(endpoint=endpoint, method="POST", status=200,
                    ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
                    bill_number=bill_number, store_id=store_id,
+                   error=(earn_skip_reason if points_earned <= 0 else None),
                    payload=payload, response=resp, api_key_label=cred.get("label"),
                    actor_ip=request.client.host if request.client else None)
     return resp
