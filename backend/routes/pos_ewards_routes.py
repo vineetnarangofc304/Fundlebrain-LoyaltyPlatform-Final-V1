@@ -305,7 +305,13 @@ async def _get_or_create_store_from_payload(payload: Dict[str, Any], cred: Dict[
             return combo_match
         # Link to an existing store whose code already equals the customer_key and
         # backfill the POS combo so subsequent bills match path 1 directly.
+        # Try an exact match first (index-backed), then a case-insensitive match so
+        # a casing difference between the store master and the POS payload (e.g.
+        # "k00078" vs "K00078") never rejects an otherwise-valid bill.
         code_match = await stores_col.find_one({"code": customer_key}, {"_id": 0})
+        if not code_match:
+            code_match = await stores_col.find_one(
+                {"code": {"$regex": f"^{re.escape(customer_key)}$", "$options": "i"}}, {"_id": 0})
         if code_match:
             await stores_col.update_one(
                 {"id": code_match["id"]},

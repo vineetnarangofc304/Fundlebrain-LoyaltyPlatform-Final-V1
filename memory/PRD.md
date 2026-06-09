@@ -32,6 +32,18 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 55 (Jun 2026) — 🔴 LIVE-POS: store master upload path + POS store-code resolution
+
+User (PRODUCTION): a fresh POS bill was REJECTED ("Unknown store code") because store codes weren't provisioned; confused by TWO store-upload entry points.
+- **Canonical KAZO rule:** POS payload `customer_key` IS the store code; `_get_or_create_store_from_payload` matches it to a store's `code`, STRICT (rejects unprovisioned).
+- **Two upload paths clarified:** (a) **Historical Upload → "Stores" dataset** — upserts by `code`, keeps case, requires Name+City (canonical bulk master loader); (b) **Operations → Stores page → "Bulk upload"** (`/api/stores/bulk-upload`) — uppercases code, *skips* existing, needs only `code`. Recommended (a) for the master.
+- **Hardening (`pos_ewards_routes.py`):** POS code resolution now falls back to a **case-insensitive** match (k00078 vs K00078). Verified: exact ✓, CI ✓, unknown still 400 ✓.
+- **⚠️ ACTION:** upload Store Master via Historical Upload → Stores with `Store Code` = exact POS customer_key; redeploy for the CI safety net.
+
+### Iteration 54 (Jun 2026) — CRM registered-account store-code extraction + linking
+- `Registred Account` = `<STORECODE>@KAZO.com`. Mapper extracts `registered_store_code` (letter+digits like K00078; ignores system accounts crm.loyalty@/application@). Post-pass `_link_registered_stores_for_job` resolves code→store (auto-creates stub stores), sets `registered_store_id` + `home_store_id`. R2 (`_recompute_customer_aggregates`) now writes bill-derived store to `first_purchase_store_id` and only sets `home_store_id` when no registered store — so the **registered store is authoritative regardless of load order**. Verified `tests/iteration54_registered_store_test.py` + e2e.
+
+
 ### Iteration 53 (Jun 2026) — 🔴🔴 ROOT CAUSE: CRM ingest crawled "500 by 500" (COLLSCAN per upsert)
 
 User (PRODUCTION, upgraded Mongo to M20): *"CRM file loading 500 by 500 WHY… SKU jumped by lakhs… something wrong at your end."*
