@@ -32,6 +32,20 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 63 (Jun 2026) — 🔴 SMS delivery fix · Lost-Customer gate · Welcome bonus · Zero-Bill Visitor · Message Log
+Five client-requested changes (tested e2e — testing agent iteration_25.json: 100% backend + frontend, 0 issues; pytest iteration63 + iteration64 pass).
+
+**🔴 5. SMS delivery (root cause of "no SMS received"):** Karix/Kaleyra was returning `Statuscode=200 & Info=Platform Accepted` but messages were DLT-scrubbed (dropped) by Indian carriers because the **DLT Content Template ID was never transmitted**. Fix (`communications_routes.py send_sms_karix`): now reads the per-template `dlt_template_id` + `dlt_tm_id` (and global fallbacks `sms_dlt_template_id`/`sms_dlt_tm_id` from Provider Settings) and sends `dlt_template_id`/`dlt_tm_id`/`dlt_entity_id` to the gateway. Sends with NO DLT template id are logged as status `ok_no_dlt_template` (self-diagnosing). Added the DLT Content Template ID + Telemarketer ID fields to the SMS template editor (`TemplatesPage.jsx`) and Provider Settings (`ProviderSettingsPage.jsx`). ⚠️ **ACTION FOR CLIENT:** enter each DLT-approved template's Content Template ID on Templates → edit (or set a global default in Provider Settings), then redeploy.
+
+**🟠 4. SMS / Message Log page (new):** `MessageLogPage.jsx` at `/admin/communications/message-log` (nav under COMMUNICATIONS) → `GET /api/message-log` (now filterable by channel/status/mobile-trailing-digits/event). `_log` now records `bill_number`, `sender_id`, `dlt_template_id`, `trigger_source`. Every dispatch (SMS/WhatsApp/RCS) is logged with the raw provider response.
+
+**🔴 1. Valid-Indian-mobile gate → Lost Customers:** points/loyalty only for a valid Indian mobile (10 digits starting 6-9; `_is_valid_indian_mobile`). A bill with an invalid/missing mobile is a NON-LOYALTY "Lost Customer": recorded (`is_lost_customer=true`, `customer_mobile=null`, `raw_mobile` kept) for purchase analytics, but NO points, NO account, NO SMS, returns 200. `posAddCustomer` now rejects invalid Indian mobiles (400). Live Monitor: new KPI cards **Lost Cust.** + **Lost Purchase**, distinct fuchsia row + "Lost Cust." pill + struck-through attempted number.
+
+**🟠 2. Welcome bonus:** single GLOBAL `welcome_bonus` credited exactly ONCE when a customer joins (first bill in `posAddPoint` OR `posAddCustomer` registration), guarded by `welcome_bonus_given` + a `points_ledger` entry `reference_type='welcome'`. Never re-awarded on later bills/tier moves. Also removed the last hardcoded `"silver"` new-customer tier → `_derive_tier(0, cfg)` (lowest configured tier).
+
+**🟠 3. One-timer vs Zero-Bill:** `analytics_routes.py` lifecycle_split is now a 3-way `$switch` — `repeat` (≥2 bills), `one_timer` (exactly 1), `zero_bill` (0). `CustomerDashboard.jsx` shows a new **Zero-Bill Visitors** column. (Live verify: zero_bill=26 / one_timer=26 / repeat=10 — previously the 26 zero-bill were wrongly counted as one-timers.)
+
+
 ### Iteration 62 (Jun 2026) — 🟠 RECALC scoped to TODAY's LIVE-POS bills only
 User: *"RECALC should only give points to bills from today that came from Live POS, based on the rules configured."*
 
