@@ -302,17 +302,19 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
     if not cfg.get("sms_api_key") or not cfg.get("sms_endpoint"):
         await _log("sms", "config_missing", mobile, {}, None, template_id, event_trigger)
         return {"ok": False, "error": "SMS provider not configured"}
-    # Effective sender ID + DLT entity ID: a per-template override wins, otherwise
-    # fall back to the global Provider Settings (provider_config).
-    sender = cfg.get("sms_sender_id", "")
-    dlt_entity = cfg.get("sms_dlt_entity_id", "")
-    if template_id:
+    # Sender ID + DLT entity ID — the GLOBAL Provider Settings (provider_config) is the
+    # single source of truth (what the admin configured on the panel). A per-template
+    # value is ONLY used to fill a gap when the global is blank, so a stale sender baked
+    # into an old template can never override the current Provider Settings sender.
+    sender = (cfg.get("sms_sender_id") or "").strip()
+    dlt_entity = (cfg.get("sms_dlt_entity_id") or "").strip()
+    if template_id and (not sender or not dlt_entity):
         tpl = await templates_col.find_one(
             {"id": template_id}, {"_id": 0, "sender_id": 1, "dlt_entity_id": 1})
         if tpl:
-            if tpl.get("sender_id"):
+            if not sender and tpl.get("sender_id"):
                 sender = tpl["sender_id"]
-            if tpl.get("dlt_entity_id"):
+            if not dlt_entity and tpl.get("dlt_entity_id"):
                 dlt_entity = tpl["dlt_entity_id"]
     mob = _normalize_mobile(mobile)
     params = {

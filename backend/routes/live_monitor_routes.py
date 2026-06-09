@@ -370,7 +370,7 @@ async def recalc_points(
     samples: List[dict] = []
     async for t in transactions_col.find(fil, {"_id": 0}).limit(body.limit):
         scanned += 1
-        if str(t.get("loyalty_flag", "1")).strip().lower() in {"0", "false", "no"}:
+        if str(t.get("loyalty_flag", "1")).strip().lower() in {"0", "false", "no", "n", "off"}:
             continue
         base = float(t.get("loyalty_gross_amount") or t.get("amount")
                      or t.get("net_amount") or t.get("final_amount") or 0)

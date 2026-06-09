@@ -1196,9 +1196,11 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         })
         await customers_col.insert_one(customer_doc_update)
         cust = customer_doc_update
+        is_new_customer = True
     else:
         await customers_col.update_one({"mobile": mobile}, {"$set": customer_doc_update})
         cust = {**existing, **customer_doc_update}
+        is_new_customer = False
 
     # Amounts — KAZO canonical: `amount` is the PRE-TAX loyalty base; GST comes from
     # the taxes[] array.  Bill Amount (with tax) = amount + GST.
@@ -1210,7 +1212,10 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     net = _parse_float(txn.get("net_amount")) or amount
     final_amount = amount or net
     discount = _parse_float(txn.get("discount"))
-    loyalty_flag = str(txn.get("loyalty_flag", "1")).strip() in {"1", "true", "True"}
+    # loyalty_flag: earn UNLESS the POS explicitly disables it. Lenient on purpose so a
+    # truthy value the POS sends ("1", "true", "Y", "yes", 1, etc.) all earn; only an
+    # explicit negative ("0"/"false"/"no"/"off") suppresses earning.
+    loyalty_flag = str(txn.get("loyalty_flag", "1")).strip().lower() not in {"0", "false", "no", "n", "off"}
     # Points are earned on `amount` (pre-tax). Fall back to loyalty_gross_amount/net for
     # legacy payloads that don't send `amount`.
     loyalty_base = amount or _parse_float(txn.get("loyalty_gross_amount")) or net
@@ -1428,6 +1433,13 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "points_balance": new_balance,
             "tier": new_tier,
         }
+        # Auto-registration welcome SMS — only when THIS bill created the customer.
+        # Uses the front-end-configured "registration" template + sender (no fallback).
+        if is_new_customer:
+            _fire_and_forget(fire_event("registration", mobile, {
+                "name": (cust.get("name") or "").split(" ")[0] or "there",
+                "mobile": mobile,
+            }))
         _fire_and_forget(fire_event("purchase", mobile, comms_params))
         if points_earned > 0:
             _fire_and_forget(fire_event("points_earned", mobile, comms_params))
