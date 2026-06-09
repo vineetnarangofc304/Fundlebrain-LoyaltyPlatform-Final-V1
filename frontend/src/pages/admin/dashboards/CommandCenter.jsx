@@ -9,7 +9,7 @@
    - AI insight strip (cached 1 hr)
    - Every tile / row drills down via DrillDownModal
 */
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar } from "recharts";
 import api from "@/lib/api";
@@ -31,6 +31,8 @@ export default function CommandCenter() {
   const [filterOpts, setFilterOpts] = useState({ cities: [], stores: [] });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const inFlight = useRef(false);
   const [drill, setDrill] = useState(null);
 
   // Load filter options once
@@ -45,6 +47,8 @@ export default function CommandCenter() {
   }, [filterOpts.stores, city]);
 
   const load = async () => {
+    if (inFlight.current) return;   // don't stack concurrent loads (auto-refresh + clicks)
+    inFlight.current = true;
     setLoading(true);
     try {
       const params = { period };
@@ -57,8 +61,12 @@ export default function CommandCenter() {
       if (city && !storeId) params.city = city;
       const res = await api.get("/dashboard/command-center", { params });
       setData(res.data);
+      setError(null);
+    } catch (e) {
+      setError(e?.response?.data?.detail || e?.message || "Failed to load Command Center");
     } finally {
       setLoading(false);
+      inFlight.current = false;
     }
   };
 
@@ -96,8 +104,21 @@ export default function CommandCenter() {
     return null;
   }, [storeId, city, visibleStores]);
 
-  if (loading && !data) return <div className="p-10 text-neutral-500">Loading Command Center…</div>;
-  if (!data) return null;
+  if (loading && !data) return <div className="p-10 text-neutral-500" data-testid="cc-loading">Loading Command Center…</div>;
+  if (!data) return (
+    <div className="p-10" data-testid="cc-error">
+      <div className="max-w-lg mx-auto text-center border border-rose-200 bg-rose-50/60 p-8">
+        <AlertTriangle className="w-8 h-8 text-rose-600 mx-auto mb-3" />
+        <h3 className="font-display text-xl mb-1">Couldn’t load the Command Center</h3>
+        <p className="text-sm text-neutral-600 mb-4">
+          {error || "The request took too long while a large dataset is still being ingested. Your data is safe — please retry in a moment."}
+        </p>
+        <button className="k-btn k-btn-primary" onClick={load} disabled={loading} data-testid="cc-retry">
+          {loading ? "Retrying…" : "Retry"}
+        </button>
+      </div>
+    </div>
+  );
 
   const k = data.kpis;
   const cohortBars = [

@@ -32,6 +32,21 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 47 (Jun 2026) — 🔴 PROD FIX: Command Center "black screen" (frontend crash on API failure + heavy queries)
+
+User (LIVE, mid-load): *"command centre still not opening… black screen."* (a blank dark screen, not a spinner).
+
+**Root cause (two layers):**
+1. **Frontend crash → blank screen.** `CommandCenter.jsx::load()` had a `try/finally` with **no `catch`**. When `/dashboard/command-center` timed out (heavy all-time query while the DB was busy re-ingesting 1.1M customers), the call threw, `data` stayed `null`, and the component's `if (!data) return null` rendered **nothing** → black screen. The 30s auto-refresh + manual clicks then stacked more failing requests.
+2. **Backend queries that blow up at 787k+ bills.** The command-center endpoint (a) computed `customers: {$addToSet: "$customer_mobile"}` over the whole window and **never used it** (pure waste + group-memory risk), and (b) computed active customers via `transactions.distinct("customer_mobile")` (hard 16MB cap) followed by a `customers.count_documents({mobile: {$in: <huge array>}})` (O(n·m)). Both are fine at preview scale but time out at production scale.
+
+**Fix:**
+- **Frontend (`CommandCenter.jsx`):** `load()` now `catch`es errors → sets `error` and keeps any existing data; when there's no data it renders a **"Couldn't load… Retry"** card (`cc-error`/`cc-retry`) instead of a blank screen. Added an `inFlight` ref so auto-refresh + clicks never stack concurrent loads.
+- **Backend (`dashboard_routes.command_center`):** removed the unused `$addToSet`; replaced `distinct()+$in` with an index-backed `{$group:{_id:$customer_mobile}},{$count}` aggregation (+ `active = min(active, total)` invariant); added `allowDiskUse=True` + `maxTimeMS=25000` to all heavy aggregations so a slow query **fails fast** (→ Retry card) instead of hanging 100s → Cloudflare error.
+
+**Verified:** command-center 200 in ~0.2s; `active(23) ≤ total(59)`; full UI renders (KPIs, AI report, sparkline, cohorts) via Playwright. ⚠️ **Redeploy required.** Note: dashboards are *additionally* slow right now because the production DB is busy re-running the customers ingest + multiple SKU uploads — they'll be fast once that settles + this redeploy lands.
+
+
 ### Iteration 46 (Jun 2026) — 🔴 PROD FIX: dashboards "take a million years" / empty after the bulk load (missing indexes)
 
 User (LIVE, right after loading ~1.1M customers / 8.67L bills / ~10L SKU lines): *"empty dashboards taking million years to open.. some never open.. user goes on clicking many times.. urgent."*

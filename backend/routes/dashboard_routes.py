@@ -487,15 +487,14 @@ async def command_center(
                 ],
             }},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
-            "customers": {"$addToSet": "$customer_mobile"},
         }},
     ]
     prev_sales_pipe = [
         {"$match": _txn_match("bill_date", prev_start.isoformat(), lt=start.isoformat())},
         {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
-    cur = (await transactions_col.aggregate(cur_sales_pipe).to_list(1)) or [{}]
-    prev = (await transactions_col.aggregate(prev_sales_pipe).to_list(1)) or [{}]
+    cur = (await transactions_col.aggregate(cur_sales_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
+    prev = (await transactions_col.aggregate(prev_sales_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
     cur = cur[0] if cur else {}
     prev = prev[0] if prev else {}
     net = cur.get("net", 0) or 0
@@ -507,21 +506,22 @@ async def command_center(
     sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
     txn_delta = round(((txns - prev_txns) / prev_txns) * 100, 1) if prev_txns else None
 
-    # --- Active customers in window (transacted in the window AND in scope) ---
+    # --- Active customers in window (distinct loyalty mobiles that transacted) ---
+    # Count distinct customer_mobile via aggregation instead of distinct()+$in.
+    # distinct() has a hard 16MB cap and a huge $in count is O(n·m) — both blow
+    # up at 1M+ bills and were a primary cause of command-center timeouts / the
+    # blank screen. This stays index-backed and bounded.
     active_match = _txn_match("bill_date", start.isoformat())
-    # R4: mobile is identity. R5 loyalty filter is already in LOYALTY_TX_MATCH.
-    active_mobiles = await transactions_col.distinct("customer_mobile", active_match)
-    active_mobiles = [m for m in active_mobiles if m]
-    # CRITICAL: active must be a SUBSET of total. If a transaction has a mobile
-    # but no matching row in the customers master (orphan txn from CSV ingest),
-    # we exclude it from "active" to keep the math sane (active <= total always).
-    # The auto-backfill job will create the missing customer rows on next run.
-    if active_mobiles:
-        cust_match_for_active = _cust_match({"mobile": {"$in": active_mobiles}})
-        active = await customers_col.count_documents(cust_match_for_active)
-    else:
-        active = 0
-    total_customers = await customers_col.count_documents(_cust_match())
+    active_pipe = [
+        {"$match": active_match},
+        {"$group": {"_id": "$customer_mobile"}},
+        {"$count": "n"},
+    ]
+    active_rows = await transactions_col.aggregate(active_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)
+    active = int(active_rows[0]["n"]) if active_rows else 0
+    total_customers = await customers_col.count_documents(_cust_match(), maxTimeMS=25000)
+    # Invariant: active must never exceed total.
+    active = min(active, total_customers)
 
     # --- Repeat rate window (customers with >=2 txns in window) ---
     repeat_pipe = [
@@ -531,7 +531,7 @@ async def command_center(
                     "repeat": {"$sum": {"$cond": [{"$gte": ["$n", 2]}, 1, 0]}},
                     "unique": {"$sum": 1}}},
     ]
-    rr = (await transactions_col.aggregate(repeat_pipe).to_list(1)) or [{}]
+    rr = (await transactions_col.aggregate(repeat_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
     rr = rr[0] if rr else {}
     repeat_rate = round((rr.get("repeat", 0) / rr["unique"]) * 100, 1) if rr.get("unique") else 0
 
@@ -565,7 +565,7 @@ async def command_center(
         {"$match": _cust_match()},
         {"$group": {"_id": None, "points": {"$sum": "$points_balance"}}},
     ]
-    liab = (await customers_col.aggregate(liab_pipe).to_list(1)) or [{}]
+    liab = (await customers_col.aggregate(liab_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
     liab = liab[0] if liab else {}
     burn_ratio = 0.25
     outstanding_points = int(liab.get("points", 0) or 0)
@@ -599,7 +599,7 @@ async def command_center(
                     "txns": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    spark_rows = await transactions_col.aggregate(spark_pipe).to_list(2000)
+    spark_rows = await transactions_col.aggregate(spark_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(2000)
     sparkline = [{"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in spark_rows]
 
     # --- Alerts (live computed) ---
