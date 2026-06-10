@@ -5,6 +5,23 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-10 (cont.2) — Karix QueryStringReceiver exact param set + egress finding
+
+- Per client instruction, `send_sms_karix` now sends EXACTLY the KAZO Karix QueryStringReceiver
+  param set: `ver=1.0, key, encrpt=0, dest, send, dlt_entity_id, text`. Removed
+  `dlt_template_id` / `dlt_tm_id` from the outgoing request (kept in DB/UI). `dlt_entity_id`
+  is always included. NOT migrating to the JSON `JsonReceiver` API (client chose QueryString).
+  Karix response is logged to the Message Log for accept/reject visibility.
+- KEY (config-driven, already default): `8iRt9ytmxeyMgtpdMdOpMw==`.
+- EGRESS DIAGNOSIS (infra, not code): preview egress IP rotated across sessions
+  (34.16.56.64 → 35.225.230.28) — stable within a session, changes on restart/redeploy.
+  control_internet/google = 200 but Karix host = ConnectTimeout → host/IP-specific block
+  (Karix allow-list dropping the non-whitelisted, rotating egress IP). Resolution requires a
+  STATIC egress IP / CIDR from Emergent Support, then whitelist that at Karix. No code fix.
+
+---
+
+
 ## 2026-06-10 (cont) — Block points redemption on DISCOUNTED bills/items (iter 69)
 
 Client rule: redemption is allowed ONLY when discount is zero. If the POS sends any non-zero

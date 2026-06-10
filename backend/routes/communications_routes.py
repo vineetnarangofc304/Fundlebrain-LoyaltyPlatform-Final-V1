@@ -315,59 +315,46 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
     if not cfg.get("sms_api_key") or not cfg.get("sms_endpoint"):
         await _log("sms", "config_missing", mobile, {}, None, template_id, event_trigger, context)
         return {"ok": False, "error": "SMS provider not configured"}
-    # Sender ID + DLT IDs — all read from what the admin configured on the Communication
-    # screens (Provider Settings + the per-template DLT fields). Global Provider Settings is
-    # authoritative for Sender ID / Entity ID; the DLT *Content Template ID* is per-template
-    # (each DLT-approved template has its own). REQUIRED for delivery on Indian networks
-    # (TRAI DLT) — without it the operator silently drops the SMS even though Karix returns
-    # "Platform Accepted".
+    # Sender ID + DLT Entity ID — read from what the admin configured on the Communication
+    # screens (Provider Settings + the per-template fields). Global Provider Settings is
+    # authoritative for Sender ID / Entity ID; the per-template values take priority when set.
+    # NOTE: the KAZO Karix QueryStringReceiver account uses ONLY dlt_entity_id (no content
+    # template id is sent on this endpoint).
     sender = (cfg.get("sms_sender_id") or "").strip()
     dlt_entity = (cfg.get("sms_dlt_entity_id") or "").strip()
-    dlt_template = (cfg.get("sms_dlt_template_id") or "").strip()
-    dlt_tm = (cfg.get("sms_dlt_tm_id") or "").strip()
     if template_id:
         tpl = await templates_col.find_one(
             {"id": template_id},
-            {"_id": 0, "sender_id": 1, "dlt_entity_id": 1, "dlt_template_id": 1, "dlt_tm_id": 1})
+            {"_id": 0, "sender_id": 1, "dlt_entity_id": 1})
         if tpl:
             if not sender and tpl.get("sender_id"):
                 sender = tpl["sender_id"]
             if not dlt_entity and tpl.get("dlt_entity_id"):
                 dlt_entity = str(tpl["dlt_entity_id"]).strip()
-            # per-template DLT content template id / tm id take priority (each has its own)
-            if tpl.get("dlt_template_id"):
-                dlt_template = str(tpl["dlt_template_id"]).strip()
-            if tpl.get("dlt_tm_id"):
-                dlt_tm = str(tpl["dlt_tm_id"]).strip()
     mob = _normalize_mobile(mobile)
+    # Karix QueryStringReceiver — EXACT parameter set per the KAZO Karix account spec:
+    #   ver, key, encrpt, dest, send, dlt_entity_id, text
+    # (dlt_template_id / dlt_tm_id are intentionally NOT sent on this endpoint.)
     params = {
         "ver": "1.0",
         "key": cfg["sms_api_key"],
         "encrpt": "0",
         "dest": mob,
         "send": sender,
+        "dlt_entity_id": dlt_entity,
         "text": text,
     }
-    if dlt_entity:
-        params["dlt_entity_id"] = dlt_entity
-    if dlt_template:
-        params["dlt_template_id"] = dlt_template
-    if dlt_tm:
-        params["dlt_tm_id"] = dlt_tm
     try:
         async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.get(cfg["sms_endpoint"], params=params)
         ok = r.status_code == 200
         status = "ok" if ok else f"http_{r.status_code}"
-        # Self-diagnosing: a 200 with NO DLT content template id will be DLT-scrubbed
-        # (dropped) by the carrier — flag it so the Message Log shows the real cause.
-        if ok and not dlt_template:
-            status = "ok_no_dlt_template"
-        # Always record SOMETHING in the response (some non-200 bodies are empty).
+        # Always record what Karix returned (some non-200 bodies are empty) so the Message
+        # Log shows the real accept/reject + reason.
         resp_text = r.text or f"HTTP {r.status_code} (empty body)"
         await _log("sms", status, mob, params, resp_text, template_id, event_trigger, context)
         return {"ok": ok, "status_code": r.status_code, "response": r.text,
-                "dlt_template_id": dlt_template or None, "dlt_entity_id": dlt_entity or None}
+                "dlt_entity_id": dlt_entity or None}
     except Exception as e:
         # Capture the exception TYPE + endpoint so the Message Log is diagnostic even for
         # timeouts / connection errors whose str(e) is empty (e.g. egress blocked, bad URL).
