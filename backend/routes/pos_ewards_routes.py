@@ -297,6 +297,19 @@ def _gst_from_taxes(taxes: Any) -> float:
     return total
 
 
+def _redemption_discount(payload: Dict[str, Any]) -> float:
+    """Total discount on a redemption payload. KAZO RULE: points redemption is NOT allowed
+    on a discounted bill — block it whenever ANY discount is present. Sums the bill-level
+    `discount` and every line item's discount (the POS may send the key as `discount` or
+    `Discount`)."""
+    txn = payload.get("transaction") or {}
+    total = _parse_float(txn.get("discount")) + _parse_float(txn.get("Discount"))
+    for it in (txn.get("items") or []):
+        if isinstance(it, dict):
+            total += _parse_float(it.get("discount")) + _parse_float(it.get("Discount"))
+    return total
+
+
 def _compute_earn_points(base: float, cfg: Dict[str, Any], multiplier: float = 1.0) -> int:
     """Points earned for a loyalty `base` amount.
 
@@ -978,6 +991,17 @@ async def pos_redeem_point_request(payload: Dict[str, Any], request: Request,
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
+    # KAZO RULE: no points redemption on a DISCOUNTED bill/item. If the POS sends any
+    # non-zero discount (bill-level `discount` or any line item's discount), reject the
+    # redemption up-front so no OTP is ever issued.
+    if _redemption_discount(payload) > 0:
+        resp = _err(400, "Redemption is not allowed on discounted items.")
+        await _log_api(endpoint=endpoint, method="POST", status=400,
+                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                       bill_number=bill_number, error="redemption blocked: discounted bill/item",
+                       payload=payload, response=resp, api_key_label=cred.get("label"))
+        return resp
+
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
     burn_paused, burn_reason = _loyalty_paused(cfg, "burn")
     if burn_paused:
@@ -1103,6 +1127,16 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
                        bill_number=bill_number, payload=payload, response=resp)
+        return resp
+
+    # KAZO RULE: no points redemption on a DISCOUNTED bill/item (defense-in-depth — also
+    # enforced at posRedeemPointRequest before the OTP is issued).
+    if _redemption_discount(payload) > 0:
+        resp = _err(400, "Redemption is not allowed on discounted items.")
+        await _log_api(endpoint=endpoint, method="POST", status=400,
+                       ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                       bill_number=bill_number, error="redemption blocked: discounted bill/item",
+                       payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}

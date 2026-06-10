@@ -5,6 +5,21 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-10 (cont) — Block points redemption on DISCOUNTED bills/items (iter 69)
+
+Client rule: redemption is allowed ONLY when discount is zero. If the POS sends any non-zero
+discount (bill-level `discount` or any line item's `discount`/`Discount`), reject with
+"Redemption is not allowed on discounted items."
+- New helper `_redemption_discount(payload)` sums bill + item discounts (handles both
+  `discount` and `Discount` key casings).
+- Enforced at `posRedeemPointRequest` (before any OTP is issued) AND `posRedeemPointOtpCheck`
+  (defense-in-depth).
+- Test: `iteration69_redeem_discount_block_test.py` — PASS.
+- **ACTION: redeploy to production to go live.**
+
+---
+
+
 ## 2026-06-10 — posRedeemPointOtpCheck: ignore `points` on verify + validate LAST OTP (iter 68)
 
 Client hit a live 400 "Redemption amount mismatch — OTP was issued for 250…" because the
