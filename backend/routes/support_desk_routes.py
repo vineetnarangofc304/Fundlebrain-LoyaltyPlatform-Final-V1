@@ -68,10 +68,8 @@ async def search_redeem_points_otp(
 
     cursor = pos_otp_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(limit)
     rows = await cursor.to_list(limit)
-    # Mask OTP in display by default
-    for r in rows:
-        if r.get("otp"):
-            r["otp_masked"] = "******"
+    # OTP value is intentionally surfaced (not masked): with SMS delivery unreliable,
+    # support staff read the OTP off this screen to complete a MANUAL redemption.
     return {"total": len(rows), "rows": rows}
 
 
@@ -99,9 +97,7 @@ async def search_redeem_coupon_otp(
 
     cursor = pos_otp_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(limit)
     rows = await cursor.to_list(limit)
-    for r in rows:
-        if r.get("otp"):
-            r["otp_masked"] = "******"
+    # OTP value is intentionally surfaced (not masked) for manual coupon redemption.
     return {"total": len(rows), "rows": rows}
 
 

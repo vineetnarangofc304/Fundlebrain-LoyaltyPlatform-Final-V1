@@ -78,7 +78,7 @@ export default function SearchRedeemCouponOTP() {
                   <tr>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">When</th>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Mobile</th>
-                    <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">OTP ID</th>
+                    <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">OTP</th>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Coupon</th>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Status</th>
                   </tr>
@@ -88,7 +88,7 @@ export default function SearchRedeemCouponOTP() {
                     <tr key={r.otp_id || i} className="border-b border-black/5 hover:bg-amber-50/40">
                       <td className="py-2 px-2 text-xs text-neutral-600">{fmtDateTime(r.created_at)}</td>
                       <td className="py-2 px-2 font-mono">{r.mobile}</td>
-                      <td className="py-2 px-2 font-mono text-xs">{r.otp_id}</td>
+                      <td className="py-2 px-2 font-mono text-base font-bold kazo-text-burgundy tracking-widest" data-testid="sd-rco-otp">{r.otp || "—"}</td>
                       <td className="py-2 px-2 font-mono">{r.coupon_code || "—"}</td>
                       <td className="py-2 px-2">
                         {r.verified ? <Pill tone="success">Verified</Pill> : <Pill tone="warning">Pending</Pill>}

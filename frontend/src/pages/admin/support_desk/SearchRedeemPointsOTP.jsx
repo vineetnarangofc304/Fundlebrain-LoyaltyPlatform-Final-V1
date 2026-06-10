@@ -80,7 +80,7 @@ export default function SearchRedeemPointsOTP() {
                   <tr>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">When</th>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Mobile</th>
-                    <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">OTP ID</th>
+                    <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">OTP</th>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Bill</th>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Points</th>
                     <th className="py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500">Status</th>
@@ -91,7 +91,7 @@ export default function SearchRedeemPointsOTP() {
                     <tr key={r.otp_id || i} className="border-b border-black/5 hover:bg-amber-50/40">
                       <td className="py-2 px-2 text-xs text-neutral-600">{fmtDateTime(r.created_at)}</td>
                       <td className="py-2 px-2 font-mono">{r.mobile}</td>
-                      <td className="py-2 px-2 font-mono text-xs">{r.otp_id}</td>
+                      <td className="py-2 px-2 font-mono text-base font-bold kazo-text-burgundy tracking-widest" data-testid="sd-rpo-otp">{r.otp || "—"}</td>
                       <td className="py-2 px-2 font-mono">{r.bill_number || "—"}</td>
                       <td className="py-2 px-2 font-mono text-right">{r.points ?? "—"}</td>
                       <td className="py-2 px-2">
