@@ -5,6 +5,25 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-10 — posRedeemPointOtpCheck: ignore `points` on verify + validate LAST OTP (iter 68)
+
+Client hit a live 400 "Redemption amount mismatch — OTP was issued for 250…" because the
+eWards POS sends `points: "0"` on `posRedeemPointOtpCheck` (the amount is fixed earlier at
+`posRedeemPointRequest`). Two changes per client instruction:
+- **Stopped checking the `points` field on verify.** The authoritative redemption amount is
+  now taken from the OTP session's `payload_snapshot.points` (the amount the OTP was issued
+  for); the `points` value sent on the verify call is ignored.
+- **Validate the LAST OTP.** Verify now fetches the MOST RECENT redeem OTP for the mobile and
+  requires the submitted value to equal it; once a newer OTP is issued, older OTP values are
+  rejected as "Invalid OTP."
+- Test: `iteration68_redeem_verify_ignore_points_last_otp_test.py` — PASS (iter66/67 still PASS).
+- Also (per client): Support Desk "Search Redeem Points/Coupon OTP" now shows the OTP value
+  (the `otp_demo`) instead of the Redeem ID, for manual redemption while SMS is unreliable.
+- **ACTION: redeploy to production to go live.**
+
+---
+
+
 ## 2026-06-09 (cont.3) — 🔴→🟢 FIXED recurring "Invalid OTP" on POS redemption (iter 67)
 
 **Root cause (the real "configuration disconnect"):** there were TWO separate POS

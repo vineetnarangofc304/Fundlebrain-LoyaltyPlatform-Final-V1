@@ -1127,11 +1127,15 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         # 2nd call would otherwise miss a now-verified session. Only a genuinely-unknown
         # OTP value is treated as Invalid.
         mob_key = _mobile_key(mobile)
+        # VALIDATE AGAINST THE LAST OTP: take the most recently-issued redeem OTP for this
+        # mobile and require the submitted value to match it. Once a newer OTP is issued,
+        # older ones are no longer accepted. The `points` field on this call is ignored
+        # (see below) — the redemption amount comes from the OTP, not this request.
         session = await pos_otp_col.find_one({
-            "otp": otp, "purpose": "redeem_points",
+            "purpose": "redeem_points",
             "$or": [{"mobile_key": mob_key}, {"mobile": mobile}],
         }, {"_id": 0}, sort=[("created_at", -1)])
-        if not session:
+        if not session or session.get("otp") != otp:
             reason = await _otp_failure_reason(mobile, mob_key, otp, "redeem_points")
             resp = _err(400, "Invalid OTP.")
             await _log_api(endpoint=endpoint, method="POST", status=400,
@@ -1163,20 +1167,14 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
                            payload=payload, response=resp, api_key_label=cred.get("label"))
             return resp
 
-        # SECURITY: parameter-tampering defense — points must equal the value the OTP was issued for
+        # POINTS: do NOT validate the `points` field on this verify call. The eWards POS
+        # sends points=0 here because the redemption amount was already fixed at
+        # posRedeemPointRequest. The authoritative amount is what the OTP was ISSUED for
+        # (snapshot.points) — use that for the actual deduction.
         snapshot = session.get("payload_snapshot") or {}
         original_points = _parse_int(snapshot.get("points"))
-        if original_points and original_points != points_requested:
-            resp = _err(400,
-                         f"Redemption amount mismatch — OTP was issued for {original_points} "
-                         f"points but the request is for {points_requested} points. "
-                         f"Please re-initiate the redemption with the correct amount.")
-            await _log_api(endpoint=endpoint, method="POST", status=400,
-                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number,
-                           error=f"points tamper: otp={original_points} req={points_requested}",
-                           payload=payload, response=resp, api_key_label=cred.get("label"))
-            return resp
+        if original_points > 0:
+            points_requested = original_points
 
         # Bill-number tampering defense (when both sides have a bill)
         orig_bill = ((snapshot.get("transaction") or {}).get("number")
