@@ -1,12 +1,17 @@
 """Additional drill-down dashboards and entity-level detail views."""
 from datetime import datetime, timezone, timedelta
+import logging
 from typing import Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pymongo.errors import PyMongoError
 from database import transactions_col, customers_col, stores_col, campaigns_col, points_ledger_col, nps_col, coupons_col, coupon_redemptions_col
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
+from routes._db_timeout import db_deadline
 
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+logger = logging.getLogger("kazo-fundle.analytics")
+
+router = APIRouter(prefix="/analytics", tags=["analytics"], dependencies=[Depends(db_deadline)])
 
 
 def _start(period_days: int):
@@ -129,138 +134,111 @@ async def customer_dashboard(
         {"$group": {"_id": {"$substr": ["$first_purchase_at", 0, 10]}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    new_cust = await customers_col.aggregate(new_pipe, allowDiskUse=True).to_list(120)
+    try:
+        new_cust = await customers_col.aggregate(new_pipe, allowDiskUse=True).to_list(120)
+    except PyMongoError as e:
+        logger.warning(f"customer-dashboard new_pipe timed out: {e}")
+        new_cust = []
 
-    # Churn risk distribution (loyalty members only)
-    churn_pipe = [{"$match": {"mobile": {"$nin": [None, ""]}}},
-                   {"$group": {"_id": "$churn_risk", "count": {"$sum": 1}}}]
-    churn = await customers_col.aggregate(churn_pipe, allowDiskUse=True).to_list(10)
-
-    # Visit frequency buckets (loyalty members only — R3: by actual bill count)
-    freq_pipe = [
-        {"$match": {"mobile": {"$nin": [None, ""]}}},
-        {"$project": {
-            "bucket": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$eq": ["$visit_count", 1]}, "then": "1 (one-time)"},
-                        {"case": {"$lte": ["$visit_count", 3]}, "then": "2-3"},
-                        {"case": {"$lte": ["$visit_count", 6]}, "then": "4-6"},
-                        {"case": {"$lte": ["$visit_count", 12]}, "then": "7-12"},
-                    ],
-                    "default": "13+",
-                },
-            },
-        }},
-        {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
-    ]
-    freq = await customers_col.aggregate(freq_pipe, allowDiskUse=True).to_list(10)
-
-    # Top spending customers (loyalty members only)
+    # ---- Top spenders: cheap & index-backed (ix_cust_lifetime_spend), so keep it as its
+    # own tiny query (reads ~10 docs via the index). ----
     top_pipe = [
         {"$match": {"mobile": {"$nin": [None, ""]}}},
         {"$sort": {"lifetime_spend": -1}}, {"$limit": 10},
         {"$project": {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1, "lifetime_spend": 1, "visit_count": 1}},
     ]
-    top = await customers_col.aggregate(top_pipe, allowDiskUse=True).to_list(10)
 
-    # City distribution (loyalty members only)
-    city_pipe = [
-        {"$match": {"mobile": {"$nin": [None, ""]}}},
-        {"$group": {"_id": "$city", "count": {"$sum": 1}, "spend": {"$sum": "$lifetime_spend"}}},
-        {"$sort": {"spend": -1}}, {"$limit": 15},
-    ]
-    city = await customers_col.aggregate(city_pipe, allowDiskUse=True).to_list(20)
+    # ---- Everything else is a full-collection bucketing pass over the SAME loyalty members.
+    # Running them as 7 separate aggregations meant 7 collection scans and blew past the 10s
+    # server time limit on production-scale Atlas data (MaxTimeMSExpired). Collapse them into
+    # ONE $facet so the collection is scanned a single time. ----
+    _date_match = {"last_visit_at": loyalty_q["last_visit_at"]} if "last_visit_at" in loyalty_q else {}
+    _recency_switch = {"$switch": {"branches": [
+        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=7)).isoformat()]}, "then": "0-7d"},
+        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=30)).isoformat()]}, "then": "8-30d"},
+        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=90)).isoformat()]}, "then": "31-90d"},
+        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=180)).isoformat()]}, "then": "91-180d"},
+        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=365)).isoformat()]}, "then": "181-365d"},
+    ], "default": "365d+"}}
+    _facet = {
+        "churn": [{"$group": {"_id": "$churn_risk", "count": {"$sum": 1}}}],
+        "freq": [
+            {"$project": {"bucket": {"$switch": {"branches": [
+                {"case": {"$eq": ["$visit_count", 1]}, "then": "1 (one-time)"},
+                {"case": {"$lte": ["$visit_count", 3]}, "then": "2-3"},
+                {"case": {"$lte": ["$visit_count", 6]}, "then": "4-6"},
+                {"case": {"$lte": ["$visit_count", 12]}, "then": "7-12"},
+            ], "default": "13+"}}}},
+            {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
+        ],
+        "city": [
+            {"$group": {"_id": "$city", "count": {"$sum": 1}, "spend": {"$sum": "$lifetime_spend"}}},
+            {"$sort": {"spend": -1}}, {"$limit": 15},
+        ],
+        "health": [
+            *([{"$match": _date_match}] if _date_match else []),
+            {"$project": {"bucket": {"$switch": {"branches": [
+                {"case": {"$eq": [{"$ifNull": ["$last_visit_at", None]}, None]}, "then": "Never transacted"},
+                {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=30)).isoformat()]}, "then": "Healthy"},
+                {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=90)).isoformat()]}, "then": "Slipping"},
+                {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=180)).isoformat()]}, "then": "At Risk"},
+            ], "default": "Lost"}}}},
+            {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
+        ],
+        "recency": [
+            {"$match": {"last_visit_at": {"$ne": None}}},
+            {"$project": {"bucket": _recency_switch}},
+            {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
+        ],
+        "onetimer": [
+            {"$match": {**_date_match, "visit_count": 1, "last_visit_at": {"$ne": None}}},
+            {"$project": {"bucket": _recency_switch}},
+            {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
+        ],
+        "lifecycle": [
+            *([{"$match": _date_match}] if _date_match else []),
+            {"$group": {
+                "_id": {"$switch": {"branches": [
+                    {"case": {"$gte": [{"$ifNull": ["$visit_count", 0]}, 2]}, "then": "repeat"},
+                    {"case": {"$eq": [{"$ifNull": ["$visit_count", 0]}, 1]}, "then": "one_timer"},
+                ], "default": "zero_bill"}},
+                "count": {"$sum": 1},
+                "lifetime_spend": {"$sum": "$lifetime_spend"},
+            }},
+        ],
+    }
+    facet_pipe = [{"$match": {"mobile": {"$nin": [None, ""]}}}, {"$facet": _facet}]
 
-    # Customer Health Distribution (R6 — bucket by RECENCY of last bill)
-    # Healthy: last bill within 30 days · Slipping: 31-90 · At Risk: 91-180 · Lost: > 180
-    health_pipe = [
-        {"$match": loyalty_q},
-        {"$project": {
-            "bucket": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$eq": [{"$ifNull": ["$last_visit_at", None]}, None]}, "then": "Never transacted"},
-                        {"case": {"$gte": ["$last_visit_at",
-                                              (now - timedelta(days=30)).isoformat()]}, "then": "Healthy"},
-                        {"case": {"$gte": ["$last_visit_at",
-                                              (now - timedelta(days=90)).isoformat()]}, "then": "Slipping"},
-                        {"case": {"$gte": ["$last_visit_at",
-                                              (now - timedelta(days=180)).isoformat()]}, "then": "At Risk"},
-                    ],
-                    "default": "Lost",
-                },
-            },
-        }},
-        {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
-    ]
-    health_rows = await customers_col.aggregate(health_pipe, allowDiskUse=True).to_list(10)
+    # Resilient: if a query still exceeds the server time limit on an extreme dataset, degrade
+    # to empty buckets (HTTP 200) rather than 500-ing the whole dashboard.
+    try:
+        top = await customers_col.aggregate(top_pipe, allowDiskUse=True).to_list(10)
+    except PyMongoError as e:
+        logger.warning(f"customer-dashboard top_pipe timed out: {e}")
+        top = []
+    try:
+        _fr = await customers_col.aggregate(facet_pipe, allowDiskUse=True).to_list(1)
+        facet = _fr[0] if _fr else {}
+    except PyMongoError as e:
+        logger.warning(f"customer-dashboard facet timed out: {e}")
+        facet = {}
+
+    churn = facet.get("churn", [])
+    freq = facet.get("freq", [])
+    city = facet.get("city", [])
+
     HEALTH_ORDER = ["Healthy", "Slipping", "At Risk", "Lost", "Never transacted"]
-    health_map = {r["_id"]: r["count"] for r in health_rows}
+    health_map = {r["_id"]: r["count"] for r in facet.get("health", [])}
     health_distribution = [{"bucket": b, "count": health_map.get(b, 0)} for b in HEALTH_ORDER]
 
-    # Recency histogram (all loyalty customers) — days since last bill
-    recency_pipe = [
-        {"$match": {"mobile": {"$nin": [None, ""]}, "last_visit_at": {"$ne": None}}},
-        {"$project": {
-            "bucket": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=7)).isoformat()]}, "then": "0-7d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=30)).isoformat()]}, "then": "8-30d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=90)).isoformat()]}, "then": "31-90d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=180)).isoformat()]}, "then": "91-180d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=365)).isoformat()]}, "then": "181-365d"},
-                    ],
-                    "default": "365d+",
-                },
-            },
-        }},
-        {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
-    ]
-    rec_rows = await customers_col.aggregate(recency_pipe, allowDiskUse=True).to_list(10)
     REC_ORDER = ["0-7d", "8-30d", "31-90d", "91-180d", "181-365d", "365d+"]
-    rec_map = {r["_id"]: r["count"] for r in rec_rows}
+    rec_map = {r["_id"]: r["count"] for r in facet.get("recency", [])}
     recency_distribution = [{"bucket": b, "count": rec_map.get(b, 0)} for b in REC_ORDER]
 
-    # One-timer recency histogram (visit_count = 1 only) — addresses #22 in docx
-    onetimer_pipe = [
-        {"$match": {**loyalty_q, "visit_count": 1, "last_visit_at": {"$ne": None}}},
-        {"$project": {
-            "bucket": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=7)).isoformat()]}, "then": "0-7d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=30)).isoformat()]}, "then": "8-30d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=90)).isoformat()]}, "then": "31-90d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=180)).isoformat()]}, "then": "91-180d"},
-                        {"case": {"$gte": ["$last_visit_at", (now - timedelta(days=365)).isoformat()]}, "then": "181-365d"},
-                    ],
-                    "default": "365d+",
-                },
-            },
-        }},
-        {"$group": {"_id": "$bucket", "count": {"$sum": 1}}},
-    ]
-    ot_rows = await customers_col.aggregate(onetimer_pipe, allowDiskUse=True).to_list(10)
-    ot_map = {r["_id"]: r["count"] for r in ot_rows}
+    ot_map = {r["_id"]: r["count"] for r in facet.get("onetimer", [])}
     one_timer_recency_distribution = [{"bucket": b, "count": ot_map.get(b, 0)} for b in REC_ORDER]
 
-    # Lifecycle split — Zero-Bill Visitor (0 bills) vs One-Timer (exactly 1 bill) vs Repeat
-    # (2+). Canonical: a customer with NO bills is NOT a one-timer.
-    lifecycle_pipe = [
-        {"$match": loyalty_q},
-        {"$group": {
-            "_id": {"$switch": {"branches": [
-                {"case": {"$gte": [{"$ifNull": ["$visit_count", 0]}, 2]}, "then": "repeat"},
-                {"case": {"$eq": [{"$ifNull": ["$visit_count", 0]}, 1]}, "then": "one_timer"},
-            ], "default": "zero_bill"}},
-            "count": {"$sum": 1},
-            "lifetime_spend": {"$sum": "$lifetime_spend"},
-        }},
-    ]
-    life_rows = await customers_col.aggregate(lifecycle_pipe, allowDiskUse=True).to_list(5)
-    life_map = {r["_id"]: r for r in life_rows}
+    life_map = {r["_id"]: r for r in facet.get("lifecycle", [])}
     lifecycle_split = {
         "zero_bill": {
             "count": life_map.get("zero_bill", {}).get("count", 0),

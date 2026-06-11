@@ -9,10 +9,11 @@ from database import (
 )
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
+from routes._db_timeout import db_deadline
 import logging
 
 logger = logging.getLogger("kazo-fundle")
-router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+router = APIRouter(prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(db_deadline)])
 
 # ── Command Center response cache ──────────────────────────────────────────
 # The all-time ("period=all") view scans the full transactions collection

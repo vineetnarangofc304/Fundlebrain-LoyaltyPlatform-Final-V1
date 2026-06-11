@@ -5,6 +5,28 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-11 — FIX production deployment MaxTimeMSExpired on dashboards (iter 70)
+
+Production Atlas connection string uses an aggressive `timeoutMS=10000`. The customer-dashboard
+ran 9 sequential full-collection-scan aggregations on `customers` and blew past 10s →
+`pymongo.errors.ExecutionTimeout` (MaxTimeMSExpired, code 50), 500-ing the endpoint
+(`analytics_routes.py:221` recency_pipe). Fixes (code only, no infra):
+- **$facet consolidation**: the 7 heavy bucketing aggregations (churn/freq/city/health/
+  recency/onetimer/lifecycle) collapsed into ONE `$facet` = a single collection scan instead
+  of seven. `top` (lifetime_spend index) and `new` (first_purchase_at index) kept as cheap
+  separate queries. Each wrapped in try/except `PyMongoError` → degrades to empty buckets
+  (HTTP 200) instead of 500.
+- **`db_deadline` dependency** (`routes/_db_timeout.py`): `pymongo.timeout(45)` attached to the
+  analytics + dashboard routers, overriding the aggressive client `timeoutMS` for heavy
+  endpoints. VERIFIED pymongo.timeout() propagates through Motor 3.3.1 (timeoutMS=1 → raises;
+  with override → completes).
+- deployment_agent: PASS (no hardcoded env/secrets/ports; MONGO_URL/DB_NAME env-only).
+- Tests: `iteration70_dashboard_timeout_test.py` — PASS. customer/sales/kpis dashboards all 200.
+- **ACTION: redeploy to production.**
+
+---
+
+
 ## 2026-06-10 (cont.4) — SMS intermittent ConnectTimeout: safe retry mitigation
 
 Production Message Log showed "some Sent / some Error" where Error = `ConnectTimeout` (even
