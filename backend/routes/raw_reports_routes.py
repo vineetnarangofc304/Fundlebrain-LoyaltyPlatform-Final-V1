@@ -659,11 +659,11 @@ async def customers_by_visit(f: ReportFilter, user: dict = Depends(get_current_u
 # ============================================================
 class DrillIn(BaseModel):
     report: str          # customer-data | transaction-data | repeat-purchases | earn-redeem | customers-by-visit
-    group_by: str
-    group_key: str       # the value of the group cell user clicked
+    group_by: str = "location"
+    group_key: str = ""  # the value of the group cell user clicked ("" = no cell filter)
     metric: Optional[str] = None  # purchase_total_bills / repeat_total_purchase / etc.
     visits: Optional[int] = None  # for customers-by-visit
-    filters: ReportFilter
+    filters: ReportFilter = Field(default_factory=ReportFilter)
     page: int = 1
     page_size: int = 50
 
@@ -673,7 +673,9 @@ async def drill(body: DrillIn, user: dict = Depends(get_current_user)):
     """Return the underlying customer list for any cell in any report."""
     f = body.filters
     match = _base_match(f)
-    if body.group_by == "location":
+    if not body.group_key:
+        pass  # no cell filter — drill across the whole filtered report
+    elif body.group_by == "location":
         match["store_name"] = body.group_key
     elif body.group_by == "city":
         match["city"] = body.group_key
@@ -683,15 +685,16 @@ async def drill(body: DrillIn, user: dict = Depends(get_current_user)):
         # state is stored as zone for txns; or could be city — try both
         match["$or"] = [{"state": body.group_key}, {"zone": body.group_key}]
     elif body.group_by == "month":
-        # Build a bill_date range for the YYYY-MM
+        # Build a bill_date range for the YYYY-MM — bill_date is stored as an
+        # ISO STRING, so the bounds must be strings too (BSON datetimes never
+        # match strings → the old code returned an EMPTY drill for months).
         try:
             yr, mo = body.group_key.split("-")
             yr, mo = int(yr), int(mo)
             start = datetime(yr, mo, 1, tzinfo=timezone.utc)
-            end = (datetime(yr + (1 if mo == 12 else 0),
-                              1 if mo == 12 else mo + 1, 1, tzinfo=timezone.utc)
-                     - timedelta(seconds=1))
-            match["bill_date"] = {"$gte": start, "$lte": end}
+            end = datetime(yr + (1 if mo == 12 else 0),
+                           1 if mo == 12 else mo + 1, 1, tzinfo=timezone.utc)
+            match["bill_date"] = {"$gte": start.isoformat(), "$lt": end.isoformat()}
         except Exception:
             pass
 

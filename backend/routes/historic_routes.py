@@ -2821,6 +2821,18 @@ async def reconcile(
     }
 
     # 3. DB state — totals + loyalty/non-loyalty split + ledger
+    async def _agg_count(col, pipe) -> int:
+        rows = await col.aggregate(pipe + [{"$count": "n"}],
+                                   allowDiskUse=True, maxTimeMS=40000).to_list(1)
+        return int(rows[0]["n"]) if rows else 0
+
+    # distinct() has a hard 16MB single-document cap — at production scale
+    # (~1M distinct mobiles) it throws and 500'd this endpoint. Aggregation
+    # group+count is cursor-batched and scale-safe.
+    distinct_txn_mobiles = await _agg_count(transactions_col, [
+        {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$customer_mobile"}},
+    ])
     db_state = {
         "transactions_total": await transactions_col.count_documents({}),
         "transactions_loyalty": await transactions_col.count_documents(
@@ -2832,8 +2844,7 @@ async def reconcile(
             {"home_store_id": {"$ne": None}}),
         "customers_with_first_purchase": await customers_col.count_documents(
             {"first_purchase_at": {"$ne": None}}),
-        "distinct_mobiles_in_txns": len(await transactions_col.distinct(
-            "customer_mobile", {"customer_mobile": {"$nin": [None, ""]}})),
+        "distinct_mobiles_in_txns": distinct_txn_mobiles,
         "stores_total": await stores_col.count_documents({}),
         "points_ledger_total": await points_ledger_col.count_documents({}),
     }
@@ -2849,7 +2860,7 @@ async def reconcile(
                     "redeemed_sum": {"$sum": "$points_redeemed"},
                     "bonus_sum": {"$sum": "$bonus_points"}}},
     ]
-    sums_row = (await transactions_col.aggregate(sums_pipe).to_list(1)) or [{}]
+    sums_row = (await transactions_col.aggregate(sums_pipe, allowDiskUse=True, maxTimeMS=40000).to_list(1)) or [{}]
     sums_row = sums_row[0] if sums_row else {}
     ledger_pipe = [
         {"$group": {"_id": "$type", "total": {"$sum": "$points"}}}
@@ -2876,14 +2887,26 @@ async def reconcile(
     # 5. Integrity checks
     # 5a. Orphan transactions (store_id null after store auto-create)
     orphan_store_txns = await transactions_col.count_documents({"store_id": None})
-    # 5b. Loyalty customers in txns but missing customer doc
-    txn_mobiles = await transactions_col.distinct(
-        "customer_mobile", {"customer_mobile": {"$nin": [None, ""]}}
-    )
-    cust_mobiles_set = set(await customers_col.distinct(
-        "mobile", {"mobile": {"$in": txn_mobiles}}
-    ))
-    missing_customer_for_mobile = [m for m in txn_mobiles if m not in cust_mobiles_set]
+    # 5b. Loyalty mobiles seen on bills but missing a customer doc — done as a
+    # single $unionWith anti-join (the old distinct()+$in broke at scale).
+    missing_pipe = [
+        {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$customer_mobile"}},
+        {"$project": {"src": {"$literal": "t"}}},
+        {"$unionWith": {"coll": "customers", "pipeline": [
+            {"$match": {"mobile": {"$nin": [None, ""]}}},
+            {"$group": {"_id": "$mobile"}},
+            {"$project": {"src": {"$literal": "c"}}},
+        ]}},
+        {"$group": {"_id": "$_id", "srcs": {"$addToSet": "$src"}}},
+        {"$match": {"srcs": ["t"]}},   # on bills but NOT in customers master
+        {"$facet": {"count": [{"$count": "n"}], "sample": [{"$limit": 5}]}},
+    ]
+    missing_res = await transactions_col.aggregate(
+        missing_pipe, allowDiskUse=True, maxTimeMS=60000).to_list(1)
+    missing_facet = (missing_res[0] if missing_res else {}) or {}
+    missing_count = ((missing_facet.get("count") or [{}]) + [{}])[0].get("n", 0) or 0
+    missing_sample = [r["_id"] for r in missing_facet.get("sample", [])]
     # 5c. Duplicate mobiles
     dup_pipe = [
         {"$match": {"mobile": {"$nin": [None, ""]}}},
@@ -2891,20 +2914,21 @@ async def reconcile(
         {"$match": {"n": {"$gt": 1}}},
         {"$count": "duplicates"},
     ]
-    dup_result = await customers_col.aggregate(dup_pipe).to_list(1)
+    dup_result = await customers_col.aggregate(dup_pipe, allowDiskUse=True, maxTimeMS=40000).to_list(1)
     dup_count = dup_result[0]["duplicates"] if dup_result else 0
     # 5d. Ledger coverage = % of loyalty bills that have at least 1 ledger entry
     loyalty_txn_count = db_state["transactions_loyalty"]
-    bills_in_ledger = len(await points_ledger_col.distinct(
-        "source_bill_id", {"source_bill_id": {"$exists": True, "$ne": None}}
-    ))
+    bills_in_ledger = await _agg_count(points_ledger_col, [
+        {"$match": {"source_bill_id": {"$exists": True, "$ne": None}}},
+        {"$group": {"_id": "$source_bill_id"}},
+    ])
     ledger_coverage_pct = round((bills_in_ledger / loyalty_txn_count * 100), 2) \
         if loyalty_txn_count else 0
 
     integrity = {
         "orphan_store_txns": orphan_store_txns,
-        "loyalty_mobiles_missing_customer_doc": len(missing_customer_for_mobile),
-        "missing_customer_sample": missing_customer_for_mobile[:5],
+        "loyalty_mobiles_missing_customer_doc": missing_count,
+        "missing_customer_sample": missing_sample,
         "duplicate_mobile_customers": dup_count,
         "ledger_coverage_loyalty_bills_pct": ledger_coverage_pct,
         "ledger_coverage_bills_seen": bills_in_ledger,

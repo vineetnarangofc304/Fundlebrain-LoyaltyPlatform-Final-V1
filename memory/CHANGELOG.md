@@ -303,3 +303,23 @@ File: `backend/routes/live_monitor_routes.py`, `frontend/.../LiveMonitorPage.jsx
   — that uses buttons; needs locating).
 - P1 backlog: Gap-analysis Phase 2/3 (Location-wise DLT SMS, OTP audit search, Reward
   Brands, Reward GVs); modularize bloated route files.
+
+## 2026-06-11 — Dashboards/Reports super-audit + RECON + AI data expert
+- Reproduced production ₹0 dashboards locally by seeding 800K customers / 1.5M txns (perf_seed, purged after): root cause = silent query timeouts + scale-breaking patterns.
+- Fixed 4 endpoints that hard-failed (500/502) at scale: city-performance, executive-summary (distinct+giant-$in), store-performance-v2 ($addToSet 16MB), analytics store-dashboard.
+- RFM rewritten: index-backed quantile cuts + $facet bucketing (was silently truncating at 100K customers → wrong numbers).
+- Cohorts-segmentation: Mongo-side retention triangle + customers-master $facet (was pulling 500K rows into Python).
+- Command Center: 16 queries → 3 facet scans + `degraded[]` flag + amber retry banner (no more silent ₹0); cache skips degraded responses.
+- KPIs endpoint: 14 sequential scans → 1 customers facet + gather.
+- points-economics: 8 sequential scans → 2 facets + gather (31s → 9s → 0.1s cached).
+- NEW `_dash_cache.py` TTL cache (5 min) on 20 heavy endpoints; preserves typed signatures (FastAPI body binding fix from testing agent).
+- All report routers now under db_deadline (45s) — fixes "legacy reports not opening" under prod 10s client timeout.
+- Legacy reports: batch lookups (expiry-points N+1 of 2000 find_ones, location-wise), offset pagination on 7 reports, CSV export limit→10K, frontend Prev/Next pagination + error retry UI in _shell.jsx.
+- Raw reports: repeat-purchases fully Mongo-side ($top first-bill), drill paging via $facet (no 16MB distinct), tier filter via cursor aggregation.
+- Drill-down bug fixes: month drill compared datetimes to ISO strings (always empty); Command Center cohort drill used created_at instead of first_purchase_at; customer scope used non-existent preferred_store_id (→ home_store_id).
+- Date-range fixes: "365d" preset fell back to 30d; sales-trend ignored custom start/end; loyalty/customer trends now respect window with monthly buckets; "" categories/cities → Uncategorised/Unknown.
+- /historic-data/reconcile scale-safe ($unionWith anti-join replaces distinct()).
+- NEW RECON module (/api/recon/*): chunked CSV re-upload → row-level CSV↔DB compare (missing/amount/mobile mismatches, extra-in-DB, sums) + mismatch CSV download + UI section on Reconciliation page.
+- AI Fundle Brain: live data-warehouse snapshot system message (cached 10 min) + run_aggregation/get_data_dictionary guard-railed tools — verified expert answers over full dataset.
+- New indexes: points_ledger.bill_date, message_log.created_at, transactions.city/store_name.
+- Testing: iteration71 pytest suite (30/30 after fixes), testing agent E2E (frontend pass incl. Command Center, pagination, recon UI).

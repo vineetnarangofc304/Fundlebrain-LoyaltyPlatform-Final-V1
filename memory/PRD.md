@@ -1865,6 +1865,16 @@ Both issues meant a malicious actor could empty any customer's wallet by manipul
 - [x] Campaign Manager → real Karix bulk-send wiring (template_id + bulk_job_id linkage)
 - [x] Item Master CSV mapper expanded to 21 columns + new Points Ledger CSV ingest dataset
 
+### P1 — DONE (Iteration 14 / June 11 2026) — Dashboards & Reports super-audit
+- [x] Fixed all 4 endpoints that 500'd at production scale (city-performance, executive-summary, store-performance-v2, store-dashboard)
+- [x] RFM exactness at any scale (was truncated at 100K customers); cohorts/retention triangle Mongo-side
+- [x] Command Center `degraded[]` + retry banner — no more silent ₹0 KPIs
+- [x] 5-min TTL cache layer on 20 heavy endpoints; all report routers under 45s db_deadline
+- [x] Legacy reports pagination (backend offset + frontend Prev/Next + error retry)
+- [x] Drill-down fixes (month drill, cohort drill field, home_store_id scope)
+- [x] NEW /api/recon CSV↔DB reconciliation module + UI (chunked upload, mismatch CSV)
+- [x] Fundle Brain = data expert (live warehouse snapshot + run_aggregation/get_data_dictionary tools)
+
 ### P1 — Next
 - [ ] **Refactor oversized route files** (mechanical cleanup, no user-facing change):
   - `/app/backend/routes/historic_routes.py` (~1700 lines → mappers, ingest worker, narrative wiring, purge, backfill)

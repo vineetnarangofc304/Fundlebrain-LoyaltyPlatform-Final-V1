@@ -15,7 +15,9 @@ The decorator builds the key from all scalar kwargs (and Pydantic bodies via
 model_dump_json), skipping non-serialisable ones like the auth `user` dict.
 """
 import functools
+import inspect
 import time
+import typing
 from typing import Any, Optional
 
 _STORE: dict = {}
@@ -60,5 +62,20 @@ def dash_cache(prefix: str, ttl: int = DEFAULT_TTL):
             result = await fn(*args, **kwargs)
             cache_set(key, result)
             return result
+        # CRITICAL: FastAPI reads the VISIBLE signature to decide query vs body
+        # binding, and resolves string annotations against the WRAPPER's module
+        # globals (where the endpoint's Pydantic models don't exist). Copy the
+        # signature WITH annotations already resolved from the original fn,
+        # otherwise body models degrade to query params → 422.
+        sig = inspect.signature(fn)
+        try:
+            hints = typing.get_type_hints(fn)
+            sig = sig.replace(parameters=[
+                p.replace(annotation=hints.get(name, p.annotation))
+                for name, p in sig.parameters.items()
+            ])
+        except Exception:
+            pass
+        wrapper.__signature__ = sig
         return wrapper
     return deco
