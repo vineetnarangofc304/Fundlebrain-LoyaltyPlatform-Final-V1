@@ -10,6 +10,7 @@ from database import (
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
+from routes._dash_cache import dash_cache
 import logging
 
 logger = logging.getLogger("kazo-fundle")
@@ -26,7 +27,7 @@ _CC_CACHE: Dict[str, tuple] = {}
 _CC_TTL = 60.0
 
 
-async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=25000):
+async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=40000):
     """Run a dashboard aggregation that must NEVER 500 the endpoint.
 
     On timeout (pymongo ExecutionTimeout from maxTimeMS) or any error we log and
@@ -42,7 +43,7 @@ async def _safe_agg(col, pipeline, limit=1, default=None, max_ms=25000):
         return [] if default is None else default
 
 
-async def _safe_count(col, filt, default=0, max_ms=25000):
+async def _safe_count(col, filt, default=0, max_ms=40000):
     try:
         return await col.count_documents(filt, maxTimeMS=max_ms)
     except Exception as e:
@@ -84,12 +85,16 @@ def _date_range(period: str = "30d"):
         start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     elif period == "ytd":
         start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif period.endswith("d") and period[:-1].isdigit():
+        # generic "Nd" — e.g. 365d from the date-range picker presets
+        start = now - timedelta(days=int(period[:-1]))
     else:
         start = now - timedelta(days=30)
     return start, now
 
 
 @router.get("/kpis")
+@dash_cache("kpis")
 async def kpis(
     period: str = "30d",
     start_date: Optional[str] = None,
@@ -115,16 +120,34 @@ async def kpis(
         txn_filter["store_id"] = store_id
         prev_filter["store_id"] = store_id
 
-    # Customer metrics — loyalty members only (have a mobile)
+    # ONE facet scan of customers + ONE of transactions + ONE of the ledger,
+    # everything gathered concurrently (was ~14 sequential full scans).
     loyalty_cust_q = {"mobile": {"$nin": [None, ""]}}
-    total_customers = await customers_col.count_documents(loyalty_cust_q)
-    # R1: "new" = customer's FIRST bill (first_purchase_at) within window — not ingest time
-    new_filter = {**loyalty_cust_q, "first_purchase_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}}
-    new_customers = await customers_col.count_documents(new_filter)
-    active_filter = {**loyalty_cust_q, "last_visit_at": {"$gte": start.isoformat()}}
-    active_customers = await customers_col.count_documents(active_filter)
+    churn_cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
+    cust_facet_pipe = [
+        {"$match": loyalty_cust_q},
+        {"$facet": {
+            "summary": [{"$group": {
+                "_id": None, "total": {"$sum": 1},
+                "liability": {"$sum": "$points_balance"},
+                "new": {"$sum": {"$cond": [{"$and": [
+                    {"$gte": [{"$ifNull": ["$first_purchase_at", ""]}, start.isoformat()]},
+                    {"$lte": [{"$ifNull": ["$first_purchase_at", ""]}, end.isoformat()]},
+                ]}, 1, 0]}},
+                "active": {"$sum": {"$cond": [
+                    {"$gte": [{"$ifNull": ["$last_visit_at", ""]}, start.isoformat()]}, 1, 0]}},
+                "loyalty": {"$sum": {"$cond": [
+                    {"$gt": [{"$ifNull": ["$lifetime_points_earned", 0]}, 0]}, 1, 0]}},
+                "repeat": {"$sum": {"$cond": [
+                    {"$gte": [{"$ifNull": ["$visit_count", 0]}, 2]}, 1, 0]}},
+                "churned": {"$sum": {"$cond": [{"$and": [
+                    {"$ne": [{"$ifNull": ["$last_visit_at", None]}, None]},
+                    {"$lt": ["$last_visit_at", churn_cutoff]},
+                ]}, 1, 0]}},
+            }}],
+        }},
+    ]
 
-    # Sales aggregate (loyalty bills only, by R5)
     pipeline = [
         {"$match": txn_filter},
         {"$group": {
@@ -155,77 +178,26 @@ async def kpis(
                 ],
             }},
             "items_count": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
-            "unique_customers": {"$addToSet": "$customer_mobile"},  # R4: mobile is identity
         }}
     ]
-    cur = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(1)
-    sales = cur[0] if cur else {"gross_sales": 0, "net_sales": 0, "discount": 0,
-                                   "txn_count": 0, "items_count": 0, "units_count": 0,
-                                   "unique_customers": []}
-
     prev_pipeline = [
         {"$match": prev_filter},
         {"$group": {"_id": None, "net_sales": {"$sum": "$net_amount"}, "txn_count": {"$sum": 1}}}
     ]
-    prev_cur = await transactions_col.aggregate(prev_pipeline, allowDiskUse=True).to_list(1)
-    prev = prev_cur[0] if prev_cur else {"net_sales": 0, "txn_count": 0}
-
-    aov = (sales["net_sales"] / sales["txn_count"]) if sales["txn_count"] else 0
-    # UPT — units per transaction (corrected: was line-item-count which under-reported)
-    upt = (sales["units_count"] / sales["txn_count"]) if sales["txn_count"] else 0
-    atv = aov  # average transaction value
 
     # Loyalty metrics — points ledger is timestamped on the BILL, not the ingest time
     # Use bill_date when present (historic ingest now writes it), else fall back to created_at
-    points_issued_pipe = [
-        {"$match": {"type": "earn",
-                    "$or": [{"bill_date": {"$gte": start.isoformat()}},
-                            {"bill_date": {"$exists": False}, "created_at": {"$gte": start.isoformat()}}]}},
-        {"$group": {"_id": None, "total": {"$sum": "$points"}}}
+    ledger_window = {"$or": [{"bill_date": {"$gte": start.isoformat()}},
+                             {"bill_date": {"$exists": False}, "created_at": {"$gte": start.isoformat()}}]}
+    ledger_pipe = [
+        {"$match": {**ledger_window, "type": {"$in": ["earn", "redeem"]}}},
+        {"$group": {"_id": "$type", "total": {"$sum": "$points"}}},
     ]
-    pi = await points_ledger_col.aggregate(points_issued_pipe, allowDiskUse=True).to_list(1)
-    points_issued = pi[0]["total"] if pi else 0
-    points_redeem_pipe = [
-        {"$match": {"type": "redeem",
-                    "$or": [{"bill_date": {"$gte": start.isoformat()}},
-                            {"bill_date": {"$exists": False}, "created_at": {"$gte": start.isoformat()}}]}},
-        {"$group": {"_id": None, "total": {"$sum": "$points"}}}
-    ]
-    pr = await points_ledger_col.aggregate(points_redeem_pipe, allowDiskUse=True).to_list(1)
-    points_redeemed = abs(pr[0]["total"]) if pr else 0
 
-    # Outstanding liability = sum of all points_balance (loyalty members only)
-    liab_pipe = [{"$match": loyalty_cust_q},
-                 {"$group": {"_id": None, "total": {"$sum": "$points_balance"}}}]
-    liab = await customers_col.aggregate(liab_pipe, allowDiskUse=True).to_list(1)
-    outstanding_points = liab[0]["total"] if liab else 0
-    burn_ratio = await _burn_ratio()
-    outstanding_liability = outstanding_points * burn_ratio
-
-    loyalty_customers = await customers_col.count_documents({**loyalty_cust_q, "lifetime_points_earned": {"$gt": 0}})
-    loyalty_penetration = (loyalty_customers / total_customers * 100) if total_customers else 0
-
-    # Repeat / churn (R3: ≥2 unique bills; loyalty members only)
-    repeat_customers = await customers_col.count_documents({**loyalty_cust_q, "visit_count": {"$gte": 2}})
-    repeat_rate = (repeat_customers / total_customers * 100) if total_customers else 0
-    churned_filter = {**loyalty_cust_q,
-                       "last_visit_at": {"$lt": (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()}}
-    churned = await customers_col.count_documents(churned_filter)
-    churn_pct = (churned / total_customers * 100) if total_customers else 0
-
-    # Campaigns
     campaign_pipe = [
         {"$group": {"_id": None, "revenue": {"$sum": "$revenue_generated"}, "count": {"$sum": 1}}}
     ]
-    cp = await campaigns_col.aggregate(campaign_pipe, allowDiskUse=True).to_list(1)
-    campaign_revenue = cp[0]["revenue"] if cp else 0
-    campaign_count = cp[0]["count"] if cp else 0
-
     coupon_pipe = [{"$group": {"_id": None, "used": {"$sum": "$times_used"}, "issued": {"$sum": "$times_issued"}}}]
-    cu = await coupons_col.aggregate(coupon_pipe, allowDiskUse=True).to_list(1)
-    coupon_usage = cu[0]["used"] if cu else 0
-
-    # NPS
     nps_pipe = [
         {"$match": {"created_at": {"$gte": start.isoformat()}}},
         {"$group": {
@@ -235,17 +207,58 @@ async def kpis(
             "total": {"$sum": 1},
         }}
     ]
-    npsr = await nps_col.aggregate(nps_pipe, allowDiskUse=True).to_list(1)
+
+    (cust_facet_res, cur, prev_cur, ledger_rows, cp, cu, npsr,
+     complaint_count, api_total, api_failed, burn_ratio) = await asyncio.gather(
+        _safe_agg(customers_col, cust_facet_pipe),
+        _safe_agg(transactions_col, pipeline),
+        _safe_agg(transactions_col, prev_pipeline),
+        _safe_agg(points_ledger_col, ledger_pipe, limit=4),
+        _safe_agg(campaigns_col, campaign_pipe),
+        _safe_agg(coupons_col, coupon_pipe),
+        _safe_agg(nps_col, nps_pipe),
+        _safe_count(tickets_col, {"status": {"$in": ["open", "in_progress", "escalated"]}}),
+        _safe_count(api_logs_col, {"timestamp": {"$gte": start.isoformat()}}),
+        _safe_count(api_logs_col, {"status_code": {"$gte": 400}, "timestamp": {"$gte": start.isoformat()}}),
+        _burn_ratio(),
+    )
+
+    summary = (((cust_facet_res[0] if cust_facet_res else {}) or {}).get("summary") or [{}])[0] or {}
+    total_customers = int(summary.get("total", 0) or 0)
+    new_customers = int(summary.get("new", 0) or 0)
+    active_customers = int(summary.get("active", 0) or 0)
+    repeat_customers = int(summary.get("repeat", 0) or 0)
+    churned = int(summary.get("churned", 0) or 0)
+    loyalty_customers = int(summary.get("loyalty", 0) or 0)
+    outstanding_points = summary.get("liability", 0) or 0
+
+    sales = cur[0] if cur else {"gross_sales": 0, "net_sales": 0, "discount": 0,
+                                "txn_count": 0, "items_count": 0, "units_count": 0}
+    prev = prev_cur[0] if prev_cur else {"net_sales": 0, "txn_count": 0}
+
+    aov = (sales["net_sales"] / sales["txn_count"]) if sales["txn_count"] else 0
+    # UPT — units per transaction (corrected: was line-item-count which under-reported)
+    upt = (sales["units_count"] / sales["txn_count"]) if sales["txn_count"] else 0
+    atv = aov  # average transaction value
+
+    ledger_map = {r["_id"]: r["total"] for r in (ledger_rows or [])}
+    points_issued = ledger_map.get("earn", 0) or 0
+    points_redeemed = abs(ledger_map.get("redeem", 0) or 0)
+
+    outstanding_liability = outstanding_points * burn_ratio
+    loyalty_penetration = (loyalty_customers / total_customers * 100) if total_customers else 0
+    repeat_rate = (repeat_customers / total_customers * 100) if total_customers else 0
+    churn_pct = (churned / total_customers * 100) if total_customers else 0
+
+    campaign_revenue = cp[0]["revenue"] if cp else 0
+    campaign_count = cp[0]["count"] if cp else 0
+    coupon_usage = cu[0]["used"] if cu else 0
+
     if npsr and npsr[0]["total"]:
         nps_score = round(((npsr[0]["promoters"] - npsr[0]["detractors"]) / npsr[0]["total"]) * 100)
     else:
         nps_score = None
 
-    complaint_count = await tickets_col.count_documents({"status": {"$in": ["open", "in_progress", "escalated"]}})
-
-    # API health
-    api_total = await api_logs_col.count_documents({"timestamp": {"$gte": start.isoformat()}})
-    api_failed = await api_logs_col.count_documents({"status_code": {"$gte": 400}, "timestamp": {"$gte": start.isoformat()}})
     api_health = ((api_total - api_failed) / api_total * 100) if api_total else 100
 
     def delta(curr, prev):
@@ -293,26 +306,56 @@ async def kpis(
 
 
 @router.get("/sales-trend")
-async def sales_trend(period: str = "30d", user: dict = Depends(get_current_user)):
+@dash_cache("sales-trend")
+async def sales_trend(
+    period: str = "30d",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
     start, end = _date_range(period)
+    # Explicit custom range overrides the named period (date-range picker)
+    if start_date and end_date:
+        try:
+            start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+            end = datetime.fromisoformat(end_date).replace(
+                hour=23, minute=59, second=59, tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    # Monthly buckets for long windows (daily over 20 years would truncate the
+    # chart at to_list cap); two-stage group gives EXACT distinct-customer counts
+    # without the $addToSet memory blow-up at production scale.
+    span_days = (end - start).days
+    key_len = 7 if (period in {"1y", "ytd", "all", "0", "0d", ""} or span_days > 270) else 10
+    date_key = {"$cond": [
+        {"$eq": [{"$type": "$bill_date"}, "string"]},
+        {"$substr": ["$bill_date", 0, key_len]},
+        {"$dateToString": {"format": "%Y-%m" if key_len == 7 else "%Y-%m-%d", "date": "$bill_date"}},
+    ]}
     pipeline = [
         {"$match": loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})},
         {"$group": {
-            "_id": {"$substr": ["$bill_date", 0, 10]},
+            "_id": {"d": date_key, "m": "$customer_mobile"},
             "net": {"$sum": "$net_amount"},
             "txns": {"$sum": 1},
-            "customers": {"$addToSet": "$customer_mobile"},
+        }},
+        {"$group": {
+            "_id": "$_id.d",
+            "net": {"$sum": "$net"},
+            "txns": {"$sum": "$txns"},
+            "customers": {"$sum": 1},
         }},
         {"$sort": {"_id": 1}},
     ]
-    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(500)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(2000)
     return [
-        {"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"], "customers": len(r["customers"])}
+        {"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"], "customers": r["customers"]}
         for r in rows
     ]
 
 
 @router.get("/store-performance")
+@dash_cache("store-perf")
 async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)):
     """Store performance — revenue & txns aggregate from bills in window.
     Per R2: 'unique_customers' on this view = customers whose HOME STORE
@@ -321,11 +364,17 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
     start, end = _date_range(period)
     pipeline = [
         {"$match": loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})},
+        # two-stage: exact distinct visitors per store without $addToSet memory blow-up
         {"$group": {
-            "_id": "$store_id",
+            "_id": {"s": "$store_id", "m": "$customer_mobile"},
             "net": {"$sum": "$net_amount"},
             "txns": {"$sum": 1},
-            "visitors": {"$addToSet": "$customer_mobile"},  # any loyalty customer who shopped here
+        }},
+        {"$group": {
+            "_id": "$_id.s",
+            "net": {"$sum": "$net"},
+            "txns": {"$sum": "$txns"},
+            "visitors": {"$sum": 1},
         }},
         {"$sort": {"net": -1}},
         {"$limit": 20},
@@ -350,7 +399,7 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
             "city": s.get("city", "—"),
             "net": round(r["net"], 2),
             "txns": r["txns"],
-            "visitors": len([c for c in r["visitors"] if c]),     # window-scoped distinct shoppers
+            "visitors": r["visitors"],                            # window-scoped distinct shoppers
             "home_customers": home_counts.get(r["_id"], 0),       # R2: customers anchored to this store
             "unique_customers": home_counts.get(r["_id"], 0),     # alias for back-compat
             "aov": round(r["net"] / r["txns"], 2) if r["txns"] else 0,
@@ -359,12 +408,15 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
 
 
 @router.get("/category-mix")
+@dash_cache("cat-mix")
 async def category_mix(period: str = "30d", user: dict = Depends(get_current_user)):
     start, end = _date_range(period)
+    cat_key = {"$cond": [{"$in": [{"$ifNull": ["$items.category", ""]}, ["", None]]},
+                         "Uncategorised", "$items.category"]}
     pipeline = [
         {"$match": loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})},
         {"$unwind": "$items"},
-        {"$group": {"_id": "$items.category", "revenue": {"$sum": "$items.total"}, "qty": {"$sum": "$items.quantity"}}},
+        {"$group": {"_id": cat_key, "revenue": {"$sum": "$items.total"}, "qty": {"$sum": "$items.quantity"}}},
         {"$sort": {"revenue": -1}},
     ]
     rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(50)
@@ -383,13 +435,18 @@ async def tier_distribution(user: dict = Depends(get_current_user)):
 
 
 @router.get("/top-skus")
+@dash_cache("top-skus")
 async def top_skus(period: str = "30d", limit: int = 10, user: dict = Depends(get_current_user)):
     start, end = _date_range(period)
     pipeline = [
         {"$match": loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})},
         {"$unwind": "$items"},
         {"$group": {
-            "_id": {"sku": "$items.sku", "name": "$items.name", "category": "$items.category"},
+            "_id": {"sku": {"$ifNull": ["$items.sku", "—"]},
+                    "name": {"$cond": [{"$in": [{"$ifNull": ["$items.name", ""]}, ["", None]]},
+                                       "Unnamed item", "$items.name"]},
+                    "category": {"$cond": [{"$in": [{"$ifNull": ["$items.category", ""]}, ["", None]]},
+                                           "Uncategorised", "$items.category"]}},
             "revenue": {"$sum": "$items.total"},
             "qty": {"$sum": "$items.quantity"},
         }},
@@ -472,29 +529,18 @@ async def command_center(
         scoped_store_ids = [r["id"] for r in rows]
         # If no store rows match this city, we'll fall back to txn.city in _txn_match below.
 
-    # Customer cohort filter — for store/city scope, restrict to LOYALTY customers
-    # whose transactions hit at least one of those stores. R4: mobile is the identity.
-    scoped_customer_mobiles: Optional[List[str]] = None
-    if scoped_store_ids or scoped_city_value:
-        txn_scope_match: Dict[str, Any] = {"customer_mobile": {"$nin": [None, ""]}}
-        if scoped_store_ids and scoped_city_value:
-            txn_scope_match["$or"] = [
-                {"store_id": {"$in": scoped_store_ids}},
-                {"city": scoped_city_value},
-            ]
-        elif scoped_store_ids:
-            txn_scope_match["store_id"] = {"$in": scoped_store_ids}
-        else:
-            txn_scope_match["city"] = scoped_city_value
-        # distinct() is unguarded by maxTimeMS and has a hard 16MB cap; under a
-        # running ingest job it can hang / throw → 500. Wrap it so a scope filter
-        # degrades to "no scope match" instead of taking down Command Center.
-        try:
-            mobs = await transactions_col.distinct("customer_mobile", txn_scope_match)
-            scoped_customer_mobiles = [m for m in mobs if m]
-        except Exception as e:
-            logger.warning(f"command-center scope distinct degraded: {e}")
-            scoped_customer_mobiles = []
+    # Customer-scope under a store/city filter: R2 — a customer "belongs to" the
+    # store of their FIRST bill (home_store_id). The previous approach ran an
+    # unguarded distinct() over transactions and pushed the resulting mobile list
+    # back as a giant $in — that breaks (16MB limit / timeout) at production scale.
+    def _cust_match(extra: Optional[dict] = None) -> dict:
+        # R5: loyalty customers (have mobile) only
+        m: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
+        if extra:
+            m.update(extra)
+        if scoped_store_ids is not None:
+            m["home_store_id"] = {"$in": scoped_store_ids}
+        return m
 
     def _txn_match(time_field: str, gte, lt=None) -> dict:
         # R5: loyalty data only
@@ -513,71 +559,101 @@ async def command_center(
             m["city"] = scoped_city_value
         return m
 
-    def _cust_match(extra: Optional[dict] = None) -> dict:
-        # R5: loyalty customers (have mobile) only
-        m: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
-        if extra:
-            m.update(extra)
-        if scoped_customer_mobiles is not None:
-            m["mobile"] = {"$in": scoped_customer_mobiles}
-        return m
+    # --- ONE scan of the window's transactions ($facet) + ONE scan of customers ---
+    # Previously ~16 separate queries each re-scanned the collections; at production
+    # scale several silently timed out → the dashboard showed ₹0 / 0 txns while
+    # customer counts still worked. Now: 1 txn facet + 1 prev-window group +
+    # 1 customers facet + cheap indexed counts, all concurrent, with an explicit
+    # `degraded` list in the response when anything times out.
+    degraded: List[str] = []
 
-    # --- Sales aggregate (current vs previous window) ---
-    cur_sales_pipe = [
-        {"$match": _txn_match("bill_date", start.isoformat())},
-        {"$group": {
-            "_id": None,
-            "net": {"$sum": "$net_amount"},
-            "gross": {"$sum": "$gross_amount"},
-            "discount": {"$sum": "$discount_amount"},
-            "txns": {"$sum": 1},
-            # UPT = Units Per Transaction. See dashboard_routes::snapshot
-            # for the same correction (was line-item-count, now units; bills
-            # without items array fall back to 1 unit).
-            "units": {"$sum": {
-                "$cond": [
-                    {"$gt": [{"$size": {"$ifNull": ["$items", []]}}, 0]},
-                    {"$reduce": {
-                        "input": {"$ifNull": ["$items", []]},
-                        "initialValue": 0,
-                        "in": {"$add": [
-                            "$$value",
-                            {"$ifNull": [
-                                {"$toInt": {"$ifNull": ["$$this.quantity", "$$this.qty"]}},
-                                1,
-                            ]},
-                        ]},
-                    }},
-                    1,
-                ],
+    async def _agg(col, pipeline, limit=1, label="", default=None):
+        try:
+            return await col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=40000).to_list(limit)
+        except Exception as e:
+            logger.warning(f"command-center agg degraded ({label}): {e}")
+            degraded.append(label)
+            return [] if default is None else default
+
+    async def _count(col, filt, label=""):
+        try:
+            return await col.count_documents(filt, maxTimeMS=40000)
+        except Exception as e:
+            logger.warning(f"command-center count degraded ({label}): {e}")
+            degraded.append(label)
+            return 0
+
+    units_expr = {
+        "$cond": [
+            {"$gt": [{"$size": {"$ifNull": ["$items", []]}}, 0]},
+            {"$reduce": {
+                "input": {"$ifNull": ["$items", []]},
+                "initialValue": 0,
+                "in": {"$add": ["$$value",
+                                {"$ifNull": [{"$toInt": {"$ifNull": ["$$this.quantity", "$$this.qty"]}}, 1]}]},
             }},
-            "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+            1,
+        ],
+    }
+    # Sparkline: daily for short windows, monthly for 1y/all/ytd to keep it small
+    spark_length = 7 if period in {"1y", "all", "ytd"} else 10
+    spark_key = {"$cond": [
+        {"$eq": [{"$type": "$bill_date"}, "string"]},
+        {"$substr": ["$bill_date", 0, spark_length]},
+        {"$dateToString": {"format": "%Y-%m" if spark_length == 7 else "%Y-%m-%d", "date": "$bill_date"}},
+    ]}
+    txn_facet_pipe = [
+        {"$match": _txn_match("bill_date", start.isoformat())},
+        {"$facet": {
+            "sales": [{"$group": {
+                "_id": None,
+                "net": {"$sum": "$net_amount"},
+                "gross": {"$sum": "$gross_amount"},
+                "discount": {"$sum": "$discount_amount"},
+                "txns": {"$sum": 1},
+                "units": {"$sum": units_expr},
+                "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+            }}],
+            # distinct shoppers + repeat split in one two-stage group
+            "repeat": [
+                {"$group": {"_id": "$customer_mobile", "n": {"$sum": 1}}},
+                {"$group": {"_id": None,
+                            "repeat": {"$sum": {"$cond": [{"$gte": ["$n", 2]}, 1, 0]}},
+                            "unique": {"$sum": 1}}},
+            ],
+            "spark": [
+                {"$group": {"_id": spark_key, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+                {"$sort": {"_id": 1}},
+                {"$limit": 2000},
+            ],
         }},
     ]
     prev_sales_pipe = [
         {"$match": _txn_match("bill_date", prev_start.isoformat(), lt=start.isoformat())},
         {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
-    # ── Pre-build every match/pipe so the independent queries run CONCURRENTLY ──
-    # Under a running ingest job Mongo is busy; running ~16 dashboard queries
-    # sequentially (each up to 8s on timeout) would blow past the gateway's
-    # ~100s limit → "Command Center not loading". asyncio.gather collapses the
-    # wall-clock to ≈ the slowest single query instead of the SUM of all of them.
 
-    # active customers in window (distinct loyalty mobiles that transacted)
-    active_pipe = [
-        {"$match": _txn_match("bill_date", start.isoformat())},
-        {"$group": {"_id": "$customer_mobile"}},
-        {"$count": "n"},
+    # Customers: total + liability + acquisition cohorts in ONE facet scan
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    d7 = now - timedelta(days=7)
+    d30 = now - timedelta(days=30)
+    d90 = now - timedelta(days=90)
+    cohort_switch = {"$switch": {"branches": [
+        {"case": {"$eq": [{"$ifNull": ["$first_purchase_at", None]}, None]}, "then": "never"},
+        {"case": {"$gte": ["$first_purchase_at", today_start.isoformat()]}, "then": "today"},
+        {"case": {"$gte": ["$first_purchase_at", d7.isoformat()]}, "then": "last_7d"},
+        {"case": {"$gte": ["$first_purchase_at", d30.isoformat()]}, "then": "last_30d"},
+        {"case": {"$gte": ["$first_purchase_at", d90.isoformat()]}, "then": "last_90d"},
+    ], "default": "older"}}
+    cust_facet_pipe = [
+        {"$match": _cust_match()},
+        {"$facet": {
+            "summary": [{"$group": {"_id": None, "total": {"$sum": 1},
+                                    "points": {"$sum": "$points_balance"}}}],
+            "cohorts": [{"$group": {"_id": cohort_switch, "count": {"$sum": 1}}}],
+        }},
     ]
-    # repeat rate window (customers with >=2 txns in window)
-    repeat_pipe = [
-        {"$match": _txn_match("bill_date", start.isoformat())},
-        {"$group": {"_id": "$customer_mobile", "n": {"$sum": 1}}},
-        {"$group": {"_id": None,
-                    "repeat": {"$sum": {"$cond": [{"$gte": ["$n", 2]}, 1, 0]}},
-                    "unique": {"$sum": 1}}},
-    ]
+
     # NPS in window (filter by scoped store_ids if present)
     nps_match: Dict[str, Any] = {"created_at": {"$gte": start.isoformat()}}
     if scoped_store_ids:
@@ -593,54 +669,27 @@ async def command_center(
     api_match: Dict[str, Any] = {"timestamp": {"$gte": start.isoformat()}}
     if scoped_store_ids:
         api_match["store_id"] = {"$in": scoped_store_ids}
-    # Outstanding loyalty liability (scoped customers when filter active)
-    liab_pipe = [
-        {"$match": _cust_match()},
-        {"$group": {"_id": None, "points": {"$sum": "$points_balance"}}},
-    ]
-    # Cohort buckets — acquisition = customer's FIRST bill date (first_purchase_at)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    d7 = now - timedelta(days=7)
-    d30 = now - timedelta(days=30)
-    d90 = now - timedelta(days=90)
-    # Sparkline: daily for short windows, monthly for 1y/all/ytd to keep it small
-    spark_length = 7 if period in {"1y", "all", "ytd"} else 10
-    spark_pipe = [
-        {"$match": _txn_match("bill_date", start.isoformat())},
-        {"$group": {"_id": {"$substr": ["$bill_date", 0, spark_length]},
-                    "net": {"$sum": "$net_amount"},
-                    "txns": {"$sum": 1}}},
-        {"$sort": {"_id": 1}},
-    ]
     # Open complaints
     tickets_match: Dict[str, Any] = {"status": {"$in": ["open", "in_progress", "escalated"]}}
     if scoped_store_ids:
         tickets_match["store_id"] = {"$in": scoped_store_ids}
 
-    (cur, prev, active_rows, total_customers, rr, nps_rows,
-     api_total, api_failed, liab, c_today, c_7d, c_30d, c_90d, c_older,
-     spark_rows, open_tickets) = await asyncio.gather(
-        _safe_agg(transactions_col, cur_sales_pipe, default=[{}]),
-        _safe_agg(transactions_col, prev_sales_pipe, default=[{}]),
-        _safe_agg(transactions_col, active_pipe),
-        _safe_count(customers_col, _cust_match()),
-        _safe_agg(transactions_col, repeat_pipe, default=[{}]),
-        _safe_agg(nps_col, nps_pipe, default=[{}]),
-        _safe_count(api_logs_col, api_match),
-        _safe_count(api_logs_col, {**api_match, "status_code": {"$gte": 400}}),
-        _safe_agg(customers_col, liab_pipe, default=[{}]),
-        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": today_start.isoformat()}})),
-        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d7.isoformat(), "$lt": today_start.isoformat()}})),
-        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d30.isoformat(), "$lt": d7.isoformat()}})),
-        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$gte": d90.isoformat(), "$lt": d30.isoformat()}})),
-        _safe_count(customers_col, _cust_match({"first_purchase_at": {"$lt": d90.isoformat()}})),
-        _safe_agg(transactions_col, spark_pipe, limit=2000),
-        _safe_count(tickets_col, tickets_match),
+    (txn_facet_res, prev_res, cust_facet_res, nps_rows,
+     api_total, api_failed, open_tickets, burn_ratio) = await asyncio.gather(
+        _agg(transactions_col, txn_facet_pipe, label="sales-window"),
+        _agg(transactions_col, prev_sales_pipe, label="previous-window", default=[{}]),
+        _agg(customers_col, cust_facet_pipe, label="customer-base"),
+        _agg(nps_col, nps_pipe, label="nps", default=[{}]),
+        _count(api_logs_col, api_match, label="api-health"),
+        _count(api_logs_col, {**api_match, "status_code": {"$gte": 400}}, label="api-failed"),
+        _count(tickets_col, tickets_match, label="complaints"),
+        _burn_ratio(),
     )
 
     # ── Derive KPIs from the gathered results ──
-    cur = (cur[0] if cur else {}) or {}
-    prev = (prev[0] if prev else {}) or {}
+    txn_facet = (txn_facet_res[0] if txn_facet_res else {}) or {}
+    cur = ((txn_facet.get("sales") or [{}]) + [{}])[0] or {}
+    prev = (prev_res[0] if prev_res else {}) or {}
     net = cur.get("net", 0) or 0
     txns = cur.get("txns", 0) or 0
     aov = (net / txns) if txns else 0
@@ -650,11 +699,14 @@ async def command_center(
     sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
     txn_delta = round(((txns - prev_txns) / prev_txns) * 100, 1) if prev_txns else None
 
-    active = int(active_rows[0]["n"]) if active_rows else 0
-    # Invariant: active must never exceed total.
-    active = min(active, total_customers)
+    cust_facet = (cust_facet_res[0] if cust_facet_res else {}) or {}
+    summary = ((cust_facet.get("summary") or [{}]) + [{}])[0] or {}
+    total_customers = int(summary.get("total", 0) or 0)
 
-    rr = (rr[0] if rr else {}) or {}
+    rr = ((txn_facet.get("repeat") or [{}]) + [{}])[0] or {}
+    active = int(rr.get("unique", 0) or 0)
+    # Invariant: active must never exceed total.
+    active = min(active, total_customers) if total_customers else active
     repeat_rate = round((rr.get("repeat", 0) / rr["unique"]) * 100, 1) if rr.get("unique") else 0
 
     nps_rows = nps_rows or []
@@ -665,17 +717,17 @@ async def command_center(
 
     api_health = round(((api_total - api_failed) / api_total) * 100, 2) if api_total else 100.0
 
-    liab = (liab[0] if liab else {}) or {}
-    burn_ratio = await _burn_ratio()
-    outstanding_points = int(liab.get("points", 0) or 0)
+    outstanding_points = int(summary.get("points", 0) or 0)
     outstanding_inr = round(outstanding_points * burn_ratio, 2)
 
+    cohort_map = {r["_id"]: r["count"] for r in (cust_facet.get("cohorts") or [])}
     cohort = {
-        "today": c_today, "last_7d": c_7d, "last_30d": c_30d,
-        "last_90d": c_90d, "older": c_older,
+        "today": cohort_map.get("today", 0), "last_7d": cohort_map.get("last_7d", 0),
+        "last_30d": cohort_map.get("last_30d", 0), "last_90d": cohort_map.get("last_90d", 0),
+        "older": cohort_map.get("older", 0),
     }
     sparkline = [{"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]}
-                 for r in (spark_rows or [])]
+                 for r in (txn_facet.get("spark") or [])]
 
     # --- Alerts (live computed) ---
     alerts = []
@@ -708,6 +760,7 @@ async def command_center(
         "period": period,
         "filters": filter_meta,
         "generated_at": now.isoformat(),
+        "degraded": degraded,   # non-empty = these blocks timed out; UI shows a retry banner
         "kpis": {
             "net_sales": round(net, 2),
             "net_sales_delta_pct": sales_delta,
@@ -730,19 +783,35 @@ async def command_center(
         "sparkline": sparkline,
         "alerts": alerts,
     }
-    _CC_CACHE[_ck] = (_time.monotonic(), result)
+    if not degraded:
+        # Don't cache partial (timed-out) responses — a retry should recompute.
+        _CC_CACHE[_ck] = (_time.monotonic(), result)
     return result
 
 
 @router.get("/city-performance")
+@dash_cache("city-perf")
 async def city_performance(period: str = "30d", user: dict = Depends(get_current_user)):
+    """City revenue rollup. Groups bills by store_id (small cardinality) then
+    resolves the city from the stores master in Python — the previous
+    $lookup-per-bill scan timed out (500) on production-scale data. Bills whose
+    store has no master row fall back to the transaction's own city field."""
     start, end = _date_range(period)
     pipeline = [
         {"$match": loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})},
-        {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "store"}},
-        {"$unwind": "$store"},
-        {"$group": {"_id": "$store.city", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
-        {"$sort": {"net": -1}},
+        {"$group": {"_id": {"s": "$store_id", "c": "$city"},
+                    "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
-    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(50)
-    return [{"city": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in rows]
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(2000)
+    store_ids = list({r["_id"].get("s") for r in rows if r["_id"].get("s")})
+    s_map = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}},
+                                                       {"_id": 0, "id": 1, "city": 1})}
+    city_agg: Dict[str, Dict[str, float]] = {}
+    for r in rows:
+        city = s_map.get(r["_id"].get("s"), {}).get("city") or r["_id"].get("c") or "Unknown"
+        c = city_agg.setdefault(city, {"net": 0.0, "txns": 0})
+        c["net"] += r.get("net", 0) or 0
+        c["txns"] += r.get("txns", 0) or 0
+    return [{"city": city, "net": round(v["net"], 2), "txns": v["txns"]}
+            for city, v in sorted(city_agg.items(), key=lambda kv: -kv[1]["net"])[:50]]
+

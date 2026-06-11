@@ -3,6 +3,7 @@ import api from "@/lib/api";
 import { toast } from "sonner";
 import { ShieldCheck, AlertTriangle, CheckCircle2, RefreshCw, Coins, Users } from "lucide-react";
 import { PageHeader, SectionHeading, KPICard } from "./_shared";
+import CsvReconSection from "./recon/CsvReconSection";
 
 const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
@@ -56,6 +57,9 @@ export default function ReconciliationPage() {
         }
       />
       <div className="p-4 md:p-8 space-y-6">
+        {/* CSV ↔ DB row-level reconciliation (re-upload a source CSV) */}
+        <CsvReconSection />
+
         {!report && <div className="text-neutral-500">Running first reconciliation…</div>}
 
         {report && (

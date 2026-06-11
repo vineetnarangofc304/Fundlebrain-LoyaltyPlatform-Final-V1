@@ -17,8 +17,39 @@ from database import (
 )
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
+from routes._db_timeout import db_deadline
+from routes._dash_cache import dash_cache
 
-router = APIRouter(prefix="/dashboard", tags=["fundlebrain"])
+router = APIRouter(prefix="/dashboard", tags=["fundlebrain"], dependencies=[Depends(db_deadline)])
+
+# Month-key expression that works whether bill_date is an ISO string (CSV ingest)
+# or a BSON datetime (live POS) — $substr on a datetime would throw.
+_BILL_MONTH_EXPR = {
+    "$cond": {
+        "if": {"$eq": [{"$type": "$bill_date"}, "string"]},
+        "then": {"$substr": ["$bill_date", 0, 7]},
+        "else": {"$dateToString": {"format": "%Y-%m", "date": "$bill_date"}},
+    }
+}
+
+
+async def _quantile_cuts_indexed(col, field: str, filt: Dict[str, Any], total: int,
+                                 default=0, descending: bool = False) -> List[Any]:
+    """Exact population quintile cut values via 4 index-backed sort+skip queries.
+
+    Replaces the old `to_list(100000)` full-collection pull which silently
+    TRUNCATED the population (wrong RFM on >100k customers) and ate RAM.
+    `descending=True` returns the value at quantile q of the DESC-sorted field
+    (used for recency: most-recent first; nulls sort last in Mongo desc order).
+    """
+    cuts: List[Any] = []
+    direction = -1 if descending else 1
+    for q in (0.2, 0.4, 0.6, 0.8):
+        k = max(0, min(max(total - 1, 0), int(total * q)))
+        rows = await col.find(filt, {field: 1, "_id": 0}).sort(field, direction).skip(k).limit(1).to_list(1)
+        v = rows[0].get(field) if rows else None
+        cuts.append(v if v is not None else default)
+    return cuts
 
 
 # -------------------- helpers --------------------
@@ -428,46 +459,35 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
 
 
 async def _rfm_breakpoints() -> Dict[str, List[float]]:
-    """Compute quintile breakpoints for R/F/M from the whole customer base (live)."""
+    """Quintile breakpoints for R/F/M across the whole base — computed with
+    index-backed skip queries (exact at any scale, no full-collection pull)."""
+    import asyncio as _aio
     now = datetime.now(timezone.utc)
-
-    # Pull recency/visit_count/lifetime_spend for every customer
-    rows = await customers_col.find(
-        {}, {"_id": 0, "id": 1, "last_visit_at": 1, "visit_count": 1, "lifetime_spend": 1}
-    ).to_list(100000)
-
-    rec, freq, mon = [], [], []
-    for c in rows:
-        lv = c.get("last_visit_at")
-        if lv:
-            try:
-                dt = datetime.fromisoformat(lv.replace("Z", "+00:00"))
-                rec.append((now - dt).days)
-            except Exception:
-                rec.append(9999)
-        else:
+    total = await customers_col.estimated_document_count()
+    if not total:
+        return {"recency": [0, 0, 0, 0], "frequency": [0, 0, 0, 0], "monetary": [0, 0, 0, 0]}
+    lv_cuts, freq, mon = await _aio.gather(
+        _quantile_cuts_indexed(customers_col, "last_visit_at", {}, total, default=None, descending=True),
+        _quantile_cuts_indexed(customers_col, "visit_count", {}, total, default=0),
+        _quantile_cuts_indexed(customers_col, "lifetime_spend", {}, total, default=0),
+    )
+    rec = []
+    for v in lv_cuts:
+        if not v:
             rec.append(9999)
-        freq.append(c.get("visit_count", 0) or 0)
-        mon.append(c.get("lifetime_spend", 0) or 0)
-
-    def quintile_cuts(values: List[float]) -> List[float]:
-        values = sorted(values)
-        n = len(values)
-        if n == 0:
-            return [0, 0, 0, 0]
-        return [values[max(0, min(n - 1, int(n * q)))] for q in (0.2, 0.4, 0.6, 0.8)]
-
-    return {
-        "recency": quintile_cuts(rec),
-        "frequency": quintile_cuts(freq),
-        "monetary": quintile_cuts(mon),
-    }
+            continue
+        try:
+            rec.append(max(0, (now - datetime.fromisoformat(str(v).replace("Z", "+00:00"))).days))
+        except Exception:
+            rec.append(9999)
+    return {"recency": rec, "frequency": freq, "monetary": mon}
 
 
 # ============================================================
 # Store Performance v2 — leaderboard / by-city / day-of-week
 # ============================================================
 @router.get("/store-performance-v2")
+@dash_cache("store-perf-v2")
 async def store_performance_v2(
     period_days: int = 30,
     user: dict = Depends(get_current_user),
@@ -486,28 +506,49 @@ async def store_performance_v2(
     else:
         scope_match = {}
 
-    # ---- Leaderboard (R5: loyalty bills only) ----
+    # ---- Leaderboard (R5: loyalty bills only) — two-stage distinct visitors,
+    # no $addToSet (which blows the 16MB group limit at production scale) ----
+    import asyncio as _aio
     pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
-        {"$group": {
-            "_id": "$store_id",
-            "net": {"$sum": "$net_amount"},
-            "gross": {"$sum": "$gross_amount"},
-            "discount": {"$sum": "$discount_amount"},
-            "txns": {"$sum": 1},
-            "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
-            "visitors": {"$addToSet": "$customer_mobile"},
-        }},
+        {"$group": {"_id": {"s": "$store_id", "m": "$customer_mobile"},
+                    "net": {"$sum": "$net_amount"},
+                    "gross": {"$sum": "$gross_amount"},
+                    "discount": {"$sum": "$discount_amount"},
+                    "txns": {"$sum": 1},
+                    "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}}}},
+        {"$group": {"_id": "$_id.s",
+                    "net": {"$sum": "$net"}, "gross": {"$sum": "$gross"},
+                    "discount": {"$sum": "$discount"}, "txns": {"$sum": "$txns"},
+                    "items": {"$sum": "$items"}, "visitors": {"$sum": 1}}},
         {"$sort": {"net": -1}},
     ]
-    rows = await transactions_col.aggregate(pipe).to_list(200)
 
     # Previous-period comparison
     prev_pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": prev_start, "$lt": start}, **scope_match})},
         {"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
     ]
-    prev_rows = await transactions_col.aggregate(prev_pipe).to_list(200)
+
+    # ---- Hour × day heatmap (single scan; by_day derived from it) ----
+    _bill_dt = {"$cond": {
+        "if": {"$eq": [{"$type": "$bill_date"}, "date"]},
+        "then": "$bill_date",
+        "else": {"$dateFromString": {"dateString": {"$ifNull": ["$bill_date", ""]}, "onError": None}},
+    }}
+    heat_pipe = [
+        {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
+        {"$project": {"dt": _bill_dt, "net_amount": 1}},
+        {"$match": {"dt": {"$ne": None}}},
+        {"$group": {"_id": {"d": {"$dayOfWeek": "$dt"}, "h": {"$hour": "$dt"}},
+                    "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+    ]
+
+    rows, prev_rows, heat_rows = await _aio.gather(
+        transactions_col.aggregate(pipe, allowDiskUse=True).to_list(500),
+        transactions_col.aggregate(prev_pipe, allowDiskUse=True).to_list(500),
+        transactions_col.aggregate(heat_pipe, allowDiskUse=True).to_list(500),
+    )
     prev_map = {r["_id"]: r for r in prev_rows}
 
     store_ids = [r["_id"] for r in rows]
@@ -534,10 +575,10 @@ async def store_performance_v2(
             "city": s.get("city"),
             "region": s.get("region"),
             "net": round(r["net"], 2),
-            "gross": round(r["gross"], 2),
-            "discount": round(r["discount"], 2),
+            "gross": round(r.get("gross", 0) or 0, 2),
+            "discount": round(r.get("discount", 0) or 0, 2),
             "txns": r["txns"],
-            "visitors": len([v for v in r["visitors"] if v]),       # window-scoped distinct shoppers
+            "visitors": r["visitors"],                              # window-scoped distinct shoppers
             "home_customers": home_counts.get(r["_id"], 0),         # R2: customers anchored to this store
             "unique_customers": home_counts.get(r["_id"], 0),       # alias for back-compat
             "items": r["items"],
@@ -546,71 +587,41 @@ async def store_performance_v2(
             "delta_pct": delta,
         })
 
-    # ---- By city ----
-    city_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
-        {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "store"}},
-        {"$unwind": "$store"},
-        {"$group": {
-            "_id": "$store.city",
-            "net": {"$sum": "$net_amount"},
-            "txns": {"$sum": 1},
-            "stores": {"$addToSet": "$store_id"},
-            "customers": {"$addToSet": "$customer_mobile"},
-        }},
-        {"$sort": {"net": -1}},
-    ]
-    city_rows = await transactions_col.aggregate(city_pipe).to_list(50)
+    # ---- By city — rolled up from the store leaderboard (no per-bill $lookup) ----
+    city_agg: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        s = stores.get(r["_id"], {})
+        city = s.get("city") or "Unknown"
+        c = city_agg.setdefault(city, {"net": 0.0, "txns": 0, "stores": 0, "visitors": 0})
+        c["net"] += r["net"]
+        c["txns"] += r["txns"]
+        c["stores"] += 1
+        c["visitors"] += r["visitors"]
     by_city = [{
-        "city": r["_id"],
-        "net": round(r["net"], 2),
-        "txns": r["txns"],
-        "stores": len(r["stores"]),
-        "unique_customers": len([c for c in r["customers"] if c]),
-        "aov": round(r["net"] / r["txns"], 2) if r["txns"] else 0,
-    } for r in city_rows]
+        "city": city,
+        "net": round(c["net"], 2),
+        "txns": c["txns"],
+        "stores": c["stores"],
+        "unique_customers": c["visitors"],
+        "aov": round(c["net"] / c["txns"], 2) if c["txns"] else 0,
+    } for city, c in sorted(city_agg.items(), key=lambda kv: -kv[1]["net"])]
 
-    # ---- Day-of-week analysis ----
-    dow_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
-        {"$project": {
-            "dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$bill_date"}}},
-            "hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}},
-            "net_amount": 1,
-        }},
-        {"$group": {
-            "_id": "$dow",
-            "net": {"$sum": "$net_amount"},
-            "txns": {"$sum": 1},
-        }},
-        {"$sort": {"_id": 1}},
-    ]
-    dow_rows = await transactions_col.aggregate(dow_pipe).to_list(7)
+    # ---- Day-of-week + heatmap grids (both from the single heat scan) ----
     day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    by_day = [{
-        "day": day_names[(r["_id"] - 1) % 7],
-        "net": round(r["net"], 2),
-        "txns": r["txns"],
-        "aov": round(r["net"] / r["txns"], 2) if r["txns"] else 0,
-    } for r in dow_rows]
-
-    # ---- Hour × day heatmap (24×7) ----
-    heat_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
-        {"$project": {
-            "dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$bill_date"}}},
-            "hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}},
-            "net_amount": 1,
-        }},
-        {"$group": {"_id": {"d": "$dow", "h": "$hour"}, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
-    ]
-    heat_rows = await transactions_col.aggregate(heat_pipe).to_list(500)
-    heat_grid = []
     grid: Dict[int, Dict[int, Dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: {"net": 0, "txns": 0}))
+    dow_agg: Dict[int, Dict[str, float]] = defaultdict(lambda: {"net": 0.0, "txns": 0})
     for r in heat_rows:
-        d = r["_id"]["d"]
-        h = r["_id"]["h"]
+        d, h = r["_id"]["d"], r["_id"]["h"]
         grid[d][h] = {"net": r["net"], "txns": r["txns"]}
+        dow_agg[d]["net"] += r["net"]
+        dow_agg[d]["txns"] += r["txns"]
+    by_day = [{
+        "day": day_names[(d - 1) % 7],
+        "net": round(v["net"], 2),
+        "txns": v["txns"],
+        "aov": round(v["net"] / v["txns"], 2) if v["txns"] else 0,
+    } for d, v in sorted(dow_agg.items())]
+    heat_grid = []
     for d in range(1, 8):
         for h in range(0, 24):
             cell = grid[d].get(h, {"net": 0, "txns": 0})
@@ -635,12 +646,18 @@ async def store_performance_v2(
 # RFM & Churn — 5×5 heatmap + 11 named segments + churn buckets
 # ============================================================
 @router.get("/rfm")
+@dash_cache("rfm")
 async def rfm_dashboard(
     period_days: int = Query(0, ge=0, le=3650),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     user: dict = Depends(get_current_user),
 ):
+    """Scale-proof RFM: quintile cuts via index-backed skip queries + a single
+    $facet bucketing aggregation. The previous implementation pulled every
+    customer into Python with to_list(100000) — silently truncating (and thus
+    mis-computing) any base larger than 100k customers."""
+    import asyncio as _aio
     from ._date_range import parse_date_range
     now = datetime.now(timezone.utc)
     start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
@@ -651,72 +668,139 @@ async def rfm_dashboard(
             rng["$lt"] = end_iso
         base_query["last_visit_at"] = rng
 
-    customers = await customers_col.find(
-        base_query, {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1,
-              "last_visit_at": 1, "visit_count": 1, "lifetime_spend": 1, "churn_risk": 1}
-    ).to_list(100000)
+    total_population = await customers_col.count_documents(base_query)
+    if total_population == 0:
+        return {"generated_at": now.isoformat(), "total_customers": 0,
+                "rfm_cutoffs": {"recency_days_q": [], "frequency_q": [], "monetary_inr_q": []},
+                "heatmap": [], "segments": [], "churn_distribution": {"low": 0, "medium": 0, "high": 0}}
 
-    rec_vals, freq_vals, mon_vals = [], [], []
-    enriched = []
-    for c in customers:
-        lv = c.get("last_visit_at")
-        if lv:
-            try:
-                dt = datetime.fromisoformat(lv.replace("Z", "+00:00"))
-                rec = (now - dt).days
-            except Exception:
-                rec = 9999
-        else:
-            rec = 9999
-        freq = c.get("visit_count", 0) or 0
-        mon = c.get("lifetime_spend", 0) or 0
-        rec_vals.append(rec)
-        freq_vals.append(freq)
-        mon_vals.append(mon)
-        enriched.append({**c, "_recency_days": rec, "_freq": freq, "_mon": mon})
+    lv_cuts, freq_cuts, mon_cuts = await _aio.gather(
+        _quantile_cuts_indexed(customers_col, "last_visit_at", base_query, total_population,
+                               default=None, descending=True),
+        _quantile_cuts_indexed(customers_col, "visit_count", base_query, total_population, default=0),
+        _quantile_cuts_indexed(customers_col, "lifetime_spend", base_query, total_population, default=0),
+    )
 
-    def cuts(values: List[float]) -> List[float]:
-        values = sorted(values)
-        n = len(values)
-        if n == 0:
-            return [0, 0, 0, 0]
-        return [values[max(0, min(n - 1, int(n * q)))] for q in (0.2, 0.4, 0.6, 0.8)]
+    def _days_since(v) -> int:
+        if not v:
+            return 9999
+        try:
+            return max(0, (now - datetime.fromisoformat(str(v).replace("Z", "+00:00"))).days)
+        except Exception:
+            return 9999
+    rec_cuts = [_days_since(v) for v in lv_cuts]
 
-    rec_cuts = cuts(rec_vals)
-    freq_cuts = cuts(freq_vals)
-    mon_cuts = cuts(mon_vals)
+    # recency quintile (1 = most recent) from last_visit_at boundary strings
+    rec_branches = []
+    for i, b in enumerate(lv_cuts):
+        if b is None:
+            continue
+        rec_branches.append({"case": {"$gte": [{"$ifNull": ["$last_visit_at", ""]}, b]}, "then": i + 1})
+    recq_expr = {"$switch": {"branches": rec_branches, "default": 5}} if rec_branches else 5
 
-    # 5x5 heatmap (R x F), with M shown as cell average spend
+    def _qswitch(field: str, cuts: List[float]):
+        branches = [{"case": {"$lte": [{"$ifNull": [field, 0]}, c]}, "then": i + 1}
+                    for i, c in enumerate(cuts)]
+        return {"$switch": {"branches": branches, "default": 5}}
+
+    pipe = [
+        {"$match": base_query},
+        {"$project": {
+            "recq": recq_expr,
+            "f": _qswitch("$visit_count", freq_cuts),
+            "m": _qswitch("$lifetime_spend", mon_cuts),
+            "spend": {"$ifNull": ["$lifetime_spend", 0]},
+            "churn_risk": 1,
+        }},
+        {"$facet": {
+            "rfm": [{"$group": {"_id": {"r": {"$subtract": [6, "$recq"]}, "f": "$f", "m": "$m"},
+                                "count": {"$sum": 1}, "spend": {"$sum": "$spend"}}}],
+            "churn": [{"$group": {"_id": "$churn_risk", "count": {"$sum": 1}}}],
+        }},
+    ]
+    res = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(1)
+    facet = res[0] if res else {}
+
     heatmap_count: Dict[str, int] = defaultdict(int)
     heatmap_spend: Dict[str, float] = defaultdict(float)
     segment_counts: Dict[str, int] = defaultdict(int)
     segment_spend: Dict[str, float] = defaultdict(float)
-    segment_examples: Dict[str, List[dict]] = defaultdict(list)
-    churn_buckets = {"low": 0, "medium": 0, "high": 0}
-    total_population = len(enriched)
+    segment_top_combo: Dict[str, tuple] = {}  # segment -> (count, r, f, m)
 
-    for c in enriched:
-        r = 6 - _quintile(c["_recency_days"], rec_cuts)
-        f = _quintile(c["_freq"], freq_cuts)
-        m = _quintile(c["_mon"], mon_cuts)
+    for row in facet.get("rfm", []):
+        r, f, m = row["_id"]["r"], row["_id"]["f"], row["_id"]["m"]
         seg = _segment_label(r, f, m)
         key = f"{r},{f}"
-        heatmap_count[key] += 1
-        heatmap_spend[key] += c["_mon"]
-        segment_counts[seg] += 1
-        segment_spend[seg] += c["_mon"]
-        if len(segment_examples[seg]) < 10:
-            segment_examples[seg].append({
-                "id": c["id"], "name": c.get("name"), "mobile": c.get("mobile"),
-                "city": c.get("city"), "tier": c.get("tier"),
-                "recency_days": c["_recency_days"], "visits": c["_freq"],
-                "lifetime_spend": round(c["_mon"], 2),
-                "rfm": f"{r}{f}{m}",
-            })
-        risk = c.get("churn_risk") or "low"
-        if risk not in churn_buckets:
-            risk = "low"
-        churn_buckets[risk] += 1
+        heatmap_count[key] += row["count"]
+        heatmap_spend[key] += row["spend"]
+        segment_counts[seg] += row["count"]
+        segment_spend[seg] += row["spend"]
+        if seg not in segment_top_combo or row["count"] > segment_top_combo[seg][0]:
+            segment_top_combo[seg] = (row["count"], r, f, m)
+
+    churn_buckets = {"low": 0, "medium": 0, "high": 0}
+    for row in facet.get("churn", []):
+        risk = row["_id"] if row["_id"] in churn_buckets else "low"
+        churn_buckets[risk] += row["count"]
+
+    # ---- Example customers per segment: 1 small indexed range query per segment ----
+    def _combo_query(r: int, f: int, m: int) -> Dict[str, Any]:
+        q: Dict[str, Any] = {}
+        recq = 6 - r
+        lv: Dict[str, Any] = {}
+        if recq == 1:
+            if lv_cuts[0] is not None:
+                lv["$gte"] = lv_cuts[0]
+        elif recq <= 4:
+            lo, hi = lv_cuts[recq - 1], lv_cuts[recq - 2]
+            if lo is not None:
+                lv["$gte"] = lo
+            if hi is not None:
+                lv["$lt"] = hi
+        else:
+            if lv_cuts[3] is not None:
+                lv["$lt"] = lv_cuts[3]
+        if lv:
+            q["last_visit_at"] = lv
+        fq: Dict[str, Any] = {}
+        if f == 1:
+            fq["$lte"] = freq_cuts[0]
+        elif f <= 4:
+            fq["$gt"], fq["$lte"] = freq_cuts[f - 2], freq_cuts[f - 1]
+        else:
+            fq["$gt"] = freq_cuts[3]
+        q["visit_count"] = fq
+        mq: Dict[str, Any] = {}
+        if m == 1:
+            mq["$lte"] = mon_cuts[0]
+        elif m <= 4:
+            mq["$gt"], mq["$lte"] = mon_cuts[m - 2], mon_cuts[m - 1]
+        else:
+            mq["$gt"] = mon_cuts[3]
+        q["lifetime_spend"] = mq
+        return q
+
+    async def _examples_for(seg: str):
+        combo = segment_top_combo.get(seg)
+        if not combo:
+            return seg, []
+        _, r, f, m = combo
+        rows = await customers_col.find(
+            _combo_query(r, f, m),
+            {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1,
+             "last_visit_at": 1, "visit_count": 1, "lifetime_spend": 1},
+        ).sort("lifetime_spend", -1).limit(10).to_list(10)
+        return seg, [{
+            "id": c.get("id"), "name": c.get("name"), "mobile": c.get("mobile"),
+            "city": c.get("city"), "tier": c.get("tier"),
+            "recency_days": _days_since(c.get("last_visit_at")),
+            "visits": c.get("visit_count", 0) or 0,
+            "lifetime_spend": round(c.get("lifetime_spend", 0) or 0, 2),
+            "rfm": f"{r}{f}{m}",
+        } for c in rows]
+
+    example_pairs = await _aio.gather(*[_examples_for(s) for s in SEGMENT_ORDER])
+    segment_examples = dict(example_pairs)
 
     heatmap = []
     for r in range(1, 6):
@@ -778,13 +862,18 @@ SPEND_BANDS = [
 
 
 @router.get("/cohorts-segmentation")
+@dash_cache("cohorts")
 async def cohorts_segmentation(
     period_days: int = Query(0, ge=0, le=3650),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
-    """Live cohorts + segmentation: one-timers, frequency bands, ATV, retention triangle."""
+    """Live cohorts + segmentation — scale-proof: single $facet over the customers
+    master (visit_count / lifetime_spend / tier are canonically maintained per R3),
+    Mongo-side retention triangle, indexed example lookups. The previous version
+    pulled up to 500k rows into Python (truncating + mis-computing large bases)."""
+    import asyncio as _aio
     from ._date_range import parse_date_range
     now = datetime.now(timezone.utc)
     start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
@@ -795,89 +884,96 @@ async def cohorts_segmentation(
             rng["$lt"] = end_iso
         cohort_query["last_visit_at"] = rng
 
-    # ---- One pass over transactions: per-customer aggregates (R4: by mobile; R5: loyalty only) ----
-    cust_pipe = [
-        {"$match": LOYALTY_TX_MATCH},
-        {"$group": {
-            "_id": "$customer_mobile",
-            "visits": {"$sum": 1},
-            "spend": {"$sum": "$net_amount"},
-            "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
-            "first": {"$min": "$bill_date"},
-            "last": {"$max": "$bill_date"},
+    freq_switch = {"$switch": {"branches": [
+        {"case": {"$eq": ["$vc", 1]}, "then": "one_timer"},
+        {"case": {"$lte": ["$vc", 5]}, "then": "light"},
+        {"case": {"$lte": ["$vc", 15]}, "then": "regular"},
+        {"case": {"$lte": ["$vc", 30]}, "then": "loyal"},
+    ], "default": "vip"}}
+    spend_switch = {"$switch": {"branches": [
+        {"case": {"$lt": ["$sp", 5000]}, "then": "tier_1"},
+        {"case": {"$lt": ["$sp", 25000]}, "then": "tier_2"},
+        {"case": {"$lt": ["$sp", 75000]}, "then": "tier_3"},
+        {"case": {"$lt": ["$sp", 200000]}, "then": "tier_4"},
+    ], "default": "tier_5"}}
+    rec_switch = {"$switch": {"branches": [
+        {"case": {"$gte": ["$lv", (now - timedelta(days=30)).isoformat()]}, "then": "0-30d"},
+        {"case": {"$gte": ["$lv", (now - timedelta(days=90)).isoformat()]}, "then": "31-90d"},
+        {"case": {"$gte": ["$lv", (now - timedelta(days=180)).isoformat()]}, "then": "91-180d"},
+    ], "default": "180d+"}}
+    _grp = {"count": {"$sum": 1}, "spend": {"$sum": "$sp"}, "visits": {"$sum": "$vc"}}
+    facet_pipe = [
+        {"$match": cohort_query},
+        {"$project": {"vc": {"$ifNull": ["$visit_count", 0]},
+                      "sp": {"$ifNull": ["$lifetime_spend", 0]},
+                      "tier": 1, "lv": {"$ifNull": ["$last_visit_at", ""]}}},
+        {"$facet": {
+            "totals": [{"$group": {"_id": None, "total": {"$sum": 1},
+                                   "transacted": {"$sum": {"$cond": [{"$gte": ["$vc", 1]}, 1, 0]}}}}],
+            "freq": [{"$match": {"vc": {"$gte": 1}}}, {"$group": {"_id": freq_switch, **_grp}}],
+            "spend": [{"$match": {"vc": {"$gte": 1}}}, {"$group": {"_id": spend_switch, **_grp}}],
+            "tier": [{"$match": {"vc": {"$gte": 1}}},
+                     {"$group": {"_id": {"$toLower": {"$ifNull": ["$tier", "unknown"]}}, **_grp}}],
+            "onetimer_rec": [{"$match": {"vc": 1, "lv": {"$ne": ""}}},
+                             {"$group": {"_id": rec_switch, "count": {"$sum": 1}}}],
         }},
     ]
-    cust_rows = await transactions_col.aggregate(cust_pipe).to_list(200000)
-    cust_map = {r["_id"]: r for r in cust_rows}
 
-    # Pull customer master for tier/city (loyalty members only) — key by mobile (R4)
-    masters = await customers_col.find(
-        cohort_query,
-        {"_id": 0, "id": 1, "mobile": 1, "tier": 1, "city": 1,
-         "first_purchase_at": 1, "name": 1, "home_store_id": 1}
-    ).to_list(200000)
+    # ---- Example customers per band: small indexed range queries (gathered) ----
+    FREQ_RANGES = {"one_timer": {"visit_count": 1},
+                   "light": {"visit_count": {"$gte": 2, "$lte": 5}},
+                   "regular": {"visit_count": {"$gte": 6, "$lte": 15}},
+                   "loyal": {"visit_count": {"$gte": 16, "$lte": 30}},
+                   "vip": {"visit_count": {"$gte": 31}}}
+    SPEND_RANGES = {"tier_1": {"lifetime_spend": {"$lt": 5000}},
+                    "tier_2": {"lifetime_spend": {"$gte": 5000, "$lt": 25000}},
+                    "tier_3": {"lifetime_spend": {"$gte": 25000, "$lt": 75000}},
+                    "tier_4": {"lifetime_spend": {"$gte": 75000, "$lt": 200000}},
+                    "tier_5": {"lifetime_spend": {"$gte": 200000}}}
 
-    # ---- Frequency segmentation ----
-    freq_buckets: Dict[str, Dict[str, Any]] = {b["key"]: {**b, "count": 0, "spend": 0.0,
-                                                             "visits": 0, "examples": []}
-                                                  for b in FREQ_BANDS}
-    spend_buckets: Dict[str, Dict[str, Any]] = {b["key"]: {**b, "count": 0, "spend": 0.0,
-                                                              "visits": 0, "examples": []}
-                                                   for b in SPEND_BANDS}
-    tier_buckets: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"count": 0, "spend": 0.0, "visits": 0})
-
-    # Customers with transactions
-    transacted = 0
-    for cust in masters:
-        cid = cust["id"]
-        mob = cust.get("mobile")
-        tx = cust_map.get(mob)  # R4: cust_map is keyed by mobile
-        if not tx:
-            continue
-        transacted += 1
-        visits = tx["visits"]
-        spend = tx["spend"]
-
-        # frequency band
-        for b in FREQ_BANDS:
-            if b["min"] <= visits <= b["max"]:
-                bucket = freq_buckets[b["key"]]
-                bucket["count"] += 1
-                bucket["spend"] += spend
-                bucket["visits"] += visits
-                if len(bucket["examples"]) < 10:
-                    bucket["examples"].append({
-                        "id": cid, "name": cust.get("name"), "mobile": cust.get("mobile"),
-                        "city": cust.get("city"), "tier": cust.get("tier"),
+    async def _band_examples(extra: Dict[str, Any]):
+        rows = await customers_col.find(
+            {**cohort_query, "visit_count": {"$gte": 1}, **extra},
+            {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1,
+             "visit_count": 1, "lifetime_spend": 1},
+        ).sort("lifetime_spend", -1).limit(10).to_list(10)
+        out = []
+        for c in rows:
+            visits = c.get("visit_count", 0) or 0
+            spend = c.get("lifetime_spend", 0) or 0
+            out.append({"id": c.get("id"), "name": c.get("name"), "mobile": c.get("mobile"),
+                        "city": c.get("city"), "tier": c.get("tier"),
                         "visits": visits, "spend": round(spend, 2),
-                        "atv": round(spend / visits, 2) if visits else 0,
-                    })
-                break
+                        "atv": round(spend / visits, 2) if visits else 0})
+        return out
 
-        # spend band
-        for b in SPEND_BANDS:
-            if b["min"] <= spend < b["max"]:
-                bucket = spend_buckets[b["key"]]
-                bucket["count"] += 1
-                bucket["spend"] += spend
-                bucket["visits"] += visits
-                if len(bucket["examples"]) < 10:
-                    bucket["examples"].append({
-                        "id": cid, "name": cust.get("name"), "mobile": cust.get("mobile"),
-                        "city": cust.get("city"), "tier": cust.get("tier"),
-                        "visits": visits, "spend": round(spend, 2),
-                        "atv": round(spend / visits, 2) if visits else 0,
-                    })
-                break
+    facet_res, *example_lists = await _aio.gather(
+        customers_col.aggregate(facet_pipe, allowDiskUse=True).to_list(1),
+        *[_band_examples(rangeq) for rangeq in
+          list(FREQ_RANGES.values()) + list(SPEND_RANGES.values())],
+    )
+    facet = facet_res[0] if facet_res else {}
+    band_keys = list(FREQ_RANGES.keys()) + list(SPEND_RANGES.keys())
+    examples_by_key = dict(zip(band_keys, example_lists))
 
-        # tier
-        t = (cust.get("tier") or "unknown").lower()
-        tier_buckets[t]["count"] += 1
-        tier_buckets[t]["spend"] += spend
-        tier_buckets[t]["visits"] += visits
+    totals_row = (facet.get("totals") or [{}])[0]
+    total_pop = totals_row.get("total", 0)
+    total_with_tx = totals_row.get("transacted", 0)
 
-    total_pop = len(masters)
-    total_with_tx = transacted
+    freq_buckets: Dict[str, Dict[str, Any]] = {
+        b["key"]: {**b, "count": 0, "spend": 0.0, "visits": 0,
+                   "examples": examples_by_key.get(b["key"], [])}
+        for b in FREQ_BANDS}
+    spend_buckets: Dict[str, Dict[str, Any]] = {
+        b["key"]: {**b, "count": 0, "spend": 0.0, "visits": 0,
+                   "examples": examples_by_key.get(b["key"], [])}
+        for b in SPEND_BANDS}
+    for r in facet.get("freq", []):
+        if r["_id"] in freq_buckets:
+            freq_buckets[r["_id"]].update(count=r["count"], spend=r["spend"], visits=r["visits"])
+    for r in facet.get("spend", []):
+        if r["_id"] in spend_buckets:
+            spend_buckets[r["_id"]].update(count=r["count"], spend=r["spend"], visits=r["visits"])
 
     def _finalise(bands_dict: Dict[str, Dict[str, Any]], bands_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out = []
@@ -905,56 +1001,49 @@ async def cohorts_segmentation(
     spend_seg = _finalise(spend_buckets, SPEND_BANDS)
 
     tier_seg = []
-    for tier_key, tdata in tier_buckets.items():
-        if tdata["count"] == 0:
+    for r in facet.get("tier", []):
+        if not r["count"]:
             continue
         tier_seg.append({
-            "tier": tier_key,
-            "count": tdata["count"],
-            "pct_of_base": round((tdata["count"] / total_pop) * 100, 2) if total_pop else 0,
-            "visits": tdata["visits"],
-            "total_spend": round(tdata["spend"], 2),
-            "avg_lifetime_spend": round(tdata["spend"] / tdata["count"], 2) if tdata["count"] else 0,
-            "atv": round(tdata["spend"] / tdata["visits"], 2) if tdata["visits"] else 0,
+            "tier": r["_id"],
+            "count": r["count"],
+            "pct_of_base": round((r["count"] / total_pop) * 100, 2) if total_pop else 0,
+            "visits": r["visits"],
+            "total_spend": round(r["spend"], 2),
+            "avg_lifetime_spend": round(r["spend"] / r["count"], 2) if r["count"] else 0,
+            "atv": round(r["spend"] / r["visits"], 2) if r["visits"] else 0,
         })
     tier_seg.sort(key=lambda x: -x["total_spend"])
 
-    # ---- Retention triangle: signup month × month-offset ----
-    # For each customer, get first_purchase month and all months they transacted
-    # Then compute % retained at offset 0,1,2,… (R4: key by mobile; R5: loyalty only)
-    monthly_visits = await transactions_col.aggregate([
+    # ---- Retention triangle: signup month × month-offset — computed FULLY in Mongo ----
+    def _to_int(expr):
+        return {"$convert": {"input": expr, "to": "int", "onError": 0}}
+
+    tri_pipe = [
         {"$match": LOYALTY_TX_MATCH},
-        {"$group": {
-            "_id": {"cid": "$customer_mobile", "month": {"$substr": ["$bill_date", 0, 7]}},
+        {"$group": {"_id": {"m": "$customer_mobile", "mo": _BILL_MONTH_EXPR}}},
+        {"$group": {"_id": "$_id.m", "months": {"$addToSet": "$_id.mo"},
+                    "first": {"$min": "$_id.mo"}}},
+        {"$unwind": "$months"},
+        {"$project": {
+            "first": 1,
+            "offset": {"$add": [
+                {"$multiply": [{"$subtract": [_to_int({"$substr": ["$months", 0, 4]}),
+                                              _to_int({"$substr": ["$first", 0, 4]})]}, 12]},
+                {"$subtract": [_to_int({"$substr": ["$months", 5, 2]}),
+                               _to_int({"$substr": ["$first", 5, 2]})]},
+            ]},
         }},
-    ]).to_list(500000)
-
-    # signup_month per customer = first purchase month
-    first_month: Dict[str, str] = {}
-    for mob, row in cust_map.items():
-        if row.get("first"):
-            first_month[mob] = row["first"][:7]
-
-    # build months_active per customer
-    months_active: Dict[str, set] = defaultdict(set)
-    for r in monthly_visits:
-        months_active[r["_id"]["cid"]].add(r["_id"]["month"])
-
-    # Build cohort grid: cohort_month -> [retained_at_offset_0, _1, ...]
+        {"$match": {"offset": {"$gte": 0, "$lte": 11}}},
+        {"$group": {"_id": {"c": "$first", "o": "$offset"}, "retained": {"$sum": 1}}},
+    ]
+    tri_rows = await transactions_col.aggregate(tri_pipe, allowDiskUse=True).to_list(10000)
     cohort_grid: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
-    cohort_size: Dict[str, int] = defaultdict(int)
-
-    def _month_offset(start: str, target: str) -> int:
-        sy, sm = int(start[:4]), int(start[5:7])
-        ty, tm = int(target[:4]), int(target[5:7])
-        return (ty - sy) * 12 + (tm - sm)
-
-    for cid, fm in first_month.items():
-        cohort_size[fm] += 1
-        for active_m in months_active.get(cid, set()):
-            offset = _month_offset(fm, active_m)
-            if offset >= 0:
-                cohort_grid[fm][offset] += 1
+    for r in tri_rows:
+        c, o = r["_id"].get("c"), r["_id"].get("o")
+        if c and o is not None:
+            cohort_grid[c][o] = r["retained"]
+    cohort_size: Dict[str, int] = {c: g.get(0, 0) for c, g in cohort_grid.items()}
 
     # Sort cohort months chronologically, keep last 12 cohorts
     sorted_cohorts = sorted(cohort_grid.keys())[-12:]
@@ -966,7 +1055,7 @@ async def cohorts_segmentation(
 
     retention_triangle = []
     for c in sorted_cohorts:
-        size = cohort_size[c]
+        size = cohort_size.get(c, 0)
         row = {"cohort_month": c, "cohort_size": size, "offsets": []}
         for o in range(max_offset + 1):
             retained = cohort_grid[c].get(o, 0)
@@ -988,32 +1077,12 @@ async def cohorts_segmentation(
     acquisition_trend = [{"month": r["_id"], "new_customers": r["new"]}
                           for r in acq_rows if r["_id"]][-18:]
 
-    # ---- One-timer focus: revenue at risk + recency ----
+    # ---- One-timer focus: revenue at risk + recency (from the $facet, no cursor walk) ----
     one_timer_bucket = freq_buckets["one_timer"]
-    # Recency distribution for one-timers — read directly from customers master so it
-    # works even when transaction-side enrichment hasn't populated for every cust.
     one_timer_rec = {"0-30d": 0, "31-90d": 0, "91-180d": 0, "180d+": 0}
-    onetimer_cursor = customers_col.find(
-        {**cohort_query, "visit_count": 1, "last_visit_at": {"$ne": None}},
-        {"_id": 0, "last_visit_at": 1},
-    )
-    async for cust in onetimer_cursor:
-        lv = cust.get("last_visit_at")
-        if not lv:
-            continue
-        try:
-            last_dt = datetime.fromisoformat(lv.replace("Z", "+00:00"))
-            days = (now - last_dt).days
-        except Exception:
-            continue
-        if days <= 30:
-            one_timer_rec["0-30d"] += 1
-        elif days <= 90:
-            one_timer_rec["31-90d"] += 1
-        elif days <= 180:
-            one_timer_rec["91-180d"] += 1
-        else:
-            one_timer_rec["180d+"] += 1
+    for r in facet.get("onetimer_rec", []):
+        if r["_id"] in one_timer_rec:
+            one_timer_rec[r["_id"]] = r["count"]
 
     one_timer = {
         "count": one_timer_bucket["count"],
@@ -1072,6 +1141,7 @@ async def cohorts_segmentation(
 # Points Economics v2 — earn-burn gauge, liability, monthly flow, top redeemers
 # ============================================================
 @router.get("/points-economics")
+@dash_cache("points-econ")
 async def points_economics(
     period_days: int = 90,
     start_date: Optional[str] = Query(None),
@@ -1092,43 +1162,53 @@ async def points_economics(
 
     # ---- Earn vs Burn in window — by BILL DATE (R1) ----
     # Ledger entries written by historic ingest carry bill_date; older entries may only have created_at
+    import asyncio as _aio
     _t_in_window = {
         "$or": [{"bill_date": {"$gte": start}},
                 {"bill_date": {"$exists": False}, "created_at": {"$gte": start}}],
     }
-    earn_pipe = [
-        {"$match": {**_t_in_window, "points": {"$gt": 0}}},
-        {"$group": {"_id": None, "total": {"$sum": "$points"}, "events": {"$sum": 1}}},
+    # ONE ledger scan ($facet) for flow + top redeemers (was 3 separate scans),
+    # ONE customers scan for liability + breakage (was 2), all gathered.
+    ledger_facet_pipe = [
+        {"$match": _t_in_window},
+        {"$facet": {
+            "flow": [{"$group": {
+                "_id": None,
+                "earn": {"$sum": {"$cond": [{"$gt": ["$points", 0]}, "$points", 0]}},
+                "burn": {"$sum": {"$cond": [{"$lt": ["$points", 0]}, {"$abs": "$points"}, 0]}},
+                "earn_events": {"$sum": {"$cond": [{"$gt": ["$points", 0]}, 1, 0]}},
+                "burn_events": {"$sum": {"$cond": [{"$lt": ["$points", 0]}, 1, 0]}},
+            }}],
+            "top_redeem": [
+                {"$match": {"points": {"$lt": 0}}},
+                {"$group": {"_id": "$customer_mobile", "burned": {"$sum": {"$abs": "$points"}},
+                            "events": {"$sum": 1}}},
+                {"$sort": {"burned": -1}}, {"$limit": 15},
+            ],
+        }},
     ]
-    burn_pipe = [
-        {"$match": {**_t_in_window, "points": {"$lt": 0}}},
-        {"$group": {"_id": None, "total": {"$sum": "$points"}, "events": {"$sum": 1}}},
-    ]
-    earn = (await points_ledger_col.aggregate(earn_pipe).to_list(1)) or [{}]
-    burn = (await points_ledger_col.aggregate(burn_pipe).to_list(1)) or [{}]
-    earn_pts = (earn[0].get("total", 0) or 0)
-    burn_pts = abs(burn[0].get("total", 0) or 0)
-    earn_events = earn[0].get("events", 0)
-    burn_events = burn[0].get("events", 0)
-    burn_pct = round((burn_pts / earn_pts) * 100, 2) if earn_pts else 0
-
-    # ---- Outstanding liability (snapshot) — loyalty members only ----
-    liab_pipe = [
+    cutoff_180 = (now - timedelta(days=180)).isoformat()
+    cust_facet_pipe = [
         {"$match": {"mobile": {"$nin": [None, ""]}}},
-        {"$group": {"_id": None,
-                    "outstanding": {"$sum": "$points_balance"},
-                    "lifetime_earned": {"$sum": "$lifetime_points_earned"},
-                    "lifetime_redeemed": {"$sum": "$lifetime_points_redeemed"}}}
+        {"$facet": {
+            "liab": [{"$group": {"_id": None,
+                                 "outstanding": {"$sum": "$points_balance"},
+                                 "lifetime_earned": {"$sum": "$lifetime_points_earned"},
+                                 "lifetime_redeemed": {"$sum": "$lifetime_points_redeemed"}}}],
+            "breakage": [
+                {"$match": {"points_balance": {"$gt": 0},
+                            "$or": [{"last_visit_at": {"$lt": cutoff_180}},
+                                    {"last_visit_at": {"$exists": False}}]}},
+                {"$group": {"_id": None, "points": {"$sum": "$points_balance"},
+                            "customers": {"$sum": 1}}},
+            ],
+        }},
     ]
-    liab = (await customers_col.aggregate(liab_pipe).to_list(1)) or [{}]
-    liab = liab[0] if liab else {}
-    outstanding_points = int(liab.get("outstanding", 0) or 0)
-    outstanding_inr = round(outstanding_points * burn_ratio, 2)
-    lifetime_earned = int(liab.get("lifetime_earned", 0) or 0)
-    lifetime_redeemed = int(liab.get("lifetime_redeemed", 0) or 0)
-
     # ---- Monthly flow (last 12 months by BILL date when available) ----
+    _flow_floor = (now - timedelta(days=400)).isoformat()
     monthly_pipe = [
+        {"$match": {"$or": [{"bill_date": {"$gte": _flow_floor}},
+                            {"bill_date": {"$exists": False}, "created_at": {"$gte": _flow_floor}}]}},
         {"$project": {
             "month": {"$substr": [{"$ifNull": ["$bill_date", "$created_at"]}, 0, 7]},
             "points": 1,
@@ -1140,47 +1220,6 @@ async def points_economics(
         }},
         {"$sort": {"_id": 1}},
     ]
-    monthly_rows = await points_ledger_col.aggregate(monthly_pipe).to_list(60)
-    monthly_flow = [{"month": r["_id"], "earn": r["earn"], "burn": r["burn"],
-                      "net": r["earn"] - r["burn"]} for r in monthly_rows if r["_id"]][-12:]
-
-    # ---- Top redeemers in window (R4: key by mobile) ----
-    top_redeem_pipe = [
-        {"$match": {**_t_in_window, "points": {"$lt": 0}}},
-        {"$group": {"_id": "$customer_mobile", "burned": {"$sum": {"$abs": "$points"}}, "events": {"$sum": 1}}},
-        {"$sort": {"burned": -1}}, {"$limit": 15},
-    ]
-    top_redeem_rows = await points_ledger_col.aggregate(top_redeem_pipe).to_list(50)
-    mobiles_to_lookup = [r["_id"] for r in top_redeem_rows if r["_id"]]
-    custs = {c["mobile"]: c async for c in customers_col.find(
-        {"mobile": {"$in": mobiles_to_lookup}},
-        {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1}
-    )}
-    top_redeemers = [{
-        "customer_id": custs.get(r["_id"], {}).get("id"),
-        "name": custs.get(r["_id"], {}).get("name"),
-        "mobile": r["_id"],
-        "city": custs.get(r["_id"], {}).get("city"),
-        "tier": custs.get(r["_id"], {}).get("tier"),
-        "points_burned": r["burned"],
-        "inr_value": round(r["burned"] * burn_ratio, 2),
-        "events": r["events"],
-    } for r in top_redeem_rows if r["_id"]]
-
-    # ---- Breakage estimate — loyalty customers with no visit in 180+ days holding > 0 points ----
-    cutoff_180 = (now - timedelta(days=180)).isoformat()
-    breakage_pipe = [
-        {"$match": {"mobile": {"$nin": [None, ""]},
-                    "points_balance": {"$gt": 0},
-                    "$or": [{"last_visit_at": {"$lt": cutoff_180}},
-                            {"last_visit_at": {"$exists": False}}]}},
-        {"$group": {"_id": None, "points": {"$sum": "$points_balance"}, "customers": {"$sum": 1}}},
-    ]
-    brk = (await customers_col.aggregate(breakage_pipe).to_list(1)) or [{}]
-    brk = brk[0] if brk else {}
-    breakage_points = int(brk.get("points", 0) or 0)
-    breakage_inr = round(breakage_points * burn_ratio, 2)
-
     # ---- Top 10 earning + burning stores in window (R6 — points_earned/redeemed
     # are directly on transactions, so we aggregate from there) ----
     stores_earn_pipe = [
@@ -1205,8 +1244,55 @@ async def points_economics(
         {"$sort": {"points_redeemed": -1}},
         {"$limit": 10},
     ]
-    se_rows = await transactions_col.aggregate(stores_earn_pipe).to_list(10)
-    sb_rows = await transactions_col.aggregate(stores_burn_pipe).to_list(10)
+
+    (ledger_facet_res, cust_facet_res, monthly_rows, se_rows, sb_rows) = await _aio.gather(
+        points_ledger_col.aggregate(ledger_facet_pipe, allowDiskUse=True).to_list(1),
+        customers_col.aggregate(cust_facet_pipe, allowDiskUse=True).to_list(1),
+        points_ledger_col.aggregate(monthly_pipe, allowDiskUse=True).to_list(60),
+        transactions_col.aggregate(stores_earn_pipe, allowDiskUse=True).to_list(10),
+        transactions_col.aggregate(stores_burn_pipe, allowDiskUse=True).to_list(10),
+    )
+
+    lf = (ledger_facet_res[0] if ledger_facet_res else {}) or {}
+    flow = ((lf.get("flow") or [{}]) + [{}])[0] or {}
+    earn_pts = flow.get("earn", 0) or 0
+    burn_pts = flow.get("burn", 0) or 0
+    earn_events = flow.get("earn_events", 0) or 0
+    burn_events = flow.get("burn_events", 0) or 0
+    burn_pct = round((burn_pts / earn_pts) * 100, 2) if earn_pts else 0
+
+    cf = (cust_facet_res[0] if cust_facet_res else {}) or {}
+    liab = ((cf.get("liab") or [{}]) + [{}])[0] or {}
+    outstanding_points = int(liab.get("outstanding", 0) or 0)
+    outstanding_inr = round(outstanding_points * burn_ratio, 2)
+    lifetime_earned = int(liab.get("lifetime_earned", 0) or 0)
+    lifetime_redeemed = int(liab.get("lifetime_redeemed", 0) or 0)
+
+    monthly_flow = [{"month": r["_id"], "earn": r["earn"], "burn": r["burn"],
+                      "net": r["earn"] - r["burn"]} for r in monthly_rows if r["_id"]][-12:]
+
+    # ---- Top redeemers in window (R4: key by mobile) ----
+    top_redeem_rows = lf.get("top_redeem") or []
+    mobiles_to_lookup = [r["_id"] for r in top_redeem_rows if r["_id"]]
+    custs = {c["mobile"]: c async for c in customers_col.find(
+        {"mobile": {"$in": mobiles_to_lookup}},
+        {"_id": 0, "id": 1, "name": 1, "mobile": 1, "city": 1, "tier": 1}
+    )}
+    top_redeemers = [{
+        "customer_id": custs.get(r["_id"], {}).get("id"),
+        "name": custs.get(r["_id"], {}).get("name"),
+        "mobile": r["_id"],
+        "city": custs.get(r["_id"], {}).get("city"),
+        "tier": custs.get(r["_id"], {}).get("tier"),
+        "points_burned": r["burned"],
+        "inr_value": round(r["burned"] * burn_ratio, 2),
+        "events": r["events"],
+    } for r in top_redeem_rows if r["_id"]]
+
+    brk = ((cf.get("breakage") or [{}]) + [{}])[0] or {}
+    breakage_points = int(brk.get("points", 0) or 0)
+    breakage_inr = round(breakage_points * burn_ratio, 2)
+
     store_ids = list({r["_id"] for r in (se_rows + sb_rows) if r.get("_id")})
     store_master = {s["id"]: s async for s in stores_col.find(
         {"id": {"$in": store_ids}}, {"_id": 0, "id": 1, "name": 1, "code": 1, "city": 1})}
@@ -1492,6 +1578,7 @@ async def formula_catalog(user: dict = Depends(get_current_user)):
 # Executive Summary v2 — composite snapshot + ReportLab PDF
 # ============================================================
 @router.get("/executive-summary")
+@dash_cache("exec-summary")
 async def executive_summary(period_days: int = 30, user: dict = Depends(get_current_user)):
     """Composite executive snapshot: KPIs + segments + top stores + alerts in one payload."""
     period_days = _norm_period_days(period_days)
@@ -1499,67 +1586,81 @@ async def executive_summary(period_days: int = 30, user: dict = Depends(get_curr
     start = (now - timedelta(days=period_days)).isoformat()
     prev_start = (now - timedelta(days=period_days * 2)).isoformat()
 
-    # Sales (R5: loyalty bills only)
-    cur = (await transactions_col.aggregate([
+    import asyncio as _aio
+    # UPT-consistent units: sum item quantities; bills without an items array count 1
+    units_expr = {
+        "$cond": [
+            {"$gt": [{"$size": {"$ifNull": ["$items", []]}}, 0]},
+            {"$reduce": {
+                "input": {"$ifNull": ["$items", []]},
+                "initialValue": 0,
+                "in": {"$add": ["$$value",
+                                {"$ifNull": [{"$toInt": {"$ifNull": ["$$this.quantity", "$$this.qty"]}}, 1]}]},
+            }},
+            1,
+        ],
+    }
+    # ONE scan of the window's transactions via $facet (was: 4 scans + an unbounded
+    # distinct() + a giant $in that broke outright on production-scale data)
+    txn_facet_pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1},
-                    "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}}}},
-    ]).to_list(1)) or [{}]
-    prev = (await transactions_col.aggregate([
+        {"$facet": {
+            "sales": [{"$group": {"_id": None, "net": {"$sum": "$net_amount"},
+                                  "txns": {"$sum": 1}, "units": {"$sum": units_expr}}}],
+            "active": [{"$group": {"_id": "$customer_mobile"}}, {"$count": "n"}],
+            "top_stores": [{"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"}}},
+                           {"$sort": {"net": -1}}, {"$limit": 5}],
+            "store_city": [{"$group": {"_id": {"s": "$store_id", "c": "$city"},
+                                       "net": {"$sum": "$net_amount"}}}],
+        }},
+    ]
+    prev_pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": prev_start, "$lt": start}})},
         {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
-    ]).to_list(1)) or [{}]
-    cur = cur[0] if cur else {}
-    prev = prev[0] if prev else {}
+    ]
+    cust_pipe = [
+        {"$match": {"mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": None, "total": {"$sum": 1}, "outstanding": {"$sum": "$points_balance"}}},
+    ]
+    txn_facet_res, prev_res, cust_res, config = await _aio.gather(
+        transactions_col.aggregate(txn_facet_pipe, allowDiskUse=True).to_list(1),
+        transactions_col.aggregate(prev_pipe, allowDiskUse=True).to_list(1),
+        customers_col.aggregate(cust_pipe, allowDiskUse=True).to_list(1),
+        loyalty_config_col.find_one({}, {"_id": 0}),
+    )
+    facet = txn_facet_res[0] if txn_facet_res else {}
+    cur = (facet.get("sales") or [{}])[0]
+    prev = prev_res[0] if prev_res else {}
     net = cur.get("net", 0) or 0
     txns = cur.get("txns", 0) or 0
     prev_net = prev.get("net", 0) or 0
     sales_delta = round(((net - prev_net) / prev_net) * 100, 1) if prev_net else None
 
-    # Active customers + total (R4 + R5: loyalty members by mobile)
-    # CRITICAL: active must be a SUBSET of total. We count distinct mobiles
-    # from transactions in the window, then constrain to those that also
-    # exist in the customers master. This guarantees active <= total.
-    active_mobiles = await transactions_col.distinct("customer_mobile",
-                                                      loyalty_match({"bill_date": {"$gte": start}}))
-    active_mobiles = [m for m in active_mobiles if m]
-    if active_mobiles:
-        active = await customers_col.count_documents(
-            {"mobile": {"$in": active_mobiles}}
-        )
-    else:
-        active = 0
-    total_customers = await customers_col.count_documents({"mobile": {"$nin": [None, ""]}})
+    cust_row = cust_res[0] if cust_res else {}
+    total_customers = int(cust_row.get("total", 0) or 0)
+    active = int((facet.get("active") or [{}])[0].get("n", 0) or 0)
+    active = min(active, total_customers)  # invariant: active ⊆ total
 
-    # Top 5 stores
-    top_stores_rows = await transactions_col.aggregate([
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"}}},
-        {"$sort": {"net": -1}}, {"$limit": 5},
-    ]).to_list(10)
-    s_ids = [r["_id"] for r in top_stores_rows]
+    # Top 5 stores + cities — resolved via the (small) stores master, no $lookup scan
+    top_stores_rows = facet.get("top_stores") or []
+    store_city_rows = facet.get("store_city") or []
+    s_ids = list({r["_id"] for r in top_stores_rows} |
+                 {r["_id"].get("s") for r in store_city_rows if r["_id"].get("s")})
     s_map = {s["id"]: s async for s in stores_col.find({"id": {"$in": s_ids}}, {"_id": 0})}
     top_stores = [{"name": s_map.get(r["_id"], {}).get("name", "Unknown"),
-                    "city": s_map.get(r["_id"], {}).get("city"),
-                    "net": round(r["net"], 2)} for r in top_stores_rows]
+                   "city": s_map.get(r["_id"], {}).get("city"),
+                   "net": round(r["net"], 2)} for r in top_stores_rows]
 
-    # Top 5 cities
-    top_cities_rows = await transactions_col.aggregate([
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "store"}},
-        {"$unwind": "$store"},
-        {"$group": {"_id": "$store.city", "net": {"$sum": "$net_amount"}}},
-        {"$sort": {"net": -1}}, {"$limit": 5},
-    ]).to_list(10)
-    top_cities = [{"city": r["_id"], "net": round(r["net"], 2)} for r in top_cities_rows]
+    city_net: Dict[str, float] = defaultdict(float)
+    for r in store_city_rows:
+        sid = r["_id"].get("s")
+        city = s_map.get(sid, {}).get("city") or r["_id"].get("c") or "Unknown"
+        city_net[city] += r.get("net", 0) or 0
+    top_cities = [{"city": c, "net": round(v, 2)}
+                  for c, v in sorted(city_net.items(), key=lambda kv: -kv[1])[:5]]
 
-    # Loyalty (members only)
-    liab = (await customers_col.aggregate([
-        {"$match": {"mobile": {"$nin": [None, ""]}}},
-        {"$group": {"_id": None, "outstanding": {"$sum": "$points_balance"}}},
-    ]).to_list(1)) or [{}]
-    outstanding_points = int(liab[0].get("outstanding", 0) or 0) if liab else 0
-    config = await loyalty_config_col.find_one({}, {"_id": 0}) or {}
+    outstanding_points = int(cust_row.get("outstanding", 0) or 0)
+    config = config or {}
     burn_ratio = float(config.get("burn_ratio", 0.25))
 
     return {
@@ -1570,7 +1671,7 @@ async def executive_summary(period_days: int = 30, user: dict = Depends(get_curr
             "net_sales_delta_pct": sales_delta,
             "transactions": txns,
             "aov": round(net / txns, 2) if txns else 0,
-            "items_sold": cur.get("items", 0) or 0,
+            "items_sold": int(cur.get("units", 0) or 0),
             "active_customers": active,
             "total_customers": total_customers,
             "outstanding_liability_inr": round(outstanding_points * burn_ratio, 2),

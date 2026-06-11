@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 71 testing — dashboards, legacy reports, RECON module, AI, and frontend. Backend 29/32 passed (90.6%). Frontend Command Center loads with real non-zero KPIs (₹676.82Cr / 14.40L txns / 8.00L customers), no degraded banner, Reconciliation page renders with all required testids. CRITICAL BUG: 5 raw-reports POST endpoints decorated with @dash_cache return 422 because the wrapper signature breaks FastAPI body parsing under Pydantic v2.13.4.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/raw-reports/{customer-data,transaction-data,repeat-purchases,earn-redeem,customers-by-visit}",
+        "issue": "All 5 endpoints decorated with @dash_cache return 422 `{loc:[\"query\",\"f\"], msg:\"Field required\"}` even with a valid JSON body. The undecorated /api/raw-reports/drill endpoint works correctly. Root cause: @dash_cache wrapper (functools.wraps + *args/**kwargs) loses the typed signature so FastAPI 0.110.1 + Pydantic 2.13.4 falls back to treating the Pydantic model `f: ReportFilter` as a query param. Fix options: (a) inside dash_cache, copy __signature__ via inspect.signature(fn) and call functools.wraps with assigned to keep __wrapped__; (b) move @dash_cache below FastAPI by caching inside the function body; or (c) annotate `f: Annotated[ReportFilter, Body()]` in each endpoint. Affects raw-reports hub completely.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "GET /api/dashboard/kpis",
+        "issue": "Schema returns `sales.net` (not `sales.net_sales`) and `api.health_pct` (not `api_health`). Documented for clarity — frontend consumes correctly."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Data Reconciliation page",
+        "issue": "A 'Failed to load reconciliation' red toast appears in the corner on first load — this is the legacy integrity-report endpoint failing while the NEW CSV recon section renders fine below it. Not blocking, but the error toast is misleading to users.",
+        "affected_selectors": ["ReconciliationPage legacy integrity panel"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration71_dashboards_recon_test.py",
+    "/app/test_reports/pytest/iteration71_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix @dash_cache in /app/backend/routes/_dash_cache.py to preserve typed signature (e.g., set wrapper.__signature__ = inspect.signature(fn)) OR remove @dash_cache from the 5 broken raw-reports POST endpoints and cache inline. This currently breaks the entire Raw Reports hub.",
+    "Suppress or fix the legacy 'Failed to load reconciliation' toast on /admin/reconciliation — old integrity endpoint is failing while new CSV recon works."
+  ],
+  "critical_code_review_comments": [
+    "/app/backend/routes/_dash_cache.py: wrapper uses *args/**kwargs without copying __signature__; this is incompatible with FastAPI param introspection when wrapped functions take Pydantic body models.",
+    "/app/backend/routes/raw_reports_routes.py: 5 POST endpoints stacked with @router.post + @dash_cache — confirm fix works by re-running tests post-patch."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration71_dashboards_recon_test.py (new)"
+  ],
+  "success_rate": {"backend": "91%", "frontend": "95%"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (read from /app/memory/test_credentials.md)",
+  "seed_data_creation": "RECON test created 4 recon jobs against transactions dataset with PERF-00000000 bill — visible in 'Recent recon runs' table. Safe to leave or purge.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test file /app/backend/tests/iteration71_dashboards_recon_test.py covers: command-center cache, kpis, sales-trend (monthly+daily), city-performance, category-mix, executive-summary, store-performance-v2, RFM (~800K verified), cohorts-segmentation, points-economics, 4 analytics dashboards, 11 legacy reports with pagination, 3 raw-reports (failing — see critical bug), full recon CSV flow, AI run_aggregation. Run after dash_cache fix to confirm raw-reports recover. Cache TTL is 5 min — first run after a code change may be slower.",
+  "rca of the issue": "BUG: 5 raw-reports POST endpoints return 422 'f required in query'. REPRO: curl -X POST -H 'Content-Type: application/json' -d '{\"page\":1,\"page_size\":5,\"group_by\":\"location\"}' /api/raw-reports/repeat-purchases. ROOT CAUSE: @dash_cache decorator in /app/backend/routes/_dash_cache.py uses async def wrapper(*args, **kwargs). functools.wraps copies __wrapped__ but FastAPI 0.110.1's get_typed_signature reads the *visible* signature which is now (*args, **kwargs) — Pydantic models default to Query when signature has no explicit Body-typed param. Same code worked previously under older pydantic; pydantic 2.13 tightened query/body disambiguation. MITIGATION: (1) inside dash_cache decorator, do `wrapper.__signature__ = inspect.signature(fn)` so FastAPI sees the original typed params, OR (2) annotate `f: Annotated[ReportFilter, Body()]` in each broken endpoint. Verified that the undecorated /api/raw-reports/drill endpoint at line 671 parses the body correctly, proving the decorator is the culprit."
+}

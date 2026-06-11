@@ -131,7 +131,7 @@ export default function CommandCenter() {
   ];
 
   const txnScope = scopedStoreIds ? { store_id: { $in: scopedStoreIds } } : {};
-  const custScope = scopedStoreIds ? { preferred_store_id: { $in: scopedStoreIds } } : {};
+  const custScope = scopedStoreIds ? { home_store_id: { $in: scopedStoreIds } } : {};
 
   // Drilldown configs
   const openSalesDrill = () => setDrill({
@@ -285,6 +285,22 @@ export default function CommandCenter() {
       />
 
       <div className="p-8 space-y-6">
+        {/* Partial-data warning: backend timed out on some blocks (degraded list) */}
+        {Array.isArray(data.degraded) && data.degraded.length > 0 && (
+          <div
+            className="flex items-center gap-3 p-3 border border-amber-300 bg-amber-50 text-amber-900 text-sm"
+            data-testid="cc-degraded-banner"
+          >
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>
+              Some figures could not be computed in time ({data.degraded.join(", ")}) and may show as 0.
+            </span>
+            <button className="k-btn k-btn-outline k-btn-sm ml-auto" onClick={() => load(true)} data-testid="cc-degraded-retry">
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* AI insight strip */}
         <AIInsightStrip dashboardKey="command_center" payload={aiPayload} />
 
@@ -517,22 +533,24 @@ export default function CommandCenter() {
                       older: { lt: new Date(Date.now() - 90*86400000).toISOString() },
                     };
                     const r = ranges[d.key];
-                    const filt = { created_at: {}, ...custScope };
-                    if (r.gte) filt.created_at.$gte = r.gte;
-                    if (r.lt) filt.created_at.$lt = r.lt;
+                    // Cohorts are bucketed on first_purchase_at (R1: real first
+                    // bill date) — the drilldown must match the same field.
+                    const filt = { first_purchase_at: {}, ...custScope };
+                    if (r.gte) filt.first_purchase_at.$gte = r.gte;
+                    if (r.lt) filt.first_purchase_at.$lt = r.lt;
                     setDrill({
                       title: `Customers · ${d.label}`,
                       subtitle: "COHORT DRILLDOWN",
                       collection: "customers",
                       filter: filt,
-                      sort: [["created_at", -1]],
+                      sort: [["first_purchase_at", -1]],
                       columns: [
                         { key: "name", label: "Name" },
                         { key: "mobile", label: "Mobile", mono: true },
                         { key: "city", label: "City" },
                         { key: "tier", label: "Tier" },
                         { key: "lifetime_spend", label: "Lifetime ₹", align: "right", render: (v) => fmtINR(v) },
-                        { key: "created_at", label: "Joined" },
+                        { key: "first_purchase_at", label: "First bill" },
                       ],
                       onRowClick: (r) => { setDrill(null); navigate(`/admin/customers/${r.id}`); },
                     });

@@ -6,7 +6,9 @@ from database import nps_col, stores_col
 from auth import get_current_user
 import uuid
 
-router = APIRouter(prefix="/nps", tags=["nps"])
+from routes._db_timeout import db_deadline
+
+router = APIRouter(prefix="/nps", tags=["nps"], dependencies=[Depends(db_deadline)])
 
 
 def _sentiment(score: int) -> str:

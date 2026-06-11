@@ -9,7 +9,9 @@ from fastapi.responses import StreamingResponse
 from database import transactions_col, audit_logs_col, customers_col, stores_col, db
 from auth import get_current_user
 
-router = APIRouter(prefix="/reports", tags=["reports"])
+from routes._db_timeout import db_deadline
+
+router = APIRouter(prefix="/reports", tags=["reports"], dependencies=[Depends(db_deadline)])
 digest_reports_col = db["digest_reports"]
 
 

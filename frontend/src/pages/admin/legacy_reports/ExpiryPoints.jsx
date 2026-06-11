@@ -19,6 +19,7 @@ export default function ExpiryPoints() {
       testid="lr-expiry-points"
       title="Expiry Points Report"
       subtitle="LEGACY REPORT · POINTS EXPIRING SOON"
+      paginate={false}
       endpoint="/legacy-reports/expiry-points"
       paramsState={ps}
       filters={<>

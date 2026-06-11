@@ -445,6 +445,11 @@ from routes.ai_extended_tools import EXTRA_TOOL_SCHEMAS, EXTRA_TOOL_HANDLERS  # 
 TOOL_SCHEMAS.extend(EXTRA_TOOL_SCHEMAS)
 TOOL_HANDLERS.update(EXTRA_TOOL_HANDLERS)
 
+# Merge in data-expert tools (guard-railed run_aggregation + data dictionary)
+from routes.ai_data_expert import EXPERT_TOOL_SCHEMAS, EXPERT_TOOL_HANDLERS  # noqa: E402
+TOOL_SCHEMAS.extend(EXPERT_TOOL_SCHEMAS)
+TOOL_HANDLERS.update(EXPERT_TOOL_HANDLERS)
+
 
 async def execute_tool(name: str, args: Dict[str, Any], user: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Execute a tool by name with the given JSON args. Returns dict.

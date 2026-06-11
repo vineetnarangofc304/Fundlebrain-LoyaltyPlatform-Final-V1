@@ -1,0 +1,64 @@
+"""Tiny in-process TTL cache for heavy dashboard/report aggregations.
+
+Production-scale aggregations (distinct-visitor groups over millions of bills)
+have an irreducible cost of several seconds. Dashboards re-fetch on every
+mount/filter flip, so a short TTL cache makes every repeat view instant while
+keeping data at most CACHE_TTL seconds stale (data only changes via ingest
+jobs or live POS traffic anyway).
+
+Usage:
+    @router.get("/rfm")
+    @dash_cache("rfm")
+    async def rfm_dashboard(...): ...
+
+The decorator builds the key from all scalar kwargs (and Pydantic bodies via
+model_dump_json), skipping non-serialisable ones like the auth `user` dict.
+"""
+import functools
+import time
+from typing import Any, Optional
+
+_STORE: dict = {}
+DEFAULT_TTL = 300  # seconds
+
+
+def cache_get(key: str, ttl: int = DEFAULT_TTL) -> Optional[Any]:
+    hit = _STORE.get(key)
+    if not hit:
+        return None
+    ts, val = hit
+    if time.monotonic() - ts > ttl:
+        _STORE.pop(key, None)
+        return None
+    return val
+
+
+def cache_set(key: str, val: Any) -> None:
+    if len(_STORE) > 300:   # bounded — dashboards only, keys are filter combos
+        _STORE.clear()
+    _STORE[key] = (time.monotonic(), val)
+
+
+def cache_clear() -> None:
+    _STORE.clear()
+
+
+def dash_cache(prefix: str, ttl: int = DEFAULT_TTL):
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            parts = []
+            for k, v in sorted(kwargs.items()):
+                if isinstance(v, (str, int, float, bool, type(None))):
+                    parts.append(f"{k}={v}")
+                elif hasattr(v, "model_dump_json"):
+                    parts.append(f"{k}={v.model_dump_json()}")
+            key = prefix + "|" + "|".join(parts)
+            hit = cache_get(key, ttl)
+            if hit is not None:
+                return hit
+            result = await fn(*args, **kwargs)
+            cache_set(key, result)
+            return result
+        return wrapper
+    return deco

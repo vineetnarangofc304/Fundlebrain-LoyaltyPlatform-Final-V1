@@ -42,6 +42,9 @@ Write-tool protocol — non-negotiable:
 
 Data-tool protocol:
 - IMPORTANT — When the user asks about "all data", "all-time", "lifetime", "historical", "since launch", "across all years", or doesn't specify a recent window, call tools with `days=0` (the sentinel for "all time" — scans the full 20-year history).
+- A LIVE DATA WAREHOUSE SNAPSHOT follows in the next system message — it tells you exactly which collections exist, how many rows, the bill-date coverage and the loyalty config. Treat it as ground truth about what data is available.
+- When no canned tool answers the question, use `run_aggregation` (read-only MongoDB pipelines) — call `get_data_dictionary` first if unsure of field names. This makes you an expert on ALL the ingested data: arbitrary slices by city/store/month/tier/category are all answerable.
+- Dates in transactions/customers are ISO STRINGS — compare with string ranges ({"$gte": "2024-10-01"}). Loyalty analyses must filter customer_mobile not-null (R5).
 - After receiving tool results, synthesise an executive-friendly answer with ₹ for currency, percent for ratios.
 - If the user uploads a CSV, the contents will appear in the user message; reason over those rows directly.
 - If a tool with `days=N` returns zero rows, retry once with `days=0` before concluding "data not available".
@@ -67,6 +70,19 @@ def _base_history(user: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     msgs: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     if user and user.get("is_demo"):
         msgs.append({"role": "system", "content": DEMO_SYSTEM_NOTE})
+    return msgs
+
+
+async def _seeded_history(user: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    """_base_history + the live data-warehouse snapshot (cached 10 min)."""
+    msgs = _base_history(user)
+    try:
+        from routes.ai_data_expert import build_data_context
+        ctx = await build_data_context()
+        if ctx:
+            msgs.append({"role": "system", "content": ctx})
+    except Exception:
+        pass
     return msgs
 
 
@@ -184,7 +200,7 @@ async def chat(req: AIChatRequest, user: dict = Depends(get_current_user)):
     existing = await ai_chats_col.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
 
     # Build conversation history from stored messages
-    history: List[Dict[str, Any]] = _base_history(user)
+    history: List[Dict[str, Any]] = await _seeded_history(user)
     if existing:
         for m in (existing.get("messages") or [])[-12:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
@@ -231,7 +247,7 @@ async def chat_stream(req: AIChatRequest, user: dict = Depends(get_current_user)
     session_id = req.session_id or uuid.uuid4().hex
     existing = await ai_chats_col.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0})
 
-    history: List[Dict[str, Any]] = _base_history(user)
+    history: List[Dict[str, Any]] = await _seeded_history(user)
     if existing:
         for m in (existing.get("messages") or [])[-12:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
@@ -341,7 +357,7 @@ async def chat_upload_csv(
 
     sid = session_id or uuid.uuid4().hex
     existing = await ai_chats_col.find_one({"id": sid, "user_id": user["id"]}, {"_id": 0})
-    history: List[Dict[str, Any]] = _base_history(user)
+    history: List[Dict[str, Any]] = await _seeded_history(user)
     if existing:
         for m in (existing.get("messages") or [])[-6:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):

@@ -18,20 +18,29 @@ export function LegacyReportShell({
   columns,         // [{ key, label, type, fmt }]
   responseKey = "rows",
   totalKey = "total",
+  paginate = true, // server-side limit/offset pagination
+  pageSize = 50,
   testid,
 }) {
   const { params, setParams } = paramsState;
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const [extra, setExtra] = useState({});
 
-  const fetchReport = async () => {
+  const fetchReport = async (toPage = 1) => {
     setLoading(true);
+    setError(null);
     try {
-      const r = await api.get(endpoint, { params });
+      const pageParams = paginate
+        ? { ...params, limit: pageSize, offset: (toPage - 1) * pageSize }
+        : params;
+      const r = await api.get(endpoint, { params: pageParams });
       setRows(r.data[responseKey] || []);
       setTotal(r.data[totalKey] ?? (r.data[responseKey] || []).length);
+      setPage(toPage);
       // Stash any extra response keys (e.g. 'note', 'sort_by') for display
       const ex = {};
       Object.keys(r.data).forEach((k) => {
@@ -39,13 +48,17 @@ export function LegacyReportShell({
       });
       setExtra(ex);
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Report failed to load");
+      const msg = e.response?.data?.detail || e.message || "Report failed to load";
+      setError(typeof msg === "string" ? msg : "Report failed to load");
+      toast.error(typeof msg === "string" ? msg : "Report failed to load");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { fetchReport(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { fetchReport(1); /* eslint-disable-next-line */ }, []);
+
+  const totalPages = paginate ? Math.max(1, Math.ceil(total / pageSize)) : 1;
 
   const exportCsv = async () => {
     try {
@@ -92,13 +105,20 @@ export function LegacyReportShell({
                   </span>
                 ) : null
               ))}
-              <button onClick={fetchReport} className="text-xs px-2 py-1 border border-neutral-300 hover:bg-neutral-50 flex items-center gap-1">
+              <button onClick={() => fetchReport(page)} className="text-xs px-2 py-1 border border-neutral-300 hover:bg-neutral-50 flex items-center gap-1">
                 <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh
               </button>
             </div>
           </div>
 
-          {rows.length === 0 ? (
+          {error ? (
+            <div className="text-sm text-rose-700 py-12 text-center" data-testid={`${testid}-error`}>
+              <p className="mb-3">{error}</p>
+              <button onClick={() => fetchReport(page)} className="k-btn k-btn-outline k-btn-sm" data-testid={`${testid}-retry`}>
+                <RefreshCw className="w-3.5 h-3.5" /> Retry
+              </button>
+            </div>
+          ) : rows.length === 0 ? (
             <div className="text-sm text-neutral-500 py-12 text-center">
               {loading ? "Loading…" : (extra.note || "No data found for current filters.")}
             </div>
@@ -125,6 +145,32 @@ export function LegacyReportShell({
                 ))}
               </tbody>
             </table>
+          )}
+
+          {paginate && totalPages > 1 && !error && (
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-black/5" data-testid={`${testid}-pagination`}>
+              <span className="text-xs text-neutral-500">
+                Page {page} of {totalPages} · {total.toLocaleString()} rows
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  className="k-btn k-btn-outline k-btn-sm"
+                  disabled={page <= 1 || loading}
+                  onClick={() => fetchReport(page - 1)}
+                  data-testid={`${testid}-prev`}
+                >
+                  ← Prev
+                </button>
+                <button
+                  className="k-btn k-btn-outline k-btn-sm"
+                  disabled={page >= totalPages || loading}
+                  onClick={() => fetchReport(page + 1)}
+                  data-testid={`${testid}-next`}
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>

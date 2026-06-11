@@ -20,6 +20,7 @@ export default function LocationWiseCustomers() {
       testid="lr-loc-wise"
       title="Location Wise Customer"
       subtitle="LEGACY REPORT · STORE BREAKDOWN"
+      paginate={false}
       endpoint="/legacy-reports/location-wise-customers"
       paramsState={ps}
       filters={<>

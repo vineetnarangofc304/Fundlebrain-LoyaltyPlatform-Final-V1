@@ -8,6 +8,7 @@ from database import transactions_col, customers_col, stores_col, campaigns_col,
 from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
+from routes._dash_cache import dash_cache
 
 logger = logging.getLogger("kazo-fundle.analytics")
 
@@ -41,6 +42,7 @@ async def transaction_detail(txn_id: str, user: dict = Depends(get_current_user)
 
 # Sales dashboard - hourly + weekday + payment breakdown
 @router.get("/sales-dashboard")
+@dash_cache("an-sales")
 async def sales_dashboard(
     period_days: int = 30,
     start_date: Optional[str] = Query(None),
@@ -54,51 +56,54 @@ async def sales_dashboard(
     if end_iso:
         bill_filter["$lt"] = end_iso
 
-    # Hourly distribution
-    hourly_pipe = [
+    # ONE scan via $facet (was 4 scans, 3 of which IGNORED the end bound) with
+    # crash-proof date parsing — $dateFromString without onError throws on any
+    # malformed bill_date and 500s the whole dashboard.
+    _bill_dt = {"$cond": {
+        "if": {"$eq": [{"$type": "$bill_date"}, "date"]},
+        "then": "$bill_date",
+        "else": {"$dateFromString": {"dateString": {"$ifNull": ["$bill_date", ""]}, "onError": None}},
+    }}
+    facet_pipe = [
         {"$match": loyalty_match({"bill_date": bill_filter})},
-        {"$project": {"hour": {"$hour": {"$dateFromString": {"dateString": "$bill_date"}}}, "net_amount": 1}},
-        {"$group": {"_id": "$hour", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
-        {"$sort": {"_id": 1}},
-    ]
-    hourly = await transactions_col.aggregate(hourly_pipe, allowDiskUse=True).to_list(24)
-
-    # Weekday
-    weekday_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$project": {"dow": {"$dayOfWeek": {"$dateFromString": {"dateString": "$bill_date"}}}, "net_amount": 1}},
-        {"$group": {"_id": "$dow", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
-        {"$sort": {"_id": 1}},
-    ]
-    weekday = await transactions_col.aggregate(weekday_pipe, allowDiskUse=True).to_list(7)
-    day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-
-    # Payment mode mix
-    pay_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$group": {"_id": "$payment_mode", "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
-    ]
-    pay = await transactions_col.aggregate(pay_pipe, allowDiskUse=True).to_list(10)
-
-    # Discount distribution
-    disc_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$project": {
-            "bucket": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$eq": ["$discount_amount", 0]}, "then": "0%"},
+        {"$facet": {
+            "hourly": [
+                {"$project": {"dt": _bill_dt, "net_amount": 1}},
+                {"$match": {"dt": {"$ne": None}}},
+                {"$group": {"_id": {"$hour": "$dt"}, "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
+                {"$sort": {"_id": 1}},
+            ],
+            "weekday": [
+                {"$project": {"dt": _bill_dt, "net_amount": 1}},
+                {"$match": {"dt": {"$ne": None}}},
+                {"$group": {"_id": {"$dayOfWeek": "$dt"}, "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
+                {"$sort": {"_id": 1}},
+            ],
+            "payment": [
+                {"$group": {"_id": {"$ifNull": ["$payment_mode", "Unknown"]},
+                            "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
+                {"$sort": {"net": -1}},
+            ],
+            "discount": [
+                {"$project": {
+                    "bucket": {"$switch": {"branches": [
+                        {"case": {"$eq": [{"$ifNull": ["$discount_amount", 0]}, 0]}, "then": "0%"},
                         {"case": {"$lte": ["$discount_amount", 500]}, "then": "<=₹500"},
                         {"case": {"$lte": ["$discount_amount", 1500]}, "then": "<=₹1500"},
-                    ],
-                    "default": ">₹1500",
-                },
-            },
-            "net_amount": 1,
+                    ], "default": ">₹1500"}},
+                    "net_amount": 1,
+                }},
+                {"$group": {"_id": "$bucket", "count": {"$sum": 1}, "net": {"$sum": "$net_amount"}}},
+            ],
         }},
-        {"$group": {"_id": "$bucket", "count": {"$sum": 1}, "net": {"$sum": "$net_amount"}}},
     ]
-    disc = await transactions_col.aggregate(disc_pipe, allowDiskUse=True).to_list(10)
+    res = await transactions_col.aggregate(facet_pipe, allowDiskUse=True).to_list(1)
+    facet = res[0] if res else {}
+    hourly = facet.get("hourly", [])
+    weekday = facet.get("weekday", [])
+    pay = facet.get("payment", [])
+    disc = facet.get("discount", [])
+    day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
     return {
         "hourly": [{"hour": r["_id"], "net": round(r["net"], 2), "count": r["count"]} for r in hourly],
@@ -110,6 +115,7 @@ async def sales_dashboard(
 
 # Customer dashboard - RFM-style + cohorts
 @router.get("/customer-dashboard")
+@dash_cache("an-customer")
 async def customer_dashboard(
     period_days: int = Query(0, ge=0, le=3650),
     start_date: Optional[str] = Query(None),
@@ -128,14 +134,34 @@ async def customer_dashboard(
         if end_iso:
             rng["$lt"] = end_iso
         loyalty_q["last_visit_at"] = rng
-    start = (now - timedelta(days=90)).isoformat()
+    # New-customer trend respects the selected window (was hardcoded to last 90d
+    # regardless of filter). Monthly buckets for long/all-time windows.
+    trend_start = start_iso or (now - timedelta(days=90)).isoformat()
+    fp_rng: Dict[str, Any] = {"$gte": trend_start} if start_iso else {"$gte": trend_start}
+    if start_iso and end_iso:
+        fp_rng["$lt"] = end_iso
+    span_days = 90
+    if start_iso:
+        try:
+            _s = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+            _e = datetime.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso else now
+            span_days = (_e - _s).days
+        except Exception:
+            span_days = 90
+    else:
+        span_days = 90
+    if period_days == 0 and not start_date:
+        # all-time → monthly over the entire history
+        fp_rng = {"$gt": ""}
+        span_days = 10000
+    key_len = 7 if span_days > 180 else 10
     new_pipe = [
-        {"$match": {**loyalty_q, "first_purchase_at": {"$gte": start}}},
-        {"$group": {"_id": {"$substr": ["$first_purchase_at", 0, 10]}, "count": {"$sum": 1}}},
+        {"$match": {"mobile": {"$nin": [None, ""]}, "first_purchase_at": fp_rng}},
+        {"$group": {"_id": {"$substr": ["$first_purchase_at", 0, key_len]}, "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
     try:
-        new_cust = await customers_col.aggregate(new_pipe, allowDiskUse=True).to_list(120)
+        new_cust = await customers_col.aggregate(new_pipe, allowDiskUse=True).to_list(1200)
     except PyMongoError as e:
         logger.warning(f"customer-dashboard new_pipe timed out: {e}")
         new_cust = []
@@ -256,7 +282,7 @@ async def customer_dashboard(
 
     return {
         "new_customer_trend": [{"date": r["_id"], "count": r["count"]} for r in new_cust],
-        "churn_distribution": [{"risk": r["_id"], "count": r["count"]} for r in churn],
+        "churn_distribution": [{"risk": r["_id"] or "unscored", "count": r["count"]} for r in churn],
         "visit_frequency": [{"bucket": r["_id"], "count": r["count"]} for r in freq],
         "top_customers": top,
         "city_distribution": [{"city": r["_id"], "count": r["count"], "spend": round(r["spend"], 2)} for r in city],
@@ -289,6 +315,7 @@ async def campaign_dashboard(user: dict = Depends(get_current_user)):
 
 # Loyalty dashboard
 @router.get("/loyalty-dashboard")
+@dash_cache("an-loyalty")
 async def loyalty_dashboard(
     period_days: int = Query(0, ge=0, le=3650),
     start_date: Optional[str] = Query(None),
@@ -312,20 +339,35 @@ async def loyalty_dashboard(
     ]
     tiers = await customers_col.aggregate(tier_pipe, allowDiskUse=True).to_list(10)
 
-    # Points issued vs redeemed trend — by BILL DATE (R1) — last 90 days
-    start = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    # Points issued vs redeemed trend — by BILL DATE (R1). Respects the selected
+    # window (was hardcoded to last 90 days); monthly buckets for long windows.
+    now_dt = datetime.now(timezone.utc)
+    trend_start = start_iso or (now_dt - timedelta(days=90)).isoformat()
+    span_days = 90
+    if start_iso:
+        try:
+            _s = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+            _e = datetime.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso else now_dt
+            span_days = (_e - _s).days
+        except Exception:
+            span_days = 90
+    if period_days == 0 and not start_date:
+        trend_start = "1900-01-01"
+        span_days = 10000
+    key_len = 7 if span_days > 180 else 10
+    window_or = [{"bill_date": {"$gte": trend_start}},
+                 {"bill_date": {"$exists": False}, "created_at": {"$gte": trend_start}}]
     # ledger entries written by ingest carry bill_date; older ones may only have created_at
     issued_pipe = [
-        {"$match": {"$or": [{"bill_date": {"$gte": start}},
-                              {"bill_date": {"$exists": False}, "created_at": {"$gte": start}}]}},
+        {"$match": {"$or": window_or}},
         {"$project": {
-            "date": {"$substr": [{"$ifNull": ["$bill_date", "$created_at"]}, 0, 10]},
+            "date": {"$substr": [{"$ifNull": ["$bill_date", "$created_at"]}, 0, key_len]},
             "type": 1, "points": 1,
         }},
         {"$group": {"_id": {"date": "$date", "type": "$type"}, "points": {"$sum": "$points"}}},
         {"$sort": {"_id.date": 1}},
     ]
-    rows = await points_ledger_col.aggregate(issued_pipe, allowDiskUse=True).to_list(2000)
+    rows = await points_ledger_col.aggregate(issued_pipe, allowDiskUse=True).to_list(3000)
     by_date = {}
     for r in rows:
         d = r["_id"]["date"]
@@ -347,20 +389,39 @@ async def loyalty_dashboard(
 
 # Store performance dashboard
 @router.get("/store-dashboard")
-async def store_dashboard(period_days: int = 30, user: dict = Depends(get_current_user)):
-    start = _start(period_days)
+@dash_cache("an-store")
+async def store_dashboard(
+    period_days: int = 30,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    from ._date_range import parse_date_range
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    start = start_iso or _start(period_days)
+    bill_rng: Dict[str, Any] = {"$gte": start}
+    if end_iso:
+        bill_rng["$lt"] = end_iso
+    # Two-stage group: exact distinct visitors per store WITHOUT $addToSet
+    # (which broke the 16MB group limit / 500'd at production scale).
     pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
+        {"$match": loyalty_match({"bill_date": bill_rng})},
         {"$group": {
-            "_id": "$store_id",
+            "_id": {"s": "$store_id", "m": "$customer_mobile"},
             "net": {"$sum": "$net_amount"},
             "txns": {"$sum": 1},
-            "visitors": {"$addToSet": "$customer_mobile"},
             "discount": {"$sum": "$discount_amount"},
+        }},
+        {"$group": {
+            "_id": "$_id.s",
+            "net": {"$sum": "$net"},
+            "txns": {"$sum": "$txns"},
+            "discount": {"$sum": "$discount"},
+            "visitors": {"$sum": 1},
         }},
         {"$sort": {"net": -1}},
     ]
-    rows = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(100)
+    rows = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(300)
     store_ids = [r["_id"] for r in rows]
     stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}}, {"_id": 0})}
 
@@ -372,30 +433,28 @@ async def store_dashboard(period_days: int = 30, user: dict = Depends(get_curren
     home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe, allowDiskUse=True)}
 
     out = []
+    region_agg: Dict[str, Dict[str, float]] = {}
     for r in rows:
         s = stores.get(r["_id"], {})
         out.append({
             "store_id": r["_id"], "store_name": s.get("name", "Unknown"), "code": s.get("code"),
             "city": s.get("city"), "region": s.get("region"),
             "net": round(r["net"], 2), "txns": r["txns"],
-            "visitors": len([v for v in r["visitors"] if v]),
+            "visitors": r["visitors"],
             "home_customers": home_counts.get(r["_id"], 0),
             "unique_customers": home_counts.get(r["_id"], 0),  # alias for back-compat
             "aov": round(r["net"] / r["txns"], 2) if r["txns"] else 0,
             "discount": round(r["discount"], 2),
         })
-    # Region rollup
-    region_pipe = [
-        {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "store"}},
-        {"$unwind": "$store"},
-        {"$group": {"_id": "$store.region", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
-        {"$sort": {"net": -1}},
-    ]
-    regions = await transactions_col.aggregate(region_pipe, allowDiskUse=True).to_list(20)
+        # Region rollup from the same scan via the stores master (no per-bill $lookup)
+        region = s.get("region") or "Unknown"
+        ra = region_agg.setdefault(region, {"net": 0.0, "txns": 0})
+        ra["net"] += r["net"]
+        ra["txns"] += r["txns"]
     return {
         "stores": out,
-        "regions": [{"region": r["_id"], "net": round(r["net"], 2), "txns": r["txns"]} for r in regions],
+        "regions": [{"region": k, "net": round(v["net"], 2), "txns": v["txns"]}
+                    for k, v in sorted(region_agg.items(), key=lambda kv: -kv[1]["net"])],
     }
 
 

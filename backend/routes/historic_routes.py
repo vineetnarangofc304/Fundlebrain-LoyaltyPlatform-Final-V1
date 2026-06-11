@@ -34,7 +34,9 @@ from database import (
 )
 from auth import get_current_user, require_roles, MANAGEMENT_ROLES
 
-router = APIRouter(prefix="/historic-data", tags=["historic-data"])
+from routes._db_timeout import db_deadline
+
+router = APIRouter(prefix="/historic-data", tags=["historic-data"], dependencies=[Depends(db_deadline)])
 logger = logging.getLogger("kazo-fundle.historic")
 
 # Collections for staging

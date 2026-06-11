@@ -40,7 +40,10 @@ from database import (
 from routes._loyalty import LOYALTY_TX_MATCH
 
 logger = logging.getLogger("kazo-fundle.legacy_reports")
-router = APIRouter(prefix="/legacy-reports", tags=["legacy-reports"])
+from routes._db_timeout import db_deadline
+
+router = APIRouter(prefix="/legacy-reports", tags=["legacy-reports"],
+                   dependencies=[Depends(db_deadline)])
 
 
 def _date_filter(start_date: Optional[str], end_date: Optional[str], field: str = "bill_date") -> Dict[str, Any]:
@@ -118,7 +121,9 @@ async def customer_data_report(
     if start_date and end_date:
         fil["created_at"] = {"$gte": start_date, "$lte": end_date + "T23:59:59Z"}
 
-    total = await customers_col.count_documents(fil)
+    if export == "csv":
+        limit = 10000  # exports should not be capped at the page size
+    total = await customers_col.count_documents(fil, maxTimeMS=40000)
     rows = await customers_col.find(fil, {"_id": 0}).sort("created_at", -1).skip(offset).limit(limit).to_list(limit)
 
     if export == "csv":
@@ -154,7 +159,9 @@ async def transaction_data_report(
         if digits:
             fil["$or"] = [{"customer_mobile": {"$regex": digits}}, {"bill_number": {"$regex": q, "$options": "i"}}]
 
-    total = await transactions_col.count_documents(fil)
+    if export == "csv":
+        limit = 10000
+    total = await transactions_col.count_documents(fil, maxTimeMS=40000)
     rows = await transactions_col.find(fil, {"_id": 0}).sort("bill_date", -1).skip(offset).limit(limit).to_list(limit)
 
     if export == "csv":
@@ -187,7 +194,9 @@ async def repeat_customers_report(
         fil["home_store_id"] = locf["store_id"]
     fil.update(_date_filter(start_date, end_date, "last_visit_at"))
 
-    total = await customers_col.count_documents(fil)
+    if export == "csv":
+        limit = 10000
+    total = await customers_col.count_documents(fil, maxTimeMS=40000)
     rows = await customers_col.find(fil, {"_id": 0}).sort("visit_count", -1).skip(offset).limit(limit).to_list(limit)
 
     if export == "csv":
@@ -251,7 +260,10 @@ async def fraud_report(
     pipeline_rapid = [
         {"$match": {**LOYALTY_TX_MATCH, **dfil}},
         {"$project": {"customer_mobile": 1, "bill_number": 1, "bill_date": 1, "net_amount": 1,
-                      "store_id": 1, "hour_bucket": {"$substr": ["$bill_date", 0, 13]}}},
+                      "store_id": 1, "hour_bucket": {"$cond": [
+                          {"$eq": [{"$type": "$bill_date"}, "string"]},
+                          {"$substr": ["$bill_date", 0, 13]},
+                          {"$dateToString": {"format": "%Y-%m-%dT%H", "date": "$bill_date"}}]}}},
         {"$group": {"_id": {"mobile": "$customer_mobile", "hour": "$hour_bucket"},
                     "bills": {"$sum": 1},
                     "total_amount": {"$sum": "$net_amount"},
@@ -261,7 +273,7 @@ async def fraud_report(
         {"$sort": {"bills": -1}},
         {"$limit": limit // 2 or 50},
     ]
-    async for d in transactions_col.aggregate(pipeline_rapid):
+    async for d in transactions_col.aggregate(pipeline_rapid, allowDiskUse=True, maxTimeMS=40000):
         flags.append({
             "type": "rapid_fire_bills",
             "severity": "high" if d["bills"] >= 5 else "medium",
@@ -304,6 +316,7 @@ async def pending_bills_report(
     state: Optional[str] = None,
     zone: Optional[str] = None,
     limit: int = Query(200, le=1000),
+    offset: int = 0,
     export: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
@@ -320,8 +333,10 @@ async def pending_bills_report(
     if locf:
         fil.update(locf)
 
-    total = await transactions_col.count_documents(fil)
-    rows = await transactions_col.find(fil, {"_id": 0}).sort("bill_date", -1).limit(limit).to_list(limit)
+    if export == "csv":
+        limit = 10000
+    total = await transactions_col.count_documents(fil, maxTimeMS=40000)
+    rows = await transactions_col.find(fil, {"_id": 0}).sort("bill_date", -1).skip(offset).limit(limit).to_list(limit)
     if export == "csv":
         cols = ["bill_date", "bill_number", "customer_mobile", "store_id", "net_amount", "points_earned"]
         return _to_csv(rows, cols)
@@ -338,6 +353,7 @@ async def feedback_data_report(
     bucket: Optional[str] = None,   # promoter | passive | detractor
     has_comment: Optional[bool] = None,
     limit: int = Query(200, le=1000),
+    offset: int = 0,
     export: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
@@ -350,8 +366,10 @@ async def feedback_data_report(
         fil["feedback"] = {"$nin": [None, ""]}
     if has_comment is False:
         fil["$or"] = [{"feedback": None}, {"feedback": ""}, {"feedback": {"$exists": False}}]
-    total = await nps_col.count_documents(fil)
-    rows = await nps_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    if export == "csv":
+        limit = 10000
+    total = await nps_col.count_documents(fil, maxTimeMS=40000)
+    rows = await nps_col.find(fil, {"_id": 0}).sort("created_at", -1).skip(offset).limit(limit).to_list(limit)
     if export == "csv":
         cols = ["created_at", "mobile", "score", "bucket", "feedback", "store_id"]
         return _to_csv(rows, cols)
@@ -403,8 +421,14 @@ async def location_wise_customers_report(
         {"$sort": {"customer_count": -1}},
     ]
     rows: List[Dict[str, Any]] = []
-    async for d in customers_col.aggregate(pipeline):
-        store = await stores_col.find_one({"id": d["_id"]}, {"_id": 0, "name": 1, "city": 1, "state": 1, "zone": 1, "code": 1})
+    groups = await customers_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=40000).to_list(3000)
+    # Batch-fetch the stores once (was an N+1 find_one per store group)
+    store_ids = [d["_id"] for d in groups]
+    s_map = {s["id"]: s async for s in stores_col.find(
+        {"id": {"$in": store_ids}},
+        {"_id": 0, "id": 1, "name": 1, "city": 1, "state": 1, "zone": 1, "code": 1})}
+    for d in groups:
+        store = s_map.get(d["_id"])
         if state and store and store.get("state") != state:
             continue
         if zone and store and store.get("zone") != zone:
@@ -417,7 +441,7 @@ async def location_wise_customers_report(
             "state": (store or {}).get("state"),
             "zone": (store or {}).get("zone"),
             "customer_count": d["customer_count"],
-            "lifetime_spend": d.get("lifetime_spend", 0),
+            "lifetime_spend": round(d.get("lifetime_spend", 0) or 0, 2),
             "total_visits": d.get("total_visits", 0),
         })
     return {"total": len(rows), "rows": rows}
@@ -466,11 +490,17 @@ async def expiry_points_report(
         {"$limit": limit},
     ]
     rows = []
-    async for d in points_ledger_col.aggregate(pipeline):
-        cust = await customers_col.find_one(
-            {"mobile": d["_id"]},
-            {"_id": 0, "name": 1, "tier": 1, "home_store_id": 1, "points_balance": 1},
-        )
+    groups = await points_ledger_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=40000).to_list(limit)
+    # Batch-fetch the customers once (was an N+1 find_one for up to 2000 rows)
+    mobiles = [d["_id"] for d in groups if d["_id"]]
+    c_map = {}
+    for i in range(0, len(mobiles), 1000):
+        async for c in customers_col.find(
+                {"mobile": {"$in": mobiles[i:i + 1000]}},
+                {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "home_store_id": 1, "points_balance": 1}):
+            c_map[c["mobile"]] = c
+    for d in groups:
+        cust = c_map.get(d["_id"])
         if not cust:
             continue
         if tier and cust.get("tier") != tier:
@@ -506,6 +536,7 @@ async def active_coupons_report(
     start_date: Optional[str] = None,  # issued between
     end_date: Optional[str] = None,
     limit: int = Query(500, le=2000),
+    offset: int = 0,
     export: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
@@ -521,8 +552,10 @@ async def active_coupons_report(
         fil["valid_to"] = {"$lte": cutoff}
     fil.update(_date_filter(start_date, end_date, "created_at"))
 
-    total = await coupons_col.count_documents(fil)
-    rows = await coupons_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    if export == "csv":
+        limit = 10000
+    total = await coupons_col.count_documents(fil, maxTimeMS=40000)
+    rows = await coupons_col.find(fil, {"_id": 0}).sort("created_at", -1).skip(offset).limit(limit).to_list(limit)
     if export == "csv":
         cols = ["code", "customer_mobile", "discount_type", "discount_value",
                 "valid_from", "valid_to", "uses_count", "max_uses", "created_at"]

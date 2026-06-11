@@ -16,6 +16,7 @@ export default function MissedCalls() {
       testid="lr-missed-calls"
       title="Missed Call Requests"
       subtitle="LEGACY REPORT · IVR CAPTURES"
+      paginate={false}
       endpoint="/legacy-reports/missed-calls"
       paramsState={ps}
       filters={<DatePair paramsState={ps} />}

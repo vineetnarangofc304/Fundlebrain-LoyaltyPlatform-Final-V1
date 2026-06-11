@@ -21,7 +21,9 @@ from database import (
 from auth import get_current_user
 from routes.ai_routes import EMERGENT_LLM_KEY, SYSTEM_PROMPT
 
-router = APIRouter(prefix="/dashboard", tags=["drilldown"])
+from routes._db_timeout import db_deadline
+
+router = APIRouter(prefix="/dashboard", tags=["drilldown"], dependencies=[Depends(db_deadline)])
 
 
 # ----- Whitelist of drillable collections -----

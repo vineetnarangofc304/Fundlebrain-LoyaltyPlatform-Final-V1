@@ -34,7 +34,11 @@ from routes._loyalty import LOYALTY_TX_MATCH
 
 logger = logging.getLogger("kazo-fundle.raw_reports")
 
-router = APIRouter(prefix="/raw-reports", tags=["raw-reports"])
+from routes._db_timeout import db_deadline
+from routes._dash_cache import dash_cache
+
+router = APIRouter(prefix="/raw-reports", tags=["raw-reports"],
+                   dependencies=[Depends(db_deadline)])
 
 # Frequency / current vs earlier cut-off (90 days). Matches eWards convention
 # where Current = last 90 days, Earlier = before that.
@@ -159,6 +163,7 @@ def _apply_sort_and_paginate(rows: List[Dict[str, Any]], f: ReportFilter,
 # 1) Customer Data
 # ============================================================
 @router.post("/customer-data")
+@dash_cache("rr-cust")
 async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user)):
     """Customer counts grouped by Location / City / State / Zone / Month / Tier.
 
@@ -193,7 +198,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
                 "avg_visit_count": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
                                                               {"$divide": ["$total_visit_count", "$total_customers"]}, 0]}, 2]},
             }},
-        ], allowDiskUse=True)
+        ], allowDiskUse=True, maxTimeMS=60000)
     elif gb == "month":
         # Customers' first_purchase_at month — handle string and datetime types
         agg = customers_col.aggregate([
@@ -217,7 +222,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
                 "avg_visit_count": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
                                                               {"$divide": ["$total_visit_count", "$total_customers"]}, 0]}, 2]},
             }},
-        ], allowDiskUse=True)
+        ], allowDiskUse=True, maxTimeMS=60000)
     else:
         # location / city / state / zone — group transactions by store/city/state/zone,
         # then enrich with per-group customer roll-ups
@@ -262,7 +267,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
                 "repeat_pct": {"$round": [{"$cond": [{"$gt": ["$total_customers", 0]},
                                                           {"$multiply": [{"$divide": ["$repeat_customers", "$total_customers"]}, 100]}, 0]}, 1]},
             }},
-        ], allowDiskUse=True)
+        ], allowDiskUse=True, maxTimeMS=60000)
 
     raw = [r async for r in agg]
     raw = [r for r in raw if r.get("group_key") not in (None, "")]
@@ -294,6 +299,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
 # 2) Transaction Data
 # ============================================================
 @router.post("/transaction-data")
+@dash_cache("rr-txn")
 async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_user)):
     """Per-group rollup: Total Customers, Total Bills, Total Purchase, Total Earn Points."""
     gb = f.group_by
@@ -337,7 +343,7 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
             "discount_pct": {"$round": [{"$cond": [{"$gt": ["$total_gross_purchase", 0]},
                                                        {"$multiply": [{"$divide": ["$total_discount", "$total_gross_purchase"]}, 100]}, 0]}, 1]},
         }},
-    ], allowDiskUse=True)
+    ], allowDiskUse=True, maxTimeMS=60000)
     raw = [r async for r in agg if r.get("group_key") not in (None, "")]
     rows, total = _apply_sort_and_paginate(raw, f, default_key="total_purchase")
     totals = {
@@ -375,6 +381,7 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
 # 3) Repeat Purchases
 # ============================================================
 @router.post("/repeat-purchases")
+@dash_cache("rr-repeat")
 async def repeat_purchases(f: ReportFilter, user: dict = Depends(get_current_user)):
     """Per-location split: Purchase totals + Repeat Purchase (Total/Current/Earlier).
 
@@ -391,108 +398,83 @@ async def repeat_purchases(f: ReportFilter, user: dict = Depends(get_current_use
     field = GROUP_FIELD_TXN[gb]
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=CURRENT_WINDOW_DAYS)
+    cutoff_iso = cutoff.isoformat()
 
-    # 1) Per-mobile-per-store first-bill timestamp — to know which bills are "repeats"
+    # Fully Mongo-side (previously: $push'd every bill into Python and streamed
+    # ~all (mobile,store) groups through the event loop — minutes at production
+    # scale). Stage 1 dedupes bills, stage 2 computes per-customer repeat split
+    # via $top (first bill), stage 3 projects the splits, stage 4 rolls up by key.
     pipeline = [
         {"$match": _base_match(f)},
-        {"$sort": {"bill_date": 1}},
+        # 1) dedupe by (key, mobile, bill_number)
         {"$group": {
-            "_id": {"mobile": "$customer_mobile", "key": field},
-            "bills": {"$push": {"net": "$net_amount", "date": "$bill_date",
-                                  "bill_no": "$bill_number"}},
+            "_id": {"mobile": "$customer_mobile", "key": field,
+                    "bill": {"$ifNull": ["$bill_number", "$id"]}},
+            "net": {"$max": {"$ifNull": ["$net_amount", 0]}},
+            "date": {"$min": "$bill_date"},
         }},
-        # Per-mobile-key compute totals + repeat split in JS-side projection
+        # 2) per (key, mobile): totals + first bill + current-window sums
+        {"$group": {
+            "_id": {"mobile": "$_id.mobile", "key": "$_id.key"},
+            "n": {"$sum": 1},
+            "total_net": {"$sum": "$net"},
+            "first": {"$top": {"sortBy": {"date": 1}, "output": {"d": "$date", "v": "$net"}}},
+            "cur_bills": {"$sum": {"$cond": [{"$gte": ["$date", cutoff_iso]}, 1, 0]}},
+            "cur_net": {"$sum": {"$cond": [{"$gte": ["$date", cutoff_iso]}, "$net", 0]}},
+        }},
+        # 3) repeat split per customer
+        {"$project": {
+            "key": "$_id.key",
+            "n": 1, "total_net": 1,
+            "repeat_bills": {"$subtract": ["$n", 1]},
+            "repeat_net": {"$subtract": ["$total_net", "$first.v"]},
+            "rc_bills": {"$subtract": ["$cur_bills", {"$cond": [{"$gte": ["$first.d", cutoff_iso]}, 1, 0]}]},
+            "rc_net": {"$subtract": ["$cur_net", {"$cond": [{"$gte": ["$first.d", cutoff_iso]}, "$first.v", 0]}]},
+        }},
+        {"$project": {
+            "key": 1, "n": 1, "total_net": 1,
+            "repeat_bills": 1, "repeat_net": 1, "rc_bills": 1, "rc_net": 1,
+            "re_bills": {"$subtract": ["$repeat_bills", "$rc_bills"]},
+            "re_net": {"$subtract": ["$repeat_net", "$rc_net"]},
+        }},
+        # 4) roll up by group key
+        {"$group": {
+            "_id": "$key",
+            "purchase_unique_customers": {"$sum": 1},
+            "purchase_total_bills": {"$sum": "$n"},
+            "purchase_total_purchase": {"$sum": "$total_net"},
+            "repeat_total_unique_customers": {"$sum": {"$cond": [{"$gt": ["$repeat_bills", 0]}, 1, 0]}},
+            "repeat_total_bills": {"$sum": "$repeat_bills"},
+            "repeat_total_purchase": {"$sum": "$repeat_net"},
+            "repeat_current_unique_customers": {"$sum": {"$cond": [{"$gt": ["$rc_bills", 0]}, 1, 0]}},
+            "repeat_current_bills": {"$sum": "$rc_bills"},
+            "repeat_current_purchase": {"$sum": "$rc_net"},
+            "repeat_earlier_unique_customers": {"$sum": {"$cond": [{"$gt": ["$re_bills", 0]}, 1, 0]}},
+            "repeat_earlier_bills": {"$sum": "$re_bills"},
+            "repeat_earlier_purchase": {"$sum": "$re_net"},
+        }},
     ]
-    cursor = transactions_col.aggregate(pipeline, allowDiskUse=True)
-
-    def _to_dt(v: Any) -> Optional[datetime]:
-        if isinstance(v, datetime):
-            return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
-        if isinstance(v, str):
-            try:
-                # Handle "2026-05-01T..." and "2026-05-01"
-                s = v.replace("Z", "+00:00")
-                d = datetime.fromisoformat(s)
-                return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-            except Exception:
-                return None
-        return None
-
-    # Aggregate in Python — for very large datasets we'd push to $reduce, but
-    # mobile×location pairs are bounded by customer count.
-    agg_map: Dict[str, Dict[str, Any]] = {}
-    async for doc in cursor:
-        _id = doc.get("_id") or {}
-        if not isinstance(_id, dict):
-            continue
-        mobile = _id.get("mobile")
-        key = _id.get("key")
-        if not mobile or not key:
-            continue
-        bills = doc.get("bills", [])
-        for b in bills:
-            b["_dt"] = _to_dt(b.get("date"))
-        bills.sort(key=lambda b: b.get("_dt") or datetime.min.replace(tzinfo=timezone.utc))
-        unique_bill_nos = {}
-        for b in bills:
-            bn = b.get("bill_no") or f"unk-{id(b)}"
-            if bn not in unique_bill_nos:
-                unique_bill_nos[bn] = b
-        bills_unique = list(unique_bill_nos.values())
-        bills_unique.sort(key=lambda b: b.get("_dt") or datetime.min.replace(tzinfo=timezone.utc))
-
-        row = agg_map.setdefault(key, {
-            "group_key": key,
-            "purchase_unique_customers": set(),
-            "purchase_total_bills": 0,
-            "purchase_total_purchase": 0.0,
-            "repeat_total_unique_customers": set(),
-            "repeat_total_bills": 0,
-            "repeat_total_purchase": 0.0,
-            "repeat_current_unique_customers": set(),
-            "repeat_current_bills": 0,
-            "repeat_current_purchase": 0.0,
-            "repeat_earlier_unique_customers": set(),
-            "repeat_earlier_bills": 0,
-            "repeat_earlier_purchase": 0.0,
-        })
-        row["purchase_unique_customers"].add(mobile)
-        row["purchase_total_bills"] += len(bills_unique)
-        row["purchase_total_purchase"] += sum(b.get("net") or 0 for b in bills_unique)
-
-        if len(bills_unique) > 1:
-            row["repeat_total_unique_customers"].add(mobile)
-            row["repeat_total_bills"] += len(bills_unique) - 1
-            row["repeat_total_purchase"] += sum(b.get("net") or 0 for b in bills_unique[1:])
-
-            for b in bills_unique[1:]:
-                d = b.get("_dt")
-                net = b.get("net") or 0
-                if d and d >= cutoff:
-                    row["repeat_current_unique_customers"].add(mobile)
-                    row["repeat_current_bills"] += 1
-                    row["repeat_current_purchase"] += net
-                else:
-                    row["repeat_earlier_unique_customers"].add(mobile)
-                    row["repeat_earlier_bills"] += 1
-                    row["repeat_earlier_purchase"] += net
+    grouped = await transactions_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=60000).to_list(5000)
 
     raw: List[Dict[str, Any]] = []
-    for k, row in agg_map.items():
+    for row in grouped:
+        k = row.get("_id")
+        if not k:
+            continue
         raw.append({
             "group_key": k,
-            "purchase_unique_customers": len(row["purchase_unique_customers"]),
+            "purchase_unique_customers": row["purchase_unique_customers"],
             "purchase_total_bills": row["purchase_total_bills"],
-            "purchase_total_purchase": round(row["purchase_total_purchase"], 2),
-            "repeat_total_unique_customers": len(row["repeat_total_unique_customers"]),
+            "purchase_total_purchase": round(row["purchase_total_purchase"] or 0, 2),
+            "repeat_total_unique_customers": row["repeat_total_unique_customers"],
             "repeat_total_bills": row["repeat_total_bills"],
-            "repeat_total_purchase": round(row["repeat_total_purchase"], 2),
-            "repeat_current_unique_customers": len(row["repeat_current_unique_customers"]),
+            "repeat_total_purchase": round(row["repeat_total_purchase"] or 0, 2),
+            "repeat_current_unique_customers": row["repeat_current_unique_customers"],
             "repeat_current_bills": row["repeat_current_bills"],
-            "repeat_current_purchase": round(row["repeat_current_purchase"], 2),
-            "repeat_earlier_unique_customers": len(row["repeat_earlier_unique_customers"]),
+            "repeat_current_purchase": round(row["repeat_current_purchase"] or 0, 2),
+            "repeat_earlier_unique_customers": row["repeat_earlier_unique_customers"],
             "repeat_earlier_bills": row["repeat_earlier_bills"],
-            "repeat_earlier_purchase": round(row["repeat_earlier_purchase"], 2),
+            "repeat_earlier_purchase": round(row["repeat_earlier_purchase"] or 0, 2),
         })
 
     rows, total = _apply_sort_and_paginate(raw, f, default_key="purchase_total_purchase")
@@ -517,6 +499,7 @@ async def repeat_purchases(f: ReportFilter, user: dict = Depends(get_current_use
 # 4) Earn Redeem
 # ============================================================
 @router.post("/earn-redeem")
+@dash_cache("rr-earnredeem")
 async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
     """Per-group points rollup. Liability = Earn + Bonus - Redeem - Expired."""
     gb = f.group_by
@@ -540,7 +523,7 @@ async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
             "total_redeem_points": {"$round": ["$total_redeem_points", 2]},
             "total_bonus_points":  {"$round": ["$total_bonus_points", 2]},
         }},
-    ], allowDiskUse=True)
+    ], allowDiskUse=True, maxTimeMS=60000)
     txn_rows = {r["group_key"]: r async for r in agg if r.get("group_key") not in (None, "")}
 
     # Expired points from points_ledger (type=expire entries)
@@ -552,7 +535,7 @@ async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
                                             if _parse_iso(f.end_date) else None}}
                        if (f.start_date or f.end_date) else {})}},
         {"$group": {"_id": None, "total": {"$sum": {"$abs": "$points"}}}},
-    ], allowDiskUse=True)
+    ], allowDiskUse=True, maxTimeMS=60000)
     expired_total = 0
     async for r in expired_agg:
         expired_total = abs(r.get("total") or 0)
@@ -611,6 +594,7 @@ async def earn_redeem(f: ReportFilter, user: dict = Depends(get_current_user)):
 # 5) Customers by Visit
 # ============================================================
 @router.post("/customers-by-visit")
+@dash_cache("rr-visits")
 async def customers_by_visit(f: ReportFilter, user: dict = Depends(get_current_user)):
     """Frequency distribution of unique customers by their visit count in the
     given window. Visits = unique bill_number in the window."""
@@ -647,11 +631,15 @@ async def customers_by_visit(f: ReportFilter, user: dict = Depends(get_current_u
         if f.location:
             match["store_name"] = f.location
         if f.tier:
-            tier_mobiles = await customers_col.distinct("mobile", {"tier": f.tier})
+            # aggregation (cursor-batched) instead of distinct() — distinct has a
+            # hard 16MB single-document cap that breaks at production scale
+            tier_mobiles = [r["_id"] async for r in customers_col.aggregate(
+                [{"$match": {"tier": f.tier, "mobile": {"$nin": [None, ""]}}},
+                 {"$group": {"_id": "$mobile"}}], allowDiskUse=True, maxTimeMS=60000)]
             match["customer_mobile"] = {"$in": tier_mobiles}
         pipeline[0] = {"$match": match}
 
-    raw = [r async for r in transactions_col.aggregate(pipeline, allowDiskUse=True)]
+    raw = [r async for r in transactions_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=60000)]
     grand_visits = sum(r["visits"] * r["total_customers"] for r in raw)
     grand_customers = sum(r["total_customers"] for r in raw)
     grand_purchase = round(sum(r.get("total_purchase", 0) for r in raw), 2)
@@ -707,22 +695,27 @@ async def drill(body: DrillIn, user: dict = Depends(get_current_user)):
         except Exception:
             pass
 
+    # Distinct-mobile paging done fully in Mongo via $facet — the previous
+    # distinct() pulled EVERY mobile into Python (16MB cap + slow at scale).
     if body.visits is not None:
-        # Restrict to customers who had exactly this many bills
-        agg = transactions_col.aggregate([
+        mobile_stage = [
             {"$match": match},
             {"$group": {"_id": {"m": "$customer_mobile", "b": "$bill_number"}}},
             {"$group": {"_id": "$_id.m", "visits": {"$sum": 1}}},
             {"$match": {"visits": body.visits}},
-        ], allowDiskUse=True)
-        mobiles = [r["_id"] async for r in agg]
+        ]
     else:
-        mobiles = await transactions_col.distinct("customer_mobile", match)
-
-    total = len(mobiles)
+        mobile_stage = [{"$match": match}, {"$group": {"_id": "$customer_mobile"}}]
     start = max(0, (body.page - 1) * body.page_size)
-    end = start + body.page_size
-    page_mobiles = mobiles[start:end]
+    res = await transactions_col.aggregate([
+        *mobile_stage,
+        {"$sort": {"_id": 1}},
+        {"$facet": {"total": [{"$count": "n"}],
+                    "page": [{"$skip": start}, {"$limit": body.page_size}]}},
+    ], allowDiskUse=True, maxTimeMS=60000).to_list(1)
+    facet = (res[0] if res else {}) or {}
+    total = ((facet.get("total") or [{}]) + [{}])[0].get("n", 0) or 0
+    page_mobiles = [r["_id"] for r in facet.get("page", []) if r.get("_id")]
 
     customers = await customers_col.find(
         {"mobile": {"$in": page_mobiles}},

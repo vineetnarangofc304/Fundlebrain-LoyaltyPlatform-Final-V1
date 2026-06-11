@@ -28,6 +28,7 @@ export default function FraudReport() {
       testid="lr-fraud"
       title="Fraud Report"
       subtitle="LEGACY REPORT · ANOMALY FLAGS"
+      paginate={false}
       endpoint="/legacy-reports/fraud-report"
       paramsState={ps}
       filters={<DatePair paramsState={ps} />}

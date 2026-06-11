@@ -40,6 +40,7 @@ from routes.drilldown_routes import router as drilldown_router
 from routes.fundlebrain_routes import router as fundlebrain_router
 from routes.communications_routes import router as communications_router
 from routes.historic_routes import router as historic_router
+from routes.recon_routes import router as recon_router
 from routes.pos_ewards_routes import router as pos_ewards_router, bootstrap_pos_defaults
 from routes.live_monitor_routes import router as live_monitor_router, admin_router as pos_creds_router, log_router as api_log_detail_router
 from routes.segments_routes import router as segments_router
@@ -102,6 +103,7 @@ api_router.include_router(auto_campaigns_router)
 api_router.include_router(raw_reports_router)
 api_router.include_router(support_desk_router)
 api_router.include_router(legacy_reports_router)
+api_router.include_router(recon_router)
 api_router.include_router(demo_router)
 
 app.include_router(api_router)
@@ -379,6 +381,13 @@ async def ensure_indexes():
         # small collections
         (coupon_redemptions_col, [("created_at", -1)], {"name": "ix_cr_created"}),
         (nps_col, [("created_at", -1)], {"name": "ix_nps_created"}),
+        # ledger bill_date — KPI / loyalty-dashboard point-flow windows filter on it
+        (points_ledger_col, [("bill_date", -1)], {"name": "ix_pl_bill_date"}),
+        # message_log — communications history is sorted/filtered by created_at
+        (db["message_log"], [("created_at", -1)], {"name": "ix_msg_created"}),
+        # transactions city — city rollups group on it when store master is missing
+        (transactions_col, [("city", 1)], {"name": "ix_txn_city"}),
+        (transactions_col, [("store_name", 1)], {"name": "ix_txn_store_name"}),
         # api_logs — Command Center computes API health via count_documents on
         # timestamp (+status_code). Without this it COLLSCANs every logged API
         # call (millions of rows) and the count hangs under load. Compound covers

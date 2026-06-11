@@ -19,6 +19,7 @@ export default function TopCustomers() {
       testid="lr-top-cust"
       title="Top Customers"
       subtitle="LEGACY REPORT · DETAILED"
+      paginate={false}
       endpoint="/legacy-reports/top-customers"
       paramsState={ps}
       filters={<>
