@@ -254,9 +254,9 @@ export default function CommandCenter() {
               onChange={(e) => setStoreId(e.target.value)}
               data-testid="cc-store"
             >
-              <option value="">All stores{city ? ` in ${city}` : ""}</option>
+              <option value="">{`All stores${city ? ` in ${city}` : ""}`}</option>
               {visibleStores.map((s) => (
-                <option key={s.id} value={s.id}>{s.code} · {s.name}</option>
+                <option key={s.id} value={s.id}>{`${s.code} · ${s.name}`}</option>
               ))}
             </select>
             <DateRangePicker

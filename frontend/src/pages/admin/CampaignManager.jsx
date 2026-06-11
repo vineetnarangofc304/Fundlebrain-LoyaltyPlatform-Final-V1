@@ -257,8 +257,7 @@ export default function CampaignManager() {
                     <option value="">— Simulated metrics only (no real send) —</option>
                     {compatibleTemplates.map((t) => (
                       <option key={t.id} value={t.id}>
-                        {t.name} · {t.channel.toUpperCase()}
-                        {t.channel !== "sms" ? ` · WABA ${t.waba_approval_status || "pending"}` : ""}
+                        {`${t.name} · ${t.channel.toUpperCase()}${t.channel !== "sms" ? ` · WABA ${t.waba_approval_status || "pending"}` : ""}`}
                       </option>
                     ))}
                   </select>
@@ -275,7 +274,7 @@ export default function CampaignManager() {
               <div className="grid grid-cols-2 gap-3">
                 <select className="k-input" value={form.coupon_code} onChange={(e) => setForm({ ...form, coupon_code: e.target.value })} data-testid="coupon-select">
                   <option value="">No coupon</option>
-                  {coupons.map((c) => <option key={c.id} value={c.code}>{c.code} · {c.name}</option>)}
+                  {coupons.map((c) => <option key={c.id} value={c.code}>{`${c.code} · ${c.name}`}</option>)}
                 </select>
                 <input
                   className="k-input"

@@ -1875,6 +1875,17 @@ Both issues meant a malicious actor could empty any customer's wallet by manipul
 - [x] NEW /api/recon CSV↔DB reconciliation module + UI (chunked upload, mismatch CSV)
 - [x] Fundle Brain = data expert (live warehouse snapshot + run_aggregation/get_data_dictionary tools)
 
+### P0 — DONE (Iteration 15 / June 11 2026, fork) — Segment Builder/Sales Report + AI Brain upgrade
+- [x] Segment Builder pre-built cohorts timeout fixed — `build_context()` TTL-cached (10 min), per-cohort counts cached + Semaphore(6) bounded concurrency (list 5s→0.1s, counts 6s→0.16s)
+- [x] Sales Report "Loading…" hang fixed — `_dash_cache` now stale-while-revalidate (1h stale window) + NEW `routes/_cache_warmer.py` warms 8 heaviest default views every 4 min via localhost with minted super-admin JWT
+- [x] AI Brain raw-data CSV export — `export_csv` tool streams ≤1M rows to /app/backend/exports/ai; auth download GET /api/ai/exports/{id}; chat shows styled download button (568,982 one-timers verified e2e)
+- [x] AI Brain rich formatting — react-markdown + remark-gfm (`_markdown_message.jsx`), GFM tables/bold/bullets; system prompt mandates Markdown tables + ₹ formatting
+- [x] AI models upgraded: GPT-5.5 default, Claude Sonnet 4.6, Claude Opus 4.8, Gemini 3.1 Pro
+- [x] AI expertise: warehouse snapshot + brand KPI digest + data-provenance note (568K master-CSV customers have no bill rows → customer lists must query customers collection)
+- [x] Fixed broken `get_data_dictionary` tool signature (always returned "Bad arguments")
+- [x] Hydration warning `<span> in <option>` fixed (CommandCenter/CampaignManager/AutoCampaignsPage mixed option children → template literals)
+- ⚠️ Fixes in PREVIEW only — user must REDEPLOY to kazoloyalty.fundlebrain.ai
+
 ### P1 — Next
 - [ ] **Refactor oversized route files** (mechanical cleanup, no user-facing change):
   - `/app/backend/routes/historic_routes.py` (~1700 lines → mappers, ingest worker, narrative wiring, purge, backfill)
@@ -1891,7 +1902,6 @@ Both issues meant a malicious actor could empty any customer's wallet by manipul
 ### P2 — Next
 - [ ] Drag-and-drop report builder, support bot, mobile app
 - [ ] Move AI insight cache to Redis (multi-worker)
-- [ ] Carry-over CommandCenter hydration warning `<span> in <option>` cleanup
 - [ ] Auto-narrative delivered via email (depends on email transport above)
 - [ ] Per-rule WhatsApp template approval helper (currently WABA-templates must already exist + be approved before linking)
 

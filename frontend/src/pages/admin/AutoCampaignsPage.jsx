@@ -134,8 +134,7 @@ function RuleCard({ rule, templates, onUpdate, onPreview, onRunNow }) {
                 <option value="">— Pick a template —</option>
                 {templates.map((t) => (
                   <option key={t.id} value={t.id}>
-                    {t.name} · {t.channel.toUpperCase()}
-                    {t.channel !== "sms" ? ` · WABA ${t.waba_approval_status || "pending"}` : ""}
+                    {`${t.name} · ${t.channel.toUpperCase()}${t.channel !== "sms" ? ` · WABA ${t.waba_approval_status || "pending"}` : ""}`}
                   </option>
                 ))}
               </select>

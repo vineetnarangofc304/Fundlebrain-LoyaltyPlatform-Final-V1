@@ -323,3 +323,15 @@ File: `backend/routes/live_monitor_routes.py`, `frontend/.../LiveMonitorPage.jsx
 - AI Fundle Brain: live data-warehouse snapshot system message (cached 10 min) + run_aggregation/get_data_dictionary guard-railed tools — verified expert answers over full dataset.
 - New indexes: points_ledger.bill_date, message_log.created_at, transactions.city/store_name.
 - Testing: iteration71 pytest suite (30/30 after fixes), testing agent E2E (frontend pass incl. Command Center, pagination, recon UI).
+
+## 2026-06-11 (later) — Segment Builder/Sales Report P0 fix + AI Brain raw-data & formatting upgrade
+- P0 FIX: cohort-library `build_context()` (full 1.5M-bill ATV aggregate) now TTL-cached (10 min) + per-cohort counts cached with bounded concurrency (Semaphore(6)) — list 5s→0.1s, counts 6s→0.16s warm. This was stalling Segment Builder AND saturating the Mongo pool for other dashboards.
+- P0 FIX: Sales Report "Loading…" hang — `_dash_cache` upgraded to stale-while-revalidate (serve stale ≤1h instantly, refresh in background) + NEW `_cache_warmer.py` background task (every 4 min, warms 8 heaviest default views via localhost with minted super-admin JWT). Sales dashboard now renders in ~1.3s.
+- AI Brain CSV EXPORT: new `export_csv` tool streams up to 1M rows to /app/backend/exports/ai (568,982 one-timers → 52MB CSV in 3.8s); download via auth-protected GET /api/ai/exports/{id} (202 while preparing, 404 unknown). Chat presents Markdown download link → styled download button in UI.
+- AI Brain FORMATTING: react-markdown + remark-gfm; new `_markdown_message.jsx` renders GFM tables/bold/bullets/headings with KAZO styling; system prompt mandates Markdown tables + ₹ Indian formatting.
+- AI Brain MODELS upgraded: GPT-5.5 (default), Claude Sonnet 4.6, Claude Opus 4.8, Gemini 3.1 Pro (was gpt-5.2/sonnet-4-5/gemini-2.5-pro). MAX_TOOL_ITERATIONS 6→8.
+- AI Brain EXPERTISE: warehouse snapshot enriched with brand KPI digest (lifecycle split, tier split, all-time revenue/ATV, top stores 90d) + DATA PROVENANCE note (568K master-CSV customers have no bill-level rows — query customers collection for customer lists).
+- BUG FIX: `get_data_dictionary` tool had broken signature (every call returned "Bad arguments") — fixed.
+- P3 FIX: React "<span> cannot be a child of <option>" hydration warning — mixed static+dynamic option children converted to single template literals (CommandCenter, CampaignManager, AutoCampaignsPage).
+- Testing: iteration_27 (testing agent) — backend 18/18 pytest, frontend 100%; pytest suite at /app/backend/tests/iteration72_perf_ai_brain_test.py.
+- NOTE: fixes live in PREVIEW — user must redeploy to push to kazoloyalty.fundlebrain.ai.
