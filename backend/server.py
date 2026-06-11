@@ -558,6 +558,14 @@ async def startup():
     except Exception as e:
         logger.warning(f"Could not schedule ensure_indexes: {e}")
 
+    # Keep the heaviest default dashboard views permanently warm so first
+    # loads never hang for 10-20 s on production-scale aggregations.
+    try:
+        from routes._cache_warmer import warm_loop
+        asyncio.create_task(warm_loop())
+    except Exception as e:
+        logger.warning(f"Could not schedule cache warmer: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown():

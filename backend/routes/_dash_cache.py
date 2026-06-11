@@ -14,6 +14,7 @@ Usage:
 The decorator builds the key from all scalar kwargs (and Pydantic bodies via
 model_dump_json), skipping non-serialisable ones like the auth `user` dict.
 """
+import asyncio
 import functools
 import inspect
 import time
@@ -21,7 +22,9 @@ import typing
 from typing import Any, Optional
 
 _STORE: dict = {}
-DEFAULT_TTL = 300  # seconds
+DEFAULT_TTL = 300   # seconds — "fresh" window
+STALE_TTL = 3600    # seconds — serve-stale-while-revalidate window
+_REFRESHING: set = set()   # keys with an in-flight background refresh
 
 
 def cache_get(key: str, ttl: int = DEFAULT_TTL) -> Optional[Any]:
@@ -30,6 +33,17 @@ def cache_get(key: str, ttl: int = DEFAULT_TTL) -> Optional[Any]:
         return None
     ts, val = hit
     if time.monotonic() - ts > ttl:
+        return None   # stale — keep entry for SWR (evicted past STALE_TTL)
+    return val
+
+
+def cache_get_stale(key: str) -> Optional[Any]:
+    """Return a stale-but-usable value (younger than STALE_TTL), else None."""
+    hit = _STORE.get(key)
+    if not hit:
+        return None
+    ts, val = hit
+    if time.monotonic() - ts > STALE_TTL:
         _STORE.pop(key, None)
         return None
     return val
@@ -59,6 +73,24 @@ def dash_cache(prefix: str, ttl: int = DEFAULT_TTL):
             hit = cache_get(key, ttl)
             if hit is not None:
                 return hit
+            # Stale-while-revalidate: serve the last value instantly and
+            # refresh in the background (heavy aggregations never block a view
+            # that has been seen before — even after the fresh TTL expires).
+            stale = cache_get_stale(key)
+            if stale is not None:
+                if key not in _REFRESHING:
+                    _REFRESHING.add(key)
+
+                    async def _refresh():
+                        try:
+                            cache_set(key, await fn(*args, **kwargs))
+                        except Exception:
+                            pass
+                        finally:
+                            _REFRESHING.discard(key)
+
+                    asyncio.create_task(_refresh())
+                return stale
             result = await fn(*args, **kwargs)
             cache_set(key, result)
             return result

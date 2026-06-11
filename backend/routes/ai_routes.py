@@ -14,18 +14,19 @@ from typing import Optional, Dict, Any, List, AsyncIterator
 
 import litellm
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from emergentintegrations.llm.utils import get_app_identifier, get_integration_proxy_url
 
-from database import ai_chats_col
+from database import db, ai_chats_col
 from auth import get_current_user, log_audit
 from models import AIChatRequest
 from routes.ai_tools import TOOL_SCHEMAS, execute_tool
+from routes.ai_data_expert import EXPORT_DIR
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-MAX_TOOL_ITERATIONS = 6
+MAX_TOOL_ITERATIONS = 8
 
 SYSTEM_PROMPT = """You are Fundle Brain, the AI analytics assistant AND operations agent for KAZO (premium Indian women's fashion brand) powered by Fundle.
 
@@ -42,7 +43,7 @@ Write-tool protocol — non-negotiable:
 
 Data-tool protocol:
 - IMPORTANT — When the user asks about "all data", "all-time", "lifetime", "historical", "since launch", "across all years", or doesn't specify a recent window, call tools with `days=0` (the sentinel for "all time" — scans the full 20-year history).
-- A LIVE DATA WAREHOUSE SNAPSHOT follows in the next system message — it tells you exactly which collections exist, how many rows, the bill-date coverage and the loyalty config. Treat it as ground truth about what data is available.
+- A LIVE DATA WAREHOUSE SNAPSHOT follows in the next system message — it tells you exactly which collections exist, how many rows, the bill-date coverage, the brand KPI digest and the loyalty config. Treat it as ground truth about what data is available.
 - When no canned tool answers the question, use `run_aggregation` (read-only MongoDB pipelines) — call `get_data_dictionary` first if unsure of field names. This makes you an expert on ALL the ingested data: arbitrary slices by city/store/month/tier/category are all answerable.
 - Dates in transactions/customers are ISO STRINGS — compare with string ranges ({"$gte": "2024-10-01"}). Loyalty analyses must filter customer_mobile not-null (R5).
 - After receiving tool results, synthesise an executive-friendly answer with ₹ for currency, percent for ratios.
@@ -50,6 +51,18 @@ Data-tool protocol:
 - If a tool with `days=N` returns zero rows, retry once with `days=0` before concluding "data not available".
 - NEVER fabricate numbers — if a tool still returns no data after the all-time retry, say "Data not available".
 - Be concise, action-oriented, and end with 1–2 recommended actions when appropriate.
+
+Raw-data & CSV export protocol:
+- You CAN and MUST deliver raw data when asked. If the user wants a list / dump / export / "CSV of" / "download" of records (e.g. "give me a CSV of all one-timers"), call `export_csv` with the right collection + pipeline ($match + $project with _id:0 of the useful columns; NO $limit unless they asked for top-N). It streams up to 1,000,000 rows to a file.
+- For customer lists (one-timers = visit_count 1, repeat = visit_count ≥ 2, dormant, tier lists) export from the `customers` collection — include mobile, name, tier, visit_count, lifetime_spend, last_visit_at, days_since_last_visit, city.
+- After the tool returns, present a one-line summary and the download link in EXACTLY this Markdown form: [Download <filename> (<row_count> rows)](<download_url>). If status is "preparing", still give the link and say it will be downloadable within a minute.
+- NEVER refuse a raw-data request and never paste more than 20 rows inline — use export_csv instead.
+
+Formatting rules — EVERY answer must be clean GitHub-flavoured Markdown:
+- ALWAYS render tabular or comparative data as a Markdown table (`| Col | Col |`) — never jumbled prose or comma lists.
+- **Bold** every key figure. Use short `###` headings to structure longer answers.
+- Use bullet lists for insights and a final "**Recommended actions**" bullet list when relevant.
+- Currency in ₹ with Indian digit grouping (₹12,34,567); percentages with one decimal; keep paragraphs ≤ 3 lines.
 
 Brand voice: Refined, premium fashion editorial. Indian context. No emojis.
 """
@@ -115,12 +128,14 @@ def _build_completion_params(messages: List[Dict[str, Any]], model: str,
 
 
 def _resolve_model(req_model: Optional[str]) -> tuple[str, str]:
-    m = (req_model or "gpt-5.2").lower()
-    if "claude" in m:
-        return "anthropic", "claude-sonnet-4-5-20250929"
+    m = (req_model or "gpt-5.5").lower()
+    if "opus" in m:
+        return "anthropic", "claude-opus-4-8"
+    if "claude" in m or "sonnet" in m:
+        return "anthropic", "claude-sonnet-4-6"
     if "gemini" in m:
-        return "gemini", "gemini-2.5-pro"
-    return "openai", "gpt-5.2"
+        return "gemini", "gemini-3.1-pro-preview"
+    return "openai", "gpt-5.5"
 
 
 async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str, user: Dict[str, Any] | None = None) -> tuple[str, List[Dict[str, Any]]]:
@@ -167,6 +182,25 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
         return (msg.content or ""), tool_trace
     # Hit iteration cap
     return ("(Reached tool-call limit. Try rephrasing your question.)", tool_trace)
+
+
+# ---------------- CSV export download ----------------
+@router.get("/exports/{export_id}")
+async def download_export(export_id: str, user: dict = Depends(get_current_user)):
+    """Download a CSV produced by the Fundle Brain `export_csv` tool."""
+    doc = await db["ai_exports"].find_one({"id": export_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Export not found")
+    if doc.get("status") == "preparing":
+        return JSONResponse(status_code=202, content={
+            "status": "preparing",
+            "detail": "Export is still being generated — retry in a few seconds."})
+    if doc.get("status") == "failed":
+        raise HTTPException(500, f"Export failed: {doc.get('error', 'unknown error')}")
+    path = os.path.join(EXPORT_DIR, f"{export_id}.csv")
+    if not os.path.exists(path):
+        raise HTTPException(410, "Export file no longer available — ask Fundle Brain to regenerate it")
+    return FileResponse(path, media_type="text/csv", filename=doc.get("filename", "export.csv"))
 
 
 # ---------------- Session listing ----------------
@@ -400,15 +434,15 @@ async def chat_upload_csv(
 @router.get("/suggested-prompts")
 async def suggested_prompts(user: dict = Depends(get_current_user)):
     return [
+        "Give me a CSV of all one-timer customers",
         "Show me top churning customers this month",
         "Which stores are underperforming in last 30 days?",
         "Which campaign gave the best ROI?",
-        "Which customers should get win-back coupons?",
+        "Export all Gold & Platinum customers dormant 90+ days as CSV",
         "Which SKUs drive the most repeat purchases?",
         "Which cities have the strongest loyalty penetration?",
         "What is the breakdown of customers by tier?",
         "How is the NPS trending and what should we do?",
-        "Look up customer 9876543210",
         "Summarise SMS dispatch success rate over the last week",
     ]
 

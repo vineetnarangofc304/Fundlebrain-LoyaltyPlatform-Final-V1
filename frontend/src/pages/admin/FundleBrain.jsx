@@ -3,11 +3,13 @@ import api from "@/lib/api";
 import { PageHeader } from "./_shared";
 import { Brain, Send, Loader2, Sparkles, Trash2, Upload, Wrench } from "lucide-react";
 import { toast } from "sonner";
+import MarkdownMessage from "./_markdown_message";
 
 const MODELS = [
-  { label: "GPT-5.2 (OpenAI)", value: "gpt-5.2" },
-  { label: "Claude Sonnet 4.5", value: "claude-sonnet-4-5" },
-  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro" },
+  { label: "GPT-5.5 (OpenAI)", value: "gpt-5.5" },
+  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6" },
+  { label: "Claude Opus 4.8", value: "claude-opus-4-8" },
+  { label: "Gemini 3.1 Pro", value: "gemini-3.1-pro" },
 ];
 
 export default function FundleBrain() {
@@ -16,7 +18,7 @@ export default function FundleBrain() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [model, setModel] = useState("gpt-5.2");
+  const [model, setModel] = useState("gpt-5.5");
   const [suggested, setSuggested] = useState([]);
   const [csvBusy, setCsvBusy] = useState(false);
   const fileRef = useRef(null);
@@ -142,7 +144,7 @@ export default function FundleBrain() {
               <div className="max-w-2xl mx-auto pt-12 fade-up">
                 <Brain className="w-12 h-12 kazo-text-burgundy mb-4" />
                 <h2 className="editorial-headline text-4xl mb-2">Fundle Brain</h2>
-                <p className="text-neutral-600 mb-8 max-w-md">Ask anything about your loyalty, customers, sales, or campaigns. I call <b>live MongoDB functions</b> to answer — no hallucinations. You can also upload a CSV and I will narrate it.</p>
+                <p className="text-neutral-600 mb-8 max-w-md">Ask anything about your loyalty, customers, sales, or campaigns. I call <b>live MongoDB functions</b> to answer — no hallucinations. I can also <b>export raw data as CSV</b> ("give me a CSV of all one-timers") and narrate any CSV you upload.</p>
                 <div className="text-xs uppercase tracking-widest text-neutral-500 mb-3">SUGGESTED QUESTIONS</div>
                 <div className="grid gap-2">
                   {suggested.map((s, i) => (
@@ -156,7 +158,7 @@ export default function FundleBrain() {
             <div className="max-w-3xl mx-auto space-y-5">
               {messages.map((m, i) => (
                 <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} fade-up`}>
-                  <div className={`max-w-2xl ${m.role === "user" ? "kazo-bg-black text-white" : "bg-white border border-black/10"} p-4 leading-relaxed text-sm whitespace-pre-wrap`}>
+                  <div className={`max-w-2xl ${m.role === "user" ? "kazo-bg-black text-white whitespace-pre-wrap" : "bg-white border border-black/10"} p-4 leading-relaxed text-sm`}>
                     {m.role === "assistant" && <div className="text-[10px] uppercase tracking-widest kazo-text-champagne mb-2 flex items-center gap-1"><Brain className="w-3 h-3" /> FUNDLE BRAIN</div>}
                     {m.tool_trace && m.tool_trace.length > 0 && (
                       <div className="mb-2 -mt-1 flex flex-wrap gap-1.5" data-testid={`tool-trace-${i}`}>
@@ -172,7 +174,7 @@ export default function FundleBrain() {
                         CSV · {m.csv_meta.filename} · {m.csv_meta.rows} rows · cols: {m.csv_meta.columns?.join(", ")}
                       </div>
                     )}
-                    {m.content}
+                    {m.role === "assistant" ? <MarkdownMessage content={m.content} /> : m.content}
                   </div>
                 </div>
               ))}

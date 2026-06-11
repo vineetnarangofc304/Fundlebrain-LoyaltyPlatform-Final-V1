@@ -18,37 +18,73 @@ from pydantic import BaseModel
 from auth import get_current_user
 from database import customers_col, transactions_col
 from routes._loyalty import LOYALTY_TX_MATCH
+from routes._dash_cache import cache_get, cache_set
 
 
 router = APIRouter(prefix="/segments/cohort-library", tags=["segments"])
+
+_CTX_TTL = 600          # build_context cache (full-collection aggregate ≈ 5 s)
+_COUNT_TTL = 600        # per-cohort matched_total cache
+_COUNT_SEM = asyncio.Semaphore(6)   # cap concurrent count queries → protect the DB pool
 
 
 # ============================================================
 # System-wide context (used as thresholds in cohort filters)
 # ============================================================
 async def build_context() -> Dict[str, Any]:
-    """Compute system-wide metrics that thresholds depend on.
+    """Compute system-wide metrics that thresholds depend on. TTL-cached —
+    the ATV aggregate scans every loyalty bill (1.5 M docs ≈ 5 s) and this is
+    called on EVERY cohort-library request, so an uncached version stalls the
+    whole Segment Builder (and saturates the Mongo pool for other dashboards).
 
     Returns:
       atv:        system-wide Average Transaction Value (₹) across all
                   loyalty bills (R5). Used as the "Above/Below ATV" threshold.
       total_loyalty_customers, total_bills, etc — informational only.
     """
+    cached = cache_get("cohort-ctx", _CTX_TTL)
+    if cached is not None:
+        return cached
     sums = await transactions_col.aggregate([
         {"$match": LOYALTY_TX_MATCH},
         {"$group": {"_id": None,
                     "net": {"$sum": "$net_amount"},
                     "bills": {"$sum": 1}}},
-    ]).to_list(1)
+    ], maxTimeMS=30000, allowDiskUse=True).to_list(1)
     if sums:
         net = sums[0].get("net", 0) or 0
         bills = sums[0].get("bills", 0) or 1
         atv = round(net / max(bills, 1), 2)
     else:
         atv = 0
-    total_cust = await customers_col.count_documents({"mobile": {"$nin": [None, ""]}})
-    return {"atv": atv, "total_loyalty_customers": total_cust,
-             "total_bills": sums[0].get("bills", 0) if sums else 0}
+    total_cust = await customers_col.count_documents(
+        {"mobile": {"$nin": [None, ""]}}, maxTimeMS=20000)
+    ctx = {"atv": atv, "total_loyalty_customers": total_cust,
+           "total_bills": sums[0].get("bills", 0) if sums else 0}
+    cache_set("cohort-ctx", ctx)
+    return ctx
+
+
+async def _count_cohort(c: Dict[str, Any], ctx: Dict[str, Any],
+                        timeout: float = 8.0) -> tuple:
+    """Count one cohort with TTL caching + bounded concurrency."""
+    key = f"cohort-count|{c['id']}"
+    hit = cache_get(key, _COUNT_TTL)
+    if hit is not None:
+        return c["id"], hit
+    from routes.segments_routes import compile_tree  # lazy import to avoid cycle
+    try:
+        async with _COUNT_SEM:
+            tree = c["build"](ctx)
+            match = await asyncio.wait_for(compile_tree(tree), timeout=timeout)
+            n = await asyncio.wait_for(
+                customers_col.count_documents(match, maxTimeMS=int(timeout * 1000)),
+                timeout=timeout + 2,
+            )
+        cache_set(key, n)
+        return c["id"], n
+    except Exception:
+        return c["id"], -1
 
 
 # ============================================================
@@ -538,18 +574,7 @@ async def list_cohorts(
     counts: Dict[str, int] = {}
 
     if include_counts:
-        from routes.segments_routes import compile_tree  # lazy import to avoid cycle
-        async def _count_one(c: Dict[str, Any]) -> tuple:
-            try:
-                tree = c["build"](ctx)
-                match = await asyncio.wait_for(compile_tree(tree), timeout=5.0)
-                n = await asyncio.wait_for(
-                    customers_col.count_documents(match), timeout=5.0
-                )
-                return c["id"], n
-            except Exception:
-                return c["id"], -1
-        results = await asyncio.gather(*[_count_one(c) for c in CATALOG])
+        results = await asyncio.gather(*[_count_cohort(c, ctx, timeout=5.0) for c in CATALOG])
         counts = dict(results)
 
     for c in CATALOG:
@@ -587,23 +612,13 @@ async def batch_counts(
         return {"counts": {}}
 
     ctx = await build_context()
-    from routes.segments_routes import compile_tree  # lazy import
-
     catalog_index = {c["id"]: c for c in CATALOG}
 
     async def _count_one(cid: str) -> tuple:
         c = catalog_index.get(cid)
         if not c:
             return cid, -1
-        try:
-            tree = c["build"](ctx)
-            match = await asyncio.wait_for(compile_tree(tree), timeout=8.0)
-            n = await asyncio.wait_for(
-                customers_col.count_documents(match), timeout=8.0
-            )
-            return cid, n
-        except Exception:
-            return cid, -1
+        return await _count_cohort(c, ctx, timeout=8.0)
 
     pairs = await asyncio.gather(*[_count_one(cid) for cid in body.cohort_ids])
     return {"counts": {cid: n for cid, n in pairs}}
