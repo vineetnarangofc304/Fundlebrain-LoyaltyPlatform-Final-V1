@@ -5,6 +5,25 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-10 (cont.4) — SMS intermittent ConnectTimeout: safe retry mitigation
+
+Production Message Log showed "some Sent / some Error" where Error = `ConnectTimeout` (even
+within the same minute) → deployment egresses via a POOL of IPs and Karix has whitelisted only
+SOME of them. Requests via a whitelisted IP succeed; others are dropped.
+- Mitigation: `send_sms_karix` now RETRIES connect-level failures only (`httpx.ConnectTimeout`
+  / `httpx.ConnectError`), up to 4 attempts with small backoff, connect timeout 8s. SAFE — the
+  connection was never established so Karix never received the request (no duplicate SMS). Read
+  timeouts are NOT retried. Logs "delivered on attempt N/4" when a retry succeeds.
+- Real fix (infra): whitelist the FULL production egress IP range/CIDR at Karix (get the list /
+  a static egress IP from Emergent Support). One IP is not enough.
+- Separate: all rows show DLT TEMPLATE = none → even "Sent" may be carrier-dropped at handset.
+  Re-adding the per-template DLT Content Template ID would guarantee handset delivery (client
+  had it removed). Pending client decision.
+- **ACTION: redeploy to production for the retry to take effect.**
+
+---
+
+
 ## 2026-06-10 (cont.2) — Karix QueryStringReceiver exact param set + egress finding
 
 - Per client instruction, `send_sms_karix` now sends EXACTLY the KAZO Karix QueryStringReceiver

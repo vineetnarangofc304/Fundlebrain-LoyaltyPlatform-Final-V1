@@ -8,6 +8,7 @@
 """
 import uuid
 import re
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
@@ -344,24 +345,41 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
         "dlt_entity_id": dlt_entity,
         "text": text,
     }
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as c:
-            r = await c.get(cfg["sms_endpoint"], params=params)
-        ok = r.status_code == 200
-        status = "ok" if ok else f"http_{r.status_code}"
-        # Always record what Karix returned (some non-200 bodies are empty) so the Message
-        # Log shows the real accept/reject + reason.
-        resp_text = r.text or f"HTTP {r.status_code} (empty body)"
-        await _log("sms", status, mob, params, resp_text, template_id, event_trigger, context)
-        return {"ok": ok, "status_code": r.status_code, "response": r.text,
-                "dlt_entity_id": dlt_entity or None}
-    except Exception as e:
-        # Capture the exception TYPE + endpoint so the Message Log is diagnostic even for
-        # timeouts / connection errors whose str(e) is empty (e.g. egress blocked, bad URL).
-        err = f"{type(e).__name__}: {e}".strip().rstrip(":").strip() or type(e).__name__
-        err = f"{err} — gateway: {cfg.get('sms_endpoint')}"
-        await _log("sms", "exception", mob, params, err, template_id, event_trigger, context)
-        return {"ok": False, "error": err}
+    # Outbound to Karix can intermittently ConnectTimeout when the deployment egresses via a
+    # POOL of IPs and only SOME are whitelisted at Karix — a fresh connection may pick a
+    # whitelisted IP. So we RETRY connect-level failures (SAFE: the connection was never
+    # established, so Karix never received the request — no duplicate-SMS risk). We do NOT
+    # retry read-level timeouts (where the request may already have been delivered).
+    last_err = None
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as c:
+                r = await c.get(cfg["sms_endpoint"], params=params)
+            ok = r.status_code == 200
+            status = "ok" if ok else f"http_{r.status_code}"
+            # Always record what Karix returned (some non-200 bodies are empty) so the Message
+            # Log shows the real accept/reject + reason.
+            resp_text = r.text or f"HTTP {r.status_code} (empty body)"
+            if attempt > 1:
+                resp_text = f"{resp_text} · delivered on attempt {attempt}/{attempts}"
+            await _log("sms", status, mob, params, resp_text, template_id, event_trigger, context)
+            return {"ok": ok, "status_code": r.status_code, "response": r.text,
+                    "attempts": attempt, "dlt_entity_id": dlt_entity or None}
+        except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+            last_err = e
+            if attempt < attempts:
+                await asyncio.sleep(0.6 * attempt)  # brief backoff before re-connecting
+            continue
+        except Exception as e:
+            last_err = e
+            break
+    # Capture the exception TYPE + endpoint so the Message Log is diagnostic even for
+    # timeouts / connection errors whose str(e) is empty (e.g. egress blocked, bad URL).
+    err = f"{type(last_err).__name__}: {last_err}".strip().rstrip(":").strip() or type(last_err).__name__
+    err = f"{err} — gateway: {cfg.get('sms_endpoint')} (after {attempts} attempts)"
+    await _log("sms", "exception", mob, params, err, template_id, event_trigger, context)
+    return {"ok": False, "error": err}
 
 
 async def send_whatsapp_karix(mobile: str, template_id_external: str,
