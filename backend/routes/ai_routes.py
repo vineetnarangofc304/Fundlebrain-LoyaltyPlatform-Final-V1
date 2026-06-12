@@ -26,7 +26,7 @@ from routes.ai_data_expert import EXPORT_DIR
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-MAX_TOOL_ITERATIONS = 8
+MAX_TOOL_ITERATIONS = 10
 
 SYSTEM_PROMPT = """You are Fundle Brain, the AI analytics assistant AND operations agent for KAZO (premium Indian women's fashion brand) powered by Fundle.
 
@@ -57,6 +57,14 @@ Raw-data & CSV export protocol:
 - For customer lists (one-timers = visit_count 1, repeat = visit_count ≥ 2, dormant, tier lists) export from the `customers` collection — include mobile, name, tier, visit_count, lifetime_spend, last_visit_at, days_since_last_visit, city.
 - After the tool returns, present a one-line summary and the download link in EXACTLY this Markdown form: [Download <filename> (<row_count> rows)](<download_url>). If status is "preparing", still give the link and say it will be downloadable within a minute.
 - NEVER refuse a raw-data request and never paste more than 20 rows inline — use export_csv instead.
+- NEVER output `data:` URLs, base64 blobs, or instructions to copy-paste CSV text into Notepad/Sheets. The ONLY way to deliver a file is the `export_csv` tool — it returns a real, clickable download link.
+
+Agentic protocol — be decisive, never stall:
+- DO NOT ask clarifying questions before a READ/data pull. Pick the most reasonable interpretation, state your assumption in one short line, and EXECUTE. Clarify only for ambiguous WRITE actions.
+- Plan tool use: at most ONE get_data_dictionary call when unsure of fields, then run_aggregation / export_csv. If a pipeline errors, fix it and retry ONCE with a corrected pipeline — do not repeat the identical call.
+- `transactions.items` is an ARRAY of {sku, name, category, quantity, total}. To filter bills by item count use {"$expr": {"$gte": [{"$size": {"$ifNull": ["$items", []]}}, 2]}}. To analyse items use $unwind.
+- "Shopped N+ items in a bill" → filter transactions with the $size expression above; "bought N+ times" → customers.visit_count.
+- If asked for a list of PEOPLE based on bill behaviour: aggregate transactions ($match → $group by customer_mobile) and either show ≤20 rows inline as a table or export_csv for the full list.
 
 Formatting rules — EVERY answer must be clean GitHub-flavoured Markdown:
 - ALWAYS render tabular or comparative data as a Markdown table (`| Col | Col |`) — never jumbled prose or comma lists.
@@ -128,14 +136,16 @@ def _build_completion_params(messages: List[Dict[str, Any]], model: str,
 
 
 def _resolve_model(req_model: Optional[str]) -> tuple[str, str]:
-    m = (req_model or "gpt-5.5").lower()
+    """Fundle Brain runs on a single locked engine (best agentic data analyst).
+    Optional overrides kept for API callers/tests."""
+    m = (req_model or "").lower()
+    if "gpt" in m or "openai" in m:
+        return "openai", "gpt-5.5"
     if "opus" in m:
         return "anthropic", "claude-opus-4-8"
-    if "claude" in m or "sonnet" in m:
-        return "anthropic", "claude-sonnet-4-6"
     if "gemini" in m:
         return "gemini", "gemini-3.1-pro-preview"
-    return "openai", "gpt-5.5"
+    return "anthropic", "claude-sonnet-4-6"
 
 
 async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str, user: Dict[str, Any] | None = None) -> tuple[str, List[Dict[str, Any]]]:
@@ -180,8 +190,17 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
             continue  # let the model see the tool results
         # No tool calls — final answer
         return (msg.content or ""), tool_trace
-    # Hit iteration cap
-    return ("(Reached tool-call limit. Try rephrasing your question.)", tool_trace)
+    # Hit iteration cap — force a final synthesis from gathered tool results
+    messages.append({
+        "role": "system",
+        "content": ("Tool budget exhausted. Synthesise the best possible FINAL answer NOW "
+                    "from the tool results above. If an export was already created, share its "
+                    "download link. Otherwise summarise what you found as a Markdown table and "
+                    "state in one line what's still missing. Do NOT call more tools."),
+    })
+    params = _build_completion_params(messages, model, provider)
+    resp = litellm.completion(**params)
+    return (resp.choices[0].message.content or ""), tool_trace
 
 
 # ---------------- CSV export download ----------------
@@ -359,7 +378,7 @@ async def chat_upload_csv(
     file: UploadFile = File(...),
     question: str = Form(...),
     session_id: Optional[str] = Form(None),
-    model: Optional[str] = Form("gpt-5.2"),
+    model: Optional[str] = Form(None),
     user: dict = Depends(get_current_user),
 ):
     """Upload a CSV and ask Fundle Brain to narrate / analyse it."""

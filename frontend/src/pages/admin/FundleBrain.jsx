@@ -5,20 +5,12 @@ import { Brain, Send, Loader2, Sparkles, Trash2, Upload, Wrench } from "lucide-r
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
-const MODELS = [
-  { label: "GPT-5.5 (OpenAI)", value: "gpt-5.5" },
-  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6" },
-  { label: "Claude Opus 4.8", value: "claude-opus-4-8" },
-  { label: "Gemini 3.1 Pro", value: "gemini-3.1-pro" },
-];
-
 export default function FundleBrain() {
   const [sessions, setSessions] = useState([]);
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [model, setModel] = useState("gpt-5.5");
   const [suggested, setSuggested] = useState([]);
   const [csvBusy, setCsvBusy] = useState(false);
   const fileRef = useRef(null);
@@ -57,7 +49,7 @@ export default function FundleBrain() {
     setMessages((m) => [...m, { role: "user", content: msg, timestamp: new Date().toISOString() }]);
     setInput("");
     try {
-      const r = await api.post("/ai/chat", { session_id: sessionId, message: msg, model });
+      const r = await api.post("/ai/chat", { session_id: sessionId, message: msg });
       setMessages((m) => [...m, {
         role: "assistant", content: r.data.reply,
         tool_trace: r.data.tool_trace || [],
@@ -88,7 +80,6 @@ export default function FundleBrain() {
       const fd = new FormData();
       fd.append("file", file);
       fd.append("question", q);
-      fd.append("model", model);
       if (sessionId) fd.append("session_id", sessionId);
       const r = await api.post("/ai/chat/upload-csv", fd, { headers: { "Content-Type": "multipart/form-data" } });
       setMessages((m) => [...m, {
@@ -112,14 +103,9 @@ export default function FundleBrain() {
     <div data-testid="fundle-brain-page">
       <PageHeader
         title="Fundle Brain"
-        subtitle="AI ANALYTICS · TRUE MONGODB FUNCTION-CALLING · CSV NARRATION"
+        subtitle="LOYALTY DATA EXPERT · LIVE MONGODB · RAW CSV EXPORTS"
         actions={
-          <>
-            <select className="k-input !w-auto !py-1.5" value={model} onChange={(e) => setModel(e.target.value)} data-testid="model-selector">
-              {MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-            </select>
-            <button className="k-btn k-btn-outline k-btn-sm" onClick={newChat} data-testid="new-chat-btn">New chat</button>
-          </>
+          <button className="k-btn k-btn-outline k-btn-sm" onClick={newChat} data-testid="new-chat-btn">New chat</button>
         }
       />
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-0 h-[calc(100vh-100px)]">

@@ -335,3 +335,11 @@ File: `backend/routes/live_monitor_routes.py`, `frontend/.../LiveMonitorPage.jsx
 - P3 FIX: React "<span> cannot be a child of <option>" hydration warning — mixed static+dynamic option children converted to single template literals (CommandCenter, CampaignManager, AutoCampaignsPage).
 - Testing: iteration_27 (testing agent) — backend 18/18 pytest, frontend 100%; pytest suite at /app/backend/tests/iteration72_perf_ai_brain_test.py.
 - NOTE: fixes live in PREVIEW — user must redeploy to push to kazoloyalty.fundlebrain.ai.
+
+## 2026-06-12 — Fundle Brain locked to single best agent + decisiveness hardening
+- User reported "AI Brain has no capability" — screenshots were from PRODUCTION (kazoloyalty.fundlebrain.ai) still running the OLD build (raw pipe tables, data:URL hacks, tool-call limit). All previously fixed in preview; REDEPLOY required.
+- Removed the model dropdown (user request) — Fundle Brain now runs on ONE locked engine: Claude Sonnet 4.6 (API override params kept for tests; "gpt"→gpt-5.5, "opus"→opus-4-8, "gemini"→3.1-pro).
+- Decisiveness rules in system prompt: never ask clarifying questions before data pulls (state assumption + execute), never data:URLs/copy-paste CSV hacks (export_csv is the only file channel), max 1 dictionary call, fix-and-retry-once on pipeline errors.
+- items[] schema hints ($size for per-bill item count, $unwind for item analysis) added to system prompt + run_aggregation description + field notes.
+- Tool-loop cap raised 8→10 and graceful: on cap, forces a final synthesis answer (table + export link) instead of "(Reached tool-call limit)".
+- E2E verified with the user's exact failing prompt "list of people who shopped 2+ items in their bill in last 6 months" → stated assumption, found data nuance (1 item-line/bill → used quantity sum), exported 52,740 customers CSV with working download button + metrics table.

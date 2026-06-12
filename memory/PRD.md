@@ -1883,6 +1883,7 @@ Both issues meant a malicious actor could empty any customer's wallet by manipul
 - [x] AI models upgraded: GPT-5.5 default, Claude Sonnet 4.6, Claude Opus 4.8, Gemini 3.1 Pro
 - [x] AI expertise: warehouse snapshot + brand KPI digest + data-provenance note (568K master-CSV customers have no bill rows → customer lists must query customers collection)
 - [x] Fixed broken `get_data_dictionary` tool signature (always returned "Bad arguments")
+- [x] (Jun 12) Model dropdown REMOVED — Fundle Brain locked to single best engine (Claude Sonnet 4.6); decisive agent rules (no clarifying questions on reads, no data:URL hacks, graceful tool-cap synthesis, items[] $size hints); verified on user's exact failing prompt (52,740-row export)
 - [x] Hydration warning `<span> in <option>` fixed (CommandCenter/CampaignManager/AutoCampaignsPage mixed option children → template literals)
 - ⚠️ Fixes in PREVIEW only — user must REDEPLOY to kazoloyalty.fundlebrain.ai
 

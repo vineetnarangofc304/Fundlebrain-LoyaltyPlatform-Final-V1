@@ -44,7 +44,8 @@ _FIELD_NOTES = {
                      "purchase date — R1), customer_mobile (None for anonymous walk-ins — R5: only "
                      "bills WITH mobile are loyalty bills), store_id/store_code/store_name, city, "
                      "net_amount, gross_amount, discount_amount, is_return, points_earned, "
-                     "points_redeemed, items[] (sku,name,category,quantity,total), source "
+                     "points_redeemed, items[] (ARRAY of {sku,name,category,quantity,total} — use "
+                     "$size for per-bill item counts, $unwind for item-level analysis), source "
                      "('historic_upload' for CSV ingest, 'pos' for live POS)."),
     "customers": ("One doc per loyalty customer keyed by 10-digit `mobile` (R4 — the identity). "
                   "visit_count and lifetime_spend are recomputed from bills (R3). "
