@@ -18,7 +18,7 @@ import sys
 import time
 import requests
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-data-platform.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://fundle-brain-ai-1.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 EMAIL, PASSWORD = "superadmin@fundle.io", "Fundle@2026"
 CHUNK = 1_500_000

@@ -16,7 +16,7 @@ import time
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-data-platform.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://fundle-brain-ai-1.preview.emergentagent.com").rstrip("/")
 SUPER_EMAIL = "superadmin@fundle.io"
 SUPER_PASS = "Fundle@2026"
 TARGET_CUST_ID = "a26865d9a69b48d48a9c1524e25041ef"  # mobile 6000535682
