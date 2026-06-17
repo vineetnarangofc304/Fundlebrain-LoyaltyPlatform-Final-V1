@@ -5,6 +5,30 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-17 — Exact 2-decimal amounts + IST date consistency (iter 73)
+
+Two user-reported issues fixed (live retail data — exactness matters):
+- **Rounding → exact 2 decimals.** `lib/format.js`: new **`fmtMoney2()`** (Indian commas, always
+  2 dp, **no Cr/L/K compaction**, "—" for empty, sign-aware) now used in EVERY report / table /
+  detail / drill-down / Live-Monitor amount cell. `fmtINRFull` (tooltips) → 2 dp. `fmtINR` (kept
+  for dashboard KPI tiles, **compaction retained per user choice 1b**) → K tier bumped to 2 dp.
+  Converted ~23 files (legacy_reports/*, raw_reports/*, Reports, ShopperBillReport,
+  _TransactionDrill, _customer_drawer, CustomerDetail, Customer360, ItemMaster, Reconciliation,
+  LiveMonitor inline `Math.round().toLocaleString()` cells, CampaignManager, LoyaltyConfigurator,
+  StoreOps). Verified: 248/248 amounts exact 2-dp on Shopper report; tiles still compact.
+- **Off-by-one date (IST vs UTC).** Root cause: dashboard renders `bill_date` in IST while the AI
+  Brain / reports string-sliced the raw (often UTC) value → bills 00:00–05:30 IST showed the
+  previous day. Fix (read-time only, no data migration): added **`fmtDateISO()`** (IST, keeps
+  YYYY-MM-DD) + reused `fmtDateTimeISO`; replaced raw `.slice(0,10/16)` in legacy report date
+  columns. Shopper report backend now renders date/time in IST (`_to_ist_parts` + `$dateToString`
+  tz `Asia/Kolkata`; naive treated as IST to match the frontend parser). AI Brain system prompt +
+  data dictionary instructed to ALWAYS format/group dates with `timezone:"Asia/Kolkata"`.
+- **Verified:** pytest iter73 8/8; testing_agent **iteration_29 frontend 100%** (no crashes, exact
+  2-dp everywhere, tiles compact, IST dates confirmed). ⚠️ Redeploy required for production.
+- Backlog note: `/admin/raw-reports` (RawReportsPage) slow to settle (>25s) — perf follow-up.
+
+---
+
 ## 2026-06-17 — NEW: Shopper Bill Report (bill-level report) under REPORTS (iter 73)
 
 Client asked for a bill-level report of everyone who shopped in a date range, with 22
