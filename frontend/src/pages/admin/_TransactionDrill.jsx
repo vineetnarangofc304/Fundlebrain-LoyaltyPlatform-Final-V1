@@ -1,7 +1,7 @@
 // Reusable transaction detail modal
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { fmtINR, fmtDate, fmtDateTime, tierClass } from "@/lib/format";
+import { fmtMoney2, fmtDate, fmtDateTime, tierClass } from "@/lib/format";
 import { X, ExternalLink } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -26,9 +26,9 @@ export default function TransactionDrillModal({ txnId, onClose }) {
           <div className="p-5 space-y-4">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
               <Stat label="Bill Date" value={fmtDateTime(data.transaction.bill_date)} />
-              <Stat label="Gross" value={fmtINR(data.transaction.gross_amount)} />
-              <Stat label="Discount" value={fmtINR(data.transaction.discount_amount)} />
-              <Stat label="Net" value={fmtINR(data.transaction.net_amount)} accent />
+              <Stat label="Gross" value={fmtMoney2(data.transaction.gross_amount)} />
+              <Stat label="Discount" value={fmtMoney2(data.transaction.discount_amount)} />
+              <Stat label="Net" value={fmtMoney2(data.transaction.net_amount)} accent />
               <Stat label="Points Earned" value={`+${data.transaction.points_earned}`} />
               <Stat label="Payment" value={data.transaction.payment_mode} />
               <Stat label="Coupon" value={data.transaction.coupon_code || "—"} />
@@ -72,8 +72,8 @@ export default function TransactionDrillModal({ txnId, onClose }) {
                       <td>{it.name}</td>
                       <td><span className="pill pill-neutral">{it.category}</span></td>
                       <td className="text-right font-mono">{it.quantity}</td>
-                      <td className="text-right font-mono">{fmtINR(it.unit_price)}</td>
-                      <td className="text-right font-mono">{fmtINR(it.total)}</td>
+                      <td className="text-right font-mono">{fmtMoney2(it.unit_price)}</td>
+                      <td className="text-right font-mono">{fmtMoney2(it.total)}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
 import { toast } from "sonner";
-import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
+import { fmtMoney2, fmtNum, fmtDate } from "@/lib/format";
 import { Plus, Play, Sparkles, Send, MessageSquare, Mail, Smartphone, Loader2 } from "lucide-react";
 
 const CHANNELS = ["whatsapp", "sms", "email", "push", "in_app"];
@@ -165,7 +165,7 @@ export default function CampaignManager() {
                     </td>
                     <td className="text-right font-mono">{fmtNum(c.delivered)}</td>
                     <td className="text-right font-mono">{fmtNum(c.redeemed)}</td>
-                    <td className="text-right font-mono">{fmtINR(c.revenue_generated)}</td>
+                    <td className="text-right font-mono">{fmtMoney2(c.revenue_generated)}</td>
                     <td>
                       <StatusPill status={c.status} />
                       {job && job.failed > 0 && <div className="text-[10px] text-rose-600 mt-0.5">{job.failed} failed</div>}

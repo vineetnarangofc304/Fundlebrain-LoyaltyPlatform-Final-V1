@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import api, { API_URL } from "@/lib/api";
 import { PageHeader } from "./_shared";
 import { toast } from "sonner";
-import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
+import { fmtMoney2, fmtNum, fmtDate } from "@/lib/format";
 import { Plus, Upload, Download, Search, Edit2, Trash2, FolderPlus } from "lucide-react";
 
 export default function ItemMaster() {
@@ -129,7 +129,7 @@ export default function ItemMaster() {
                   <td><span className="pill pill-neutral">{it.category}</span></td>
                   <td className="font-mono text-xs">{it.erp_id || "—"}</td>
                   <td className="text-xs">{[it.color, it.size].filter(Boolean).join(" / ") || "—"}</td>
-                  <td className="text-right font-mono">{fmtINR(it.mrp)}</td>
+                  <td className="text-right font-mono">{fmtMoney2(it.mrp)}</td>
                   <td className="text-xs">{fmtDate(it.created_at)}</td>
                   <td>
                     <div className="flex gap-1">

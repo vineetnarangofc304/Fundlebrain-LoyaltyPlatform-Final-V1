@@ -1,6 +1,6 @@
 /* Location Wise Customer Report */
 import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
-import { fmtINR, fmtNum } from "@/lib/format";
+import { fmtMoney2, fmtNum } from "@/lib/format";
 
 const cols = [
   { key: "store_code", label: "Code", cellClass: "font-mono text-xs" },
@@ -10,7 +10,7 @@ const cols = [
   { key: "zone", label: "Zone" },
   { key: "customer_count", label: "Customers", cellClass: "text-right font-mono", fmt: fmtNum },
   { key: "total_visits", label: "Total Visits", cellClass: "text-right font-mono", fmt: fmtNum },
-  { key: "lifetime_spend", label: "Lifetime ₹", cellClass: "text-right font-mono", fmt: fmtINR },
+  { key: "lifetime_spend", label: "Lifetime ₹", cellClass: "text-right font-mono", fmt: fmtMoney2 },
 ];
 
 export default function LocationWiseCustomers() {

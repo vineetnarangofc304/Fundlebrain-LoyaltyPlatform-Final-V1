@@ -8,7 +8,7 @@ import {
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as ChartTooltip, BarChart, Bar } from "recharts";
 
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
-const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+const fmtMoney2 = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const fmtDate = (s) => !s ? "—" : new Date(s).toLocaleDateString("en-IN", { year: "numeric", month: "short", day: "2-digit" });
 const fmtDateTime = (s) => !s ? "—" : new Date(s).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 
@@ -126,9 +126,9 @@ export default function CustomerDetailDrawer({ mobile, onClose }) {
           <div className="p-5">
             {/* TOP-LEVEL METRIC ROW */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-5">
-              <MetricChip label="Lifetime Spend" value={fmtINR(lt.spend)} accent="burgundy" />
+              <MetricChip label="Lifetime Spend" value={fmtMoney2(lt.spend)} accent="burgundy" />
               <MetricChip label="Bills" value={fmtNum(lt.visits)} accent="indigo" />
-              <MetricChip label="AOV" value={fmtINR(lt.aov)} accent="amber" />
+              <MetricChip label="AOV" value={fmtMoney2(lt.aov)} accent="amber" />
               <MetricChip label="Points Balance" value={fmtNum(c.points_balance)} accent="teal" />
               <MetricChip label="Lifetime Earned" value={fmtNum(c.lifetime_points_earned)} accent="neutral" />
               <MetricChip label="Lifetime Redeemed" value={fmtNum(c.lifetime_points_redeemed)} accent="neutral" />
@@ -197,7 +197,7 @@ export default function CustomerDetailDrawer({ mobile, onClose }) {
                           </defs>
                           <XAxis dataKey="month" tick={{ fontSize: 10 }} />
                           <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v} />
-                          <ChartTooltip formatter={(v) => fmtINR(v)} contentStyle={{ fontSize: 12 }} />
+                          <ChartTooltip formatter={(v) => fmtMoney2(v)} contentStyle={{ fontSize: 12 }} />
                           <Area type="monotone" dataKey="spend" stroke="#9b2c2c" fill="url(#g_spend)" />
                         </AreaChart>
                       </ResponsiveContainer>
@@ -229,8 +229,8 @@ export default function CustomerDetailDrawer({ mobile, onClose }) {
                           <td className="py-1.5 pr-2 font-mono text-[11px]">{t.bill_number}</td>
                           <td className="py-1.5 pr-2 text-neutral-600">{fmtDate(t.bill_date)}</td>
                           <td className="py-1.5 pr-2 text-neutral-600 truncate max-w-[140px]" title={t.store_name}>{t.store_name || "—"}</td>
-                          <td className="py-1.5 pr-2 text-right font-medium">{fmtINR(t.net_amount)}</td>
-                          <td className="py-1.5 pr-2 text-right text-neutral-500">{fmtINR(t.discount_amount)}</td>
+                          <td className="py-1.5 pr-2 text-right font-medium">{fmtMoney2(t.net_amount)}</td>
+                          <td className="py-1.5 pr-2 text-right text-neutral-500">{fmtMoney2(t.discount_amount)}</td>
                           <td className="py-1.5 pr-2 text-right text-teal-700">{fmtNum(t.points_earned)}</td>
                           <td className="py-1.5 text-right text-rose-700">{fmtNum(t.points_redeemed)}</td>
                         </tr>
@@ -277,7 +277,7 @@ export default function CustomerDetailDrawer({ mobile, onClose }) {
                           <div className="text-[10px] text-neutral-500">{s.code || ""} · {s.city || "—"}</div>
                         </div>
                         <div className="text-right shrink-0">
-                          <div className="font-mono">{fmtINR(s.spend)}</div>
+                          <div className="font-mono">{fmtMoney2(s.spend)}</div>
                           <div className="text-[10px] text-neutral-400">{s.visits} visits</div>
                         </div>
                       </div>
@@ -293,7 +293,7 @@ export default function CustomerDetailDrawer({ mobile, onClose }) {
                         <BarChart data={cats} layout="vertical" margin={{ left: 10 }}>
                           <XAxis type="number" tick={{ fontSize: 10 }} hide />
                           <YAxis type="category" dataKey="category" tick={{ fontSize: 10 }} width={90} />
-                          <ChartTooltip formatter={(v) => fmtINR(v)} contentStyle={{ fontSize: 12 }} />
+                          <ChartTooltip formatter={(v) => fmtMoney2(v)} contentStyle={{ fontSize: 12 }} />
                           <Bar dataKey="spend" fill="#525e88" />
                         </BarChart>
                       </ResponsiveContainer>

@@ -2,14 +2,24 @@ export const fmtINR = (n) => {
   if (n === null || n === undefined || Number.isNaN(n)) return "N/A";
   if (n >= 10000000) return `₹${(n / 10000000).toFixed(2)}Cr`;
   if (n >= 100000) return `₹${(n / 100000).toFixed(2)}L`;
-  if (n >= 1000) return `₹${(n / 1000).toFixed(1)}K`;
-  return `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+  if (n >= 1000) return `₹${(n / 1000).toFixed(2)}K`;
+  return `₹${Number(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
-// Full ₹ amount with Indian commas — no Cr/L compaction. Useful for tooltips.
+// Exact ₹ amount with Indian commas and ALWAYS 2 decimals — NO Cr/L/K compaction.
+// Use this for every report / table / detail / drill-down amount cell where the
+// exact purchase value (paise included) must be shown — never rounded.
+export const fmtMoney2 = (n) => {
+  if (n === null || n === undefined || n === "" || Number.isNaN(Number(n))) return "—";
+  const v = Number(n);
+  const sign = v < 0 ? "-" : "";
+  return `${sign}₹${Math.abs(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+
+// Full ₹ amount with Indian commas — no Cr/L compaction, exact 2 decimals. Used for tooltips/hover.
 export const fmtINRFull = (n) => {
   if (n === null || n === undefined || Number.isNaN(n)) return "N/A";
-  return `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+  return `₹${Number(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
 export const fmtNum = (n) => {
@@ -93,5 +103,17 @@ export const fmtDateTimeISO = (s) => {
   }).formatToParts(d).reduce((a, p) => ((a[p.type] = p.value), a), {});
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 };
+
+// Year-month-date in IST: "YYYY-MM-DD" (keeps the report's sortable ISO date format
+// but converts to Asia/Kolkata so it matches the dashboard — no more off-by-one).
+export const fmtDateISO = (s) => {
+  const d = parseDate(s);
+  if (!d) return s ? s : "—";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric", month: "2-digit", day: "2-digit", timeZone: IST_TZ,
+  }).formatToParts(d).reduce((a, p) => ((a[p.type] = p.value), a), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+
 
 export const tierClass = (t) => `pill pill-${(t || "silver").toLowerCase()}`;

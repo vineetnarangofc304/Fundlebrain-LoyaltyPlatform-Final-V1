@@ -4,7 +4,7 @@ import api from "@/lib/api";
 import { PageHeader } from "../_shared";
 import { Pill, ConfirmReasonModal } from "./_shared";
 import { Search, RotateCcw } from "lucide-react";
-import { fmtINR } from "@/lib/format";
+import { fmtMoney2 } from "@/lib/format";
 import { toast } from "sonner";
 
 export default function ReactivateCoupon() {
@@ -97,7 +97,7 @@ export default function ReactivateCoupon() {
                       <td className="py-2 px-2 font-mono"><span className="px-2 py-0.5 bg-amber-100 text-amber-900 rounded text-xs">{r.code}</span></td>
                       <td className="py-2 px-2 font-mono">{r.customer_mobile}</td>
                       <td className="py-2 px-2 font-mono text-xs">{r.bill_number || "—"}</td>
-                      <td className="py-2 px-2 font-mono text-right">{fmtINR(r.discount_amount || r.value || 0)}</td>
+                      <td className="py-2 px-2 font-mono text-right">{fmtMoney2(r.discount_amount || r.value || 0)}</td>
                       <td className="py-2 px-2">
                         {r.reversed ? <Pill tone="danger">Reversed</Pill> : <Pill tone="success">Active</Pill>}
                       </td>

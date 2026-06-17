@@ -1,6 +1,6 @@
 /* Top Customers Report */
 import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
-import { fmtINR, fmtNum } from "@/lib/format";
+import { fmtMoney2, fmtNum } from "@/lib/format";
 
 const cols = [
   { key: "rank", label: "#", cellClass: "text-right font-mono w-10", fmt: (_, r, i) => "" },
@@ -8,7 +8,7 @@ const cols = [
   { key: "name", label: "Name" },
   { key: "tier", label: "Tier", fmt: (v) => v ? <span className="text-xs uppercase">{v}</span> : "—" },
   { key: "visit_count", label: "Visits", cellClass: "text-right font-mono", fmt: fmtNum },
-  { key: "lifetime_spend", label: "Lifetime ₹", cellClass: "text-right font-mono", fmt: fmtINR },
+  { key: "lifetime_spend", label: "Lifetime ₹", cellClass: "text-right font-mono", fmt: fmtMoney2 },
   { key: "points_balance", label: "Points", cellClass: "text-right font-mono", fmt: fmtNum },
 ];
 

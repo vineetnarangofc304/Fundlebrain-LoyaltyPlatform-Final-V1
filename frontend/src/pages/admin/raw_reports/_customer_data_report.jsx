@@ -3,7 +3,7 @@ import api from "@/lib/api";
 import { toast } from "sonner";
 import {
   FilterBar, NarrativeCard, ExportMenu, ReportTable, ColumnPicker,
-  ReportBarChart, DrillModal, fmtNum, fmtINR, fmtPct, fmtDecimal,
+  ReportBarChart, DrillModal, fmtNum, fmtMoney2, fmtPct, fmtDecimal,
 } from "./_shared";
 
 const GROUPS = ["location", "city", "state", "zone", "month", "tier"];
@@ -15,11 +15,11 @@ const ALL_COLUMNS = [
   { key: "repeat_customers",             label: "Repeat Customers",     align: "right", format: fmtNum },
   { key: "one_timer_customers",          label: "One-Timer Customers",  align: "right", format: fmtNum },
   { key: "repeat_pct",                   label: "Repeat %",             align: "right", format: fmtPct, drillable: false },
-  { key: "total_purchase",               label: "Total Purchase",       align: "right", format: fmtINR },
-  { key: "avg_lifetime_spend",           label: "Avg Lifetime Spend",   align: "right", format: fmtINR, drillable: false },
+  { key: "total_purchase",               label: "Total Purchase",       align: "right", format: fmtMoney2 },
+  { key: "avg_lifetime_spend",           label: "Avg Lifetime Spend",   align: "right", format: fmtMoney2, drillable: false },
   { key: "avg_bills_per_customer",       label: "Avg Bills / Customer", align: "right", format: fmtDecimal, drillable: false },
   { key: "total_earn_points",            label: "Total Earn Points",    align: "right", format: fmtNum },
-  { key: "total_lifetime_spend",         label: "Total Lifetime Spend", align: "right", format: fmtINR },
+  { key: "total_lifetime_spend",         label: "Total Lifetime Spend", align: "right", format: fmtMoney2 },
   { key: "total_lifetime_points_earned", label: "Total Lifetime Points",align: "right", format: fmtNum },
   { key: "total_points_balance",         label: "Total Points Balance", align: "right", format: fmtNum },
   { key: "avg_visit_count",              label: "Avg Visit Count",      align: "right", format: fmtDecimal, drillable: false },

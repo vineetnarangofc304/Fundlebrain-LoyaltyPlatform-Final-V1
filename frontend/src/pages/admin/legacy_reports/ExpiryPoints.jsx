@@ -1,6 +1,6 @@
 /* Expiry Points Report */
 import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
-import { fmtNum } from "@/lib/format";
+import { fmtNum, fmtDateISO } from "@/lib/format";
 
 const cols = [
   { key: "mobile", label: "Mobile", cellClass: "font-mono" },
@@ -9,7 +9,7 @@ const cols = [
   { key: "home_store_id", label: "Home Store", cellClass: "text-xs font-mono" },
   { key: "points_balance", label: "Balance", cellClass: "text-right font-mono", fmt: fmtNum },
   { key: "expiring_points", label: "Expiring", cellClass: "text-right font-mono text-rose-700 font-medium", fmt: fmtNum },
-  { key: "earliest_expiry", label: "Earliest Expiry", cellClass: "text-xs font-mono", fmt: (v) => (v || "").slice(0, 10) },
+  { key: "earliest_expiry", label: "Earliest Expiry", cellClass: "text-xs font-mono", fmt: fmtDateISO },
 ];
 
 export default function ExpiryPoints() {

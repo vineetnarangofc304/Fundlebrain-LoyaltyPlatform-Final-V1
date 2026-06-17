@@ -3,7 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import api from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
-import { fmtINR, fmtNum, fmtDate, tierClass } from "@/lib/format";
+import { fmtMoney2, fmtNum, fmtDate, tierClass } from "@/lib/format";
 import { LogOut, Search, Sparkles, Plus, Minus, Gift } from "lucide-react";
 
 export default function StoreOps() {
@@ -95,7 +95,7 @@ export default function StoreOps() {
               </div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <Stat label="Points Balance" value={fmtNum(customer.points_balance)} />
-                <Stat label="Lifetime Spend" value={fmtINR(customer.lifetime_spend)} />
+                <Stat label="Lifetime Spend" value={fmtMoney2(customer.lifetime_spend)} />
                 <Stat label="Visits" value={fmtNum(customer.visit_count)} />
                 <Stat label="Last Visit" value={fmtDate(customer.last_visit_at)} />
               </div>
@@ -144,7 +144,7 @@ export default function StoreOps() {
                           <tr key={t.id}>
                             <td className="font-mono text-xs">{t.bill_number}</td>
                             <td className="text-xs">{fmtDate(t.bill_date)}</td>
-                            <td className="text-right font-mono">{fmtINR(t.net_amount)}</td>
+                            <td className="text-right font-mono">{fmtMoney2(t.net_amount)}</td>
                             <td className="text-right font-mono">+{t.points_earned}</td>
                           </tr>
                         ))}

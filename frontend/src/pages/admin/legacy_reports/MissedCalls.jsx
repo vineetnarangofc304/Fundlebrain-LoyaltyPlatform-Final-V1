@@ -1,8 +1,9 @@
 /* Missed Call Requests Report */
 import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
+import { fmtDateTimeISO } from "@/lib/format";
 
 const cols = [
-  { key: "received_at", label: "When", cellClass: "text-xs font-mono", fmt: (v) => (v || "").slice(0, 16) },
+  { key: "received_at", label: "When", cellClass: "text-xs font-mono", fmt: fmtDateTimeISO },
   { key: "mobile", label: "Mobile", cellClass: "font-mono" },
   { key: "campaign_code", label: "Campaign Code", cellClass: "font-mono text-xs" },
   { key: "status", label: "Status" },

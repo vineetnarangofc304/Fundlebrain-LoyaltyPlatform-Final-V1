@@ -1,5 +1,6 @@
 /* Feedback Data Report */
 import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
+import { fmtDateTimeISO } from "@/lib/format";
 
 const BUCKET_COLOR = {
   promoter: "text-emerald-700",
@@ -8,7 +9,7 @@ const BUCKET_COLOR = {
 };
 
 const cols = [
-  { key: "created_at", label: "When", cellClass: "text-xs font-mono", fmt: (v) => (v || "").slice(0, 16).replace("T", " ") },
+  { key: "created_at", label: "When", cellClass: "text-xs font-mono", fmt: fmtDateTimeISO },
   { key: "mobile", label: "Mobile", cellClass: "font-mono" },
   { key: "score", label: "Score", cellClass: "text-center font-mono font-medium", fmt: (v) => v ?? "—" },
   { key: "bucket", label: "Bucket", fmt: (v) => v ? <span className={`text-xs uppercase font-medium ${BUCKET_COLOR[v] || ""}`}>{v}</span> : "—" },

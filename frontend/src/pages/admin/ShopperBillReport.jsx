@@ -4,7 +4,7 @@
 import { useState, useEffect, useCallback } from "react";
 import api, { API_URL } from "@/lib/api";
 import { PageHeader } from "./_shared";
-import { fmtINR, fmtNum } from "@/lib/format";
+import { fmtMoney2, fmtNum } from "@/lib/format";
 import { Download, RefreshCw, Search, ArrowUp, ArrowDown } from "lucide-react";
 import { toast } from "sonner";
 
@@ -301,7 +301,7 @@ export default function ShopperBillReport() {
                         {c.key === "bill_type" || c.key === "recency"
                           ? badge(c.key, r[c.key])
                           : c.money
-                            ? fmtINR(r[c.key])
+                            ? fmtMoney2(r[c.key])
                             : c.num
                               ? (r[c.key] === "" || r[c.key] == null ? "—" : fmtNum(r[c.key]))
                               : (r[c.key] === "" || r[c.key] == null ? "—" : r[c.key])}

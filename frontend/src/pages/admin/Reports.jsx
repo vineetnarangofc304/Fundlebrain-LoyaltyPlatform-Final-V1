@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import api, { API_URL } from "@/lib/api";
 import { PageHeader } from "./_shared";
-import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
+import { fmtMoney2, fmtNum, fmtDate } from "@/lib/format";
 import { Download } from "lucide-react";
 import TransactionDrillModal from "./_TransactionDrill";
 
@@ -54,9 +54,9 @@ export default function ReportsPage() {
                     <td className="text-xs">{fmtDate(t.bill_date)}</td>
                     <td className="font-mono text-xs">{t.customer_mobile}</td>
                     <td className="text-xs">{t.store_id?.slice(0, 8)}</td>
-                    <td className="text-right font-mono">{fmtINR(t.gross_amount)}</td>
-                    <td className="text-right font-mono text-red-600">{fmtINR(t.discount_amount)}</td>
-                    <td className="text-right font-mono font-semibold">{fmtINR(t.net_amount)}</td>
+                    <td className="text-right font-mono">{fmtMoney2(t.gross_amount)}</td>
+                    <td className="text-right font-mono text-red-600">{fmtMoney2(t.discount_amount)}</td>
+                    <td className="text-right font-mono font-semibold">{fmtMoney2(t.net_amount)}</td>
                     <td className="text-right font-mono">{t.points_earned}</td>
                     <td className="text-xs">{t.coupon_code || "—"}</td>
                   </tr>

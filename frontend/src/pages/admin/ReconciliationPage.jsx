@@ -5,7 +5,7 @@ import { ShieldCheck, AlertTriangle, CheckCircle2, RefreshCw, Coins, Users } fro
 import { PageHeader, SectionHeading, KPICard } from "./_shared";
 import CsvReconSection from "./recon/CsvReconSection";
 
-const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+const fmtMoney2 = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
 
 export default function ReconciliationPage() {
@@ -121,9 +121,9 @@ export default function ReconciliationPage() {
             <div className="chart-card p-5" data-accent="teal">
               <SectionHeading eyebrow="MONETARY + POINTS SUMS" title="Loyalty bills · txn columns vs ledger" accent="teal" />
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-4">
-                <KPICard label="Net amount (loyalty)" value={fmtINR(report.sums.net_amount_loyalty)} accent="burgundy" testid="sum-net" />
-                <KPICard label="Tax (loyalty)" value={fmtINR(report.sums.tax_loyalty)} accent="slate" testid="sum-tax" />
-                <KPICard label="Discount (loyalty)" value={fmtINR(report.sums.discount_loyalty)} accent="slate" testid="sum-discount" />
+                <KPICard label="Net amount (loyalty)" value={fmtMoney2(report.sums.net_amount_loyalty)} accent="burgundy" testid="sum-net" />
+                <KPICard label="Tax (loyalty)" value={fmtMoney2(report.sums.tax_loyalty)} accent="slate" testid="sum-tax" />
+                <KPICard label="Discount (loyalty)" value={fmtMoney2(report.sums.discount_loyalty)} accent="slate" testid="sum-discount" />
               </div>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-4">
                 <KPICard label="Earn (txn col)" value={fmtNum(report.sums.points_earned_from_txns)} accent="teal" testid="sum-earn-txn" />

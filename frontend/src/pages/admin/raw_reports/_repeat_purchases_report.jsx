@@ -3,7 +3,7 @@ import api from "@/lib/api";
 import { toast } from "sonner";
 import {
   FilterBar, NarrativeCard, ExportMenu, ReportTable, ColumnPicker,
-  DrillModal, fmtNum, fmtINR,
+  DrillModal, fmtNum, fmtMoney2,
 } from "./_shared";
 
 const GROUPS = ["location", "city", "state", "zone", "month"];
@@ -14,19 +14,19 @@ const ALL_COLUMNS = [
   // Purchase
   { key: "purchase_unique_customers",        label: "Unique Loyalty Customers",    align: "right", format: fmtNum, group: "Purchase" },
   { key: "purchase_total_bills",             label: "Total Loyalty Bills",         align: "right", format: fmtNum, group: "Purchase" },
-  { key: "purchase_total_purchase",          label: "Total Loyalty Purchase",      align: "right", format: fmtINR, group: "Purchase" },
+  { key: "purchase_total_purchase",          label: "Total Loyalty Purchase",      align: "right", format: fmtMoney2, group: "Purchase" },
   // Repeat Total
   { key: "repeat_total_unique_customers",    label: "Repeat · Unique Customers",   align: "right", format: fmtNum, group: "Repeat Total" },
   { key: "repeat_total_bills",               label: "Repeat · Total Bills",        align: "right", format: fmtNum, group: "Repeat Total" },
-  { key: "repeat_total_purchase",            label: "Repeat · Total Purchase",     align: "right", format: fmtINR, group: "Repeat Total" },
+  { key: "repeat_total_purchase",            label: "Repeat · Total Purchase",     align: "right", format: fmtMoney2, group: "Repeat Total" },
   // Repeat Current
   { key: "repeat_current_unique_customers",  label: "Current · Unique Customers",  align: "right", format: fmtNum, group: "Current 90d" },
   { key: "repeat_current_bills",             label: "Current · Total Bills",       align: "right", format: fmtNum, group: "Current 90d" },
-  { key: "repeat_current_purchase",          label: "Current · Repeat Purchase",   align: "right", format: fmtINR, group: "Current 90d" },
+  { key: "repeat_current_purchase",          label: "Current · Repeat Purchase",   align: "right", format: fmtMoney2, group: "Current 90d" },
   // Repeat Earlier
   { key: "repeat_earlier_unique_customers",  label: "Earlier · Unique Customers",  align: "right", format: fmtNum, group: "Earlier" },
   { key: "repeat_earlier_bills",             label: "Earlier · Total Bills",       align: "right", format: fmtNum, group: "Earlier" },
-  { key: "repeat_earlier_purchase",          label: "Earlier · Repeat Purchase",   align: "right", format: fmtINR, group: "Earlier" },
+  { key: "repeat_earlier_purchase",          label: "Earlier · Repeat Purchase",   align: "right", format: fmtMoney2, group: "Earlier" },
 ];
 
 const DEFAULT_VISIBLE = ALL_COLUMNS.map((c) => c.key);

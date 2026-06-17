@@ -3,15 +3,15 @@ import api from "@/lib/api";
 import { toast } from "sonner";
 import {
   FilterBar, NarrativeCard, ExportMenu, ReportTable, ColumnPicker,
-  DrillModal, fmtNum, fmtINR,
+  DrillModal, fmtNum, fmtMoney2,
 } from "./_shared";
 
 const ALL_COLUMNS = [
   { key: "sno",                label: "S.No.",            sortable: false, drillable: false },
   { key: "visits",             label: "Visits",           align: "right", format: fmtNum, drillable: false },
   { key: "total_customers",    label: "Total Customers",  align: "right", format: fmtNum },
-  { key: "total_purchase",     label: "Total Purchase",   align: "right", format: fmtINR },
-  { key: "avg_customer_spend", label: "Avg Customer Spend", align: "right", format: fmtINR, drillable: false },
+  { key: "total_purchase",     label: "Total Purchase",   align: "right", format: fmtMoney2 },
+  { key: "avg_customer_spend", label: "Avg Customer Spend", align: "right", format: fmtMoney2, drillable: false },
 ];
 
 const DEFAULT_VISIBLE = ALL_COLUMNS.map((c) => c.key);

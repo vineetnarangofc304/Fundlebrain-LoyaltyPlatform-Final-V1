@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { PageHeader, SectionHeading } from "./_shared";
-import { fmtDateTimeISO } from "@/lib/format";
+import { fmtDateTimeISO, fmtMoney2 } from "@/lib/format";
 import { toast } from "sonner";
 import {
   Activity, ShoppingBag, AlertTriangle, CheckCircle2, RefreshCw, Pause, Play,
@@ -266,7 +266,7 @@ export default function LiveMonitorPage() {
                   </div>
                   <div className="font-display text-base truncate mt-1" title={s.store_name}>{s.store_name}</div>
                   <div className="font-mono text-sm mt-1">
-                    ₹{(s.revenue || 0).toLocaleString()}
+                    {fmtMoney2(s.revenue || 0)}
                     {s.returns ? <span className="text-[10px] text-rose-600 ml-1">· {s.returns} ret</span> : null}
                   </div>
                 </div>
@@ -364,10 +364,10 @@ export default function LiveMonitorPage() {
                         <span className="text-rose-700">—</span>
                       )}
                     </td>
-                    <td className="text-right font-mono tabular-nums" data-testid={`lm-row-amount-${r.bill_number}`}>₹{Math.round((r.bill_with_tax ?? r.net_amount ?? r.final_amount) || 0).toLocaleString()}</td>
-                    <td className="text-right font-mono tabular-nums text-emerald-700" data-testid={`lm-row-base-${r.bill_number}`}>₹{Math.round((r.points_base ?? r.amount ?? r.net_amount) || 0).toLocaleString()}</td>
-                    <td className="text-right font-mono tabular-nums text-neutral-500">₹{Math.round(r.tax_amount || 0).toLocaleString()}</td>
-                    <td className="text-right font-mono tabular-nums text-neutral-500">₹{Math.round(r.discount_amount || 0).toLocaleString()}</td>
+                    <td className="text-right font-mono tabular-nums" data-testid={`lm-row-amount-${r.bill_number}`}>{fmtMoney2((r.bill_with_tax ?? r.net_amount ?? r.final_amount) || 0)}</td>
+                    <td className="text-right font-mono tabular-nums text-emerald-700" data-testid={`lm-row-base-${r.bill_number}`}>{fmtMoney2((r.points_base ?? r.amount ?? r.net_amount) || 0)}</td>
+                    <td className="text-right font-mono tabular-nums text-neutral-500">{fmtMoney2(r.tax_amount || 0)}</td>
+                    <td className="text-right font-mono tabular-nums text-neutral-500">{fmtMoney2(r.discount_amount || 0)}</td>
                     <td className="text-right font-mono tabular-nums text-amber-700">{r.points_earned || 0}</td>
                     <td className="text-right font-mono tabular-nums text-indigo-700">{r.points_redeemed || 0}</td>
                     <td>
@@ -471,13 +471,13 @@ function BillDrillModal({ row, onClose }) {
           <Field label="Mobile" value={row.customer_mobile || "—"} valueClass={row.has_mobile ? "text-emerald-700" : "text-rose-700 font-medium"} />
           <Field label="Tier" value={row.tier || "—"} />
           <Field label="Current Points" value={row.current_points?.toLocaleString() || "—"} />
-          <Field label="Gross" value={`₹${(row.gross_amount || 0).toLocaleString()}`} />
-          <Field label="Points base (₹)" value={`₹${((row.points_base ?? row.amount ?? row.net_amount) || 0).toLocaleString()}`} valueClass="text-emerald-700 font-medium" />
-          <Field label="Tax (GST)" value={`₹${(row.tax_amount || 0).toLocaleString()}`} />
-          <Field label="Bill w/ tax" value={`₹${((row.bill_with_tax ?? row.net_amount) || 0).toLocaleString()}`} />
-          <Field label="Discount" value={`₹${(row.discount_amount || 0).toLocaleString()}`} />
-          <Field label="Net" value={`₹${(row.net_amount || 0).toLocaleString()}`} />
-          <Field label="Final paid" value={`₹${(row.final_amount || row.net_amount || 0).toLocaleString()}`} />
+          <Field label="Gross" value={fmtMoney2(row.gross_amount || 0)} />
+          <Field label="Points base (₹)" value={fmtMoney2((row.points_base ?? row.amount ?? row.net_amount) || 0)} valueClass="text-emerald-700 font-medium" />
+          <Field label="Tax (GST)" value={fmtMoney2(row.tax_amount || 0)} />
+          <Field label="Bill w/ tax" value={fmtMoney2((row.bill_with_tax ?? row.net_amount) || 0)} />
+          <Field label="Discount" value={fmtMoney2(row.discount_amount || 0)} />
+          <Field label="Net" value={fmtMoney2(row.net_amount || 0)} />
+          <Field label="Final paid" value={fmtMoney2(row.final_amount || row.net_amount || 0)} />
           <Field label="Points Earned" value={(row.points_earned || 0).toLocaleString()} valueClass="text-amber-700 font-medium" />
           <Field label="Points Redeemed" value={(row.points_redeemed || 0).toLocaleString()} valueClass="text-indigo-700 font-medium" />
           <Field label="Items" value={row.items_count} />

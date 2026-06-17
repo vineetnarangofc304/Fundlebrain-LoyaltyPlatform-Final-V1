@@ -1,6 +1,6 @@
 /* Active Coupon Report */
 import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
-import { fmtNum } from "@/lib/format";
+import { fmtNum, fmtDateISO } from "@/lib/format";
 
 const cols = [
   { key: "code", label: "Code", cellClass: "font-mono", fmt: (v) => <span className="px-2 py-0.5 bg-amber-100 text-amber-900 rounded text-xs">{v}</span> },
@@ -8,8 +8,8 @@ const cols = [
   { key: "customer_mobile", label: "Mobile", cellClass: "font-mono", fmt: (v) => v || <span className="text-neutral-400 text-xs">—</span> },
   { key: "discount_type", label: "Type", cellClass: "text-xs uppercase" },
   { key: "discount_value", label: "Value", cellClass: "text-right font-mono", fmt: (v, r) => r.discount_type === "percent" ? `${v}%` : fmtNum(v) },
-  { key: "valid_from", label: "Valid From", cellClass: "text-xs font-mono", fmt: (v) => (v || "").slice(0, 10) },
-  { key: "valid_to", label: "Valid To", cellClass: "text-xs font-mono", fmt: (v) => (v || "").slice(0, 10) },
+  { key: "valid_from", label: "Valid From", cellClass: "text-xs font-mono", fmt: fmtDateISO },
+  { key: "valid_to", label: "Valid To", cellClass: "text-xs font-mono", fmt: fmtDateISO },
   { key: "times_used", label: "Used", cellClass: "text-right font-mono", fmt: (v) => fmtNum(v || 0) },
   { key: "times_issued", label: "Issued", cellClass: "text-right font-mono", fmt: (v) => fmtNum(v || 0) },
 ];

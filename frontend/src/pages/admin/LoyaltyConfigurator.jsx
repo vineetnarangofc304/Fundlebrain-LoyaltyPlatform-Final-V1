@@ -14,7 +14,7 @@ import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import { PageHeader } from "./_shared";
 import { toast } from "sonner";
-import { fmtNum, fmtINR } from "@/lib/format";
+import { fmtNum, fmtMoney2 } from "@/lib/format";
 import { Plus, Trash2, Power, Calculator, Sparkles, Coins, Calendar, Tag, Building2, ShieldCheck, RefreshCcw } from "lucide-react";
 
 const TIER_TYPES = [
@@ -81,7 +81,7 @@ export default function LoyaltyConfigurator() {
               <div key={s.tier} className="border border-black/10 p-4">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-neutral-500">{s.tier?.toUpperCase()}</div>
                 <div className="font-display kpi-value mt-2">{fmtNum(s.count)}</div>
-                <div className="text-xs text-neutral-500 mt-1">{fmtINR(s.total_spend)} lifetime</div>
+                <div className="text-xs text-neutral-500 mt-1">{fmtMoney2(s.total_spend)} lifetime</div>
               </div>
             ))}
           </div>

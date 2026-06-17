@@ -20,7 +20,7 @@ export const KAZO_PALETTE = [
 ];
 
 export const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
-export const fmtINR = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+export const fmtMoney2 = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 export const fmtPct = (v) => v == null ? "—" : `${Number(v).toFixed(1)}%`;
 export const fmtDecimal = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
@@ -512,7 +512,7 @@ export function DrillModal({ open, onClose, report, group_by, group_key, metric,
                     <td className="px-3 py-1.5">{c.city || "—"}</td>
                     <td className="px-3 py-1.5">{c.tier || "—"}</td>
                     <td className="px-3 py-1.5 text-right font-mono">{fmtNum(c.visit_count)}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmtINR(c.lifetime_spend)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">{fmtMoney2(c.lifetime_spend)}</td>
                     <td className="px-3 py-1.5 text-right font-mono">{fmtNum(c.points_balance)}</td>
                   </tr>
                 ))}

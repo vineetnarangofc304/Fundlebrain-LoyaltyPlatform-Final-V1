@@ -1,13 +1,13 @@
 /* Pending Bills Report */
 import { LegacyReportShell, useReportParams, DatePair } from "./_shell";
-import { fmtINR, fmtNum } from "@/lib/format";
+import { fmtMoney2, fmtNum, fmtDateISO } from "@/lib/format";
 
 const cols = [
-  { key: "bill_date", label: "Bill Date", cellClass: "text-xs font-mono", fmt: (v) => (v || "").slice(0, 10) },
+  { key: "bill_date", label: "Bill Date", cellClass: "text-xs font-mono", fmt: fmtDateISO },
   { key: "bill_number", label: "Bill #", cellClass: "font-mono text-xs" },
   { key: "customer_mobile", label: "Mobile", cellClass: "font-mono" },
   { key: "store_id", label: "Store", cellClass: "text-xs font-mono" },
-  { key: "net_amount", label: "Net ₹", cellClass: "text-right font-mono", fmt: fmtINR },
+  { key: "net_amount", label: "Net ₹", cellClass: "text-right font-mono", fmt: fmtMoney2 },
   { key: "points_earned", label: "Pts Awarded", cellClass: "text-right font-mono text-amber-700", fmt: (v) => v == null ? "—" : fmtNum(v) },
 ];
 

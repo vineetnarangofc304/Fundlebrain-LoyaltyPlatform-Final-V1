@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration 29 — Frontend regression after broad money-formatting (fmtMoney2) + IST date refactor across ~25 files. Verified login + every target page loads cleanly with NO white screens and NO runtime JS errors. Reports/tables/detail screens now consistently render EXACT 2-decimal ₹ amounts (no K/L/Cr compaction), while dashboard KPI tiles correctly retain compact form. ISO dates are rendered as YYYY-MM-DD in IST on Shopper Bill Report, Legacy Transaction Data, Legacy Customer Data, Legacy Repeat Customers, Legacy Pending Bills and Customer360. All 6 review-request checks PASS.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/frontend/src/lib/format.js",
+    "/app/frontend/src/pages/admin/ShopperBillReport.jsx",
+    "/app/frontend/src/pages/admin/legacy_reports/"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "fmtMoney2 implementation is correct: handles null/undefined/'' → '—', uses toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2}) so ₹6,780.69 / ₹0.00 / ₹80,000.00 all render as expected. Negative sign preserved.",
+    "fmtINR (dashboard tiles) keeps Cr/L thresholds and was updated so K-tier now uses 2 decimals — visible as ₹4.70K / ₹676.33Cr / ₹49.95Cr on Command Center, intended behaviour per user choice 1a.",
+    "fmtDateISO/fmtDateTimeISO use Asia/Kolkata via Intl.DateTimeFormat — Bill Date column on Shopper Bill Report shows the same 2026-06-12 day across rows recorded around 02:37 IST (which would be off-by-one in UTC string-slice), confirming the timezone fix is working.",
+    "Only console message observed is a React DEV-mode hydration warning: `<span> cannot be a child of <option>` originating from the preview tooling's `x-component` instrumentation wrapping `{s}` in a <span data-ve-dynamic> inside <option> in ShopperBillReport.jsx PAGE_SIZES select. The actual source code is clean (<option value={s}>{s} / page</option>). This is a tooling artifact, not an application bug. Suggest E1 confirm — likely no action required.",
+    "/admin/raw-reports endpoint took >25s to reach networkidle (timed out in test) — not in this iteration's scope but worth a follow-up perf look on RawReportsPage."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "n/a (skipped per request)", "frontend": "100%" },
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (CRM portal)",
+  "seed_data_creation": "None — read-only verification.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Verified on https://fundle-brain-ai-1.preview.emergentagent.com after E1's money/date refactor. Key empirical evidence:\n  • Shopper Bill Report (/admin/reports/shopper-bills): 248 ₹ values scanned, 248/248 exact 2-dp, 0 compact. 137 IST ISO dates including 2026-06-12, 2022-02-16, 2021-12-07, etc. across Bill Date, Last Visit, 2nd Last Visit.\n  • Legacy Reports under /admin/legacy-reports/* (NOT /admin/reports/legacy/* — that path 404-falls-through to layout shell only). Confirmed sub-pages: transaction-data (100 exact-2dp + 50 ISO dates), customer-data (50/50 + 50 dates), top-customers (50/50, e.g. ₹80,000.00/₹72,800.00), repeat-customers (50/50 + multi-year dates 2024-03-03/2026-05-21), pending-bills (8/8 + 8 dates including ₹1,200.00, ₹0.00).\n  • Dashboards: Command Center & Sales dashboards correctly show compact ₹676.33Cr / ₹4.70K / ₹49.95Cr. Customer & Store dashboards loaded without crash.\n  • Customer detail (Customer360 for Bina Shah): ₹800.00 / ₹80,000.00 exact 2-dp on KPI rows; revenue-timeline CHART Y-AXIS still shows ₹0K/₹1K (acceptable — Recharts axis ticks use compact). Last/First purchase rendered as '02 Feb 2026' / ISO 2026-02-02 (IST).\n  • Reports & Exports hub (/admin/reports): 150 ₹ values, all 2-dp.\n  • Live Monitor: loads, no crash. Current window has no live bills so money cells are minimal.\n  • Login + sidebar navigation: zero white screens, zero pageerrors, only 1 dev-only hydration warning that is a tooling artifact (see code review comment).\n  • CSV export not retested — confirmed in iteration_28.",
+  "rca of the issue": "Not applicable — refactor verified as working."
+}

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader, KPICard, SectionHeading, CHART_PALETTE } from "./_shared";
-import { fmtINR, fmtNum, fmtDate, fmtDateTime, tierClass } from "@/lib/format";
+import { fmtMoney2, fmtNum, fmtDate, fmtDateTime, tierClass } from "@/lib/format";
 import AIInsightStrip from "./AIInsightStrip";
 import DrillDownModal from "./DrillDownModal";
 import { toast } from "sonner";
@@ -149,14 +149,14 @@ export default function CustomerDetail() {
               <div className="grid grid-cols-3 gap-3">
                 <RFMTile label="Recency" letter="R" score={rfm.r} value={`${rfm.recency_days}d`} color="#0E7C7B" />
                 <RFMTile label="Frequency" letter="F" score={rfm.f} value={`${rfm.frequency} visits`} color="#1E3A8A" />
-                <RFMTile label="Monetary" letter="M" score={rfm.m} value={fmtINR(rfm.monetary)} color="#B45309" />
+                <RFMTile label="Monetary" letter="M" score={rfm.m} value={fmtMoney2(rfm.monetary)} color="#B45309" />
               </div>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <KPICard label="Lifetime Spend" value={fmtINR(lt.spend)} accent="burgundy" testid="cust-lts" />
+              <KPICard label="Lifetime Spend" value={fmtMoney2(lt.spend)} accent="burgundy" testid="cust-lts" />
               <KPICard label="Points Balance" value={fmtNum(c.points_balance)} accent="amber" testid="cust-points" />
               <KPICard label="Visits" value={fmtNum(lt.visits)} accent="teal" testid="cust-visits" />
-              <KPICard label="Avg basket" value={fmtINR(lt.aov)} accent="indigo" testid="cust-aov" />
+              <KPICard label="Avg basket" value={fmtMoney2(lt.aov)} accent="indigo" testid="cust-aov" />
             </div>
           </div>
         </div>
@@ -187,9 +187,9 @@ export default function CustomerDetail() {
                 { key: "bill_number", label: "Bill #", mono: true },
                 { key: "bill_date", label: "Date" },
                 { key: "store_id", label: "Store", mono: true },
-                { key: "gross_amount", label: "Gross ₹", align: "right", render: (v) => fmtINR(v) },
-                { key: "discount_amount", label: "Discount", align: "right", render: (v) => fmtINR(v) },
-                { key: "net_amount", label: "Net ₹", align: "right", render: (v) => fmtINR(v) },
+                { key: "gross_amount", label: "Gross ₹", align: "right", render: (v) => fmtMoney2(v) },
+                { key: "discount_amount", label: "Discount", align: "right", render: (v) => fmtMoney2(v) },
+                { key: "net_amount", label: "Net ₹", align: "right", render: (v) => fmtMoney2(v) },
                 { key: "points_earned", label: "Pts +", align: "right" },
                 { key: "points_redeemed", label: "Pts −", align: "right" },
                 { key: "coupon_code", label: "Coupon" },
@@ -220,7 +220,7 @@ export default function CustomerDetail() {
               <XAxis dataKey="month" stroke="#64748b" fontSize={11} />
               <YAxis yAxisId="l" stroke="#64748b" fontSize={11} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`} />
               <YAxis yAxisId="r" orientation="right" stroke="#1E3A8A" fontSize={11} />
-              <Tooltip formatter={(v, n) => (n === "spend" ? fmtINR(v) : v)} />
+              <Tooltip formatter={(v, n) => (n === "spend" ? fmtMoney2(v) : v)} />
               <Area yAxisId="l" type="monotone" dataKey="spend" stroke="#571326" strokeWidth={2} fill="url(#gradSpend)" name="Spend" />
               <Bar yAxisId="r" dataKey="visits" fill="#1E3A8A" opacity={0.7} name="Visits" />
             </AreaChart>
@@ -236,7 +236,7 @@ export default function CustomerDetail() {
                 <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />
                 <XAxis type="number" stroke="#64748b" fontSize={11} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`} />
                 <YAxis dataKey="category" type="category" stroke="#64748b" fontSize={11} width={90} />
-                <Tooltip formatter={(v) => fmtINR(v)} />
+                <Tooltip formatter={(v) => fmtMoney2(v)} />
                 <Bar dataKey="spend" fill="#1E3A8A">
                   {data.category_affinity.map((_, i) => (
                     <Cell key={i} fill={`hsl(${214 + i * 18}, 60%, ${35 + i * 4}%)`} />
@@ -256,7 +256,7 @@ export default function CustomerDetail() {
                     <td>{s.name}</td>
                     <td>{s.city}</td>
                     <td className="text-right font-mono">{s.visits}</td>
-                    <td className="text-right font-mono">{fmtINR(s.spend)}</td>
+                    <td className="text-right font-mono">{fmtMoney2(s.spend)}</td>
                   </tr>
                 ))}
                 {data.store_affinity.length === 0 && (
@@ -278,7 +278,7 @@ export default function CustomerDetail() {
                   <tr key={t.id}>
                     <td className="font-mono text-xs">{t.bill_number}</td>
                     <td className="text-xs">{fmtDate(t.bill_date)}</td>
-                    <td className="text-right font-mono">{fmtINR(t.net_amount)}</td>
+                    <td className="text-right font-mono">{fmtMoney2(t.net_amount)}</td>
                     <td className="text-right font-mono text-emerald-700">+{t.points_earned}</td>
                     <td><span className="pill pill-neutral">{t.payment_mode}</span></td>
                     <td className="text-xs">{t.coupon_code || "—"}</td>

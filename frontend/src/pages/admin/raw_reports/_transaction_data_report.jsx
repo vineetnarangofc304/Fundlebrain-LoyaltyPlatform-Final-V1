@@ -3,7 +3,7 @@ import api from "@/lib/api";
 import { toast } from "sonner";
 import {
   FilterBar, NarrativeCard, ExportMenu, ReportTable, ColumnPicker,
-  ReportComposedChart, DrillModal, fmtNum, fmtINR, fmtPct,
+  ReportComposedChart, DrillModal, fmtNum, fmtMoney2, fmtPct,
 } from "./_shared";
 
 const GROUPS = ["location", "city", "state", "zone", "month"];
@@ -12,12 +12,12 @@ const ALL_COLUMNS = [
   { key: "group_key",             label: "Location",             drillable: false },
   { key: "total_customers",       label: "Total Customers",      align: "right", format: fmtNum },
   { key: "total_bills",           label: "Total Bills",          align: "right", format: fmtNum },
-  { key: "total_purchase",        label: "Total Purchase",       align: "right", format: fmtINR },
-  { key: "total_gross_purchase",  label: "Total Gross Purchase", align: "right", format: fmtINR },
-  { key: "total_discount",        label: "Total Discount",       align: "right", format: fmtINR },
+  { key: "total_purchase",        label: "Total Purchase",       align: "right", format: fmtMoney2 },
+  { key: "total_gross_purchase",  label: "Total Gross Purchase", align: "right", format: fmtMoney2 },
+  { key: "total_discount",        label: "Total Discount",       align: "right", format: fmtMoney2 },
   { key: "discount_pct",          label: "Discount %",           align: "right", format: fmtPct, drillable: false },
-  { key: "avg_bill_value",        label: "Avg Bill Value (AOV)", align: "right", format: fmtINR, drillable: false },
-  { key: "avg_customer_spend",    label: "Avg Customer Spend",   align: "right", format: fmtINR, drillable: false },
+  { key: "avg_bill_value",        label: "Avg Bill Value (AOV)", align: "right", format: fmtMoney2, drillable: false },
+  { key: "avg_customer_spend",    label: "Avg Customer Spend",   align: "right", format: fmtMoney2, drillable: false },
   { key: "total_earn_points",     label: "Total Earn Points",    align: "right", format: fmtNum },
 ];
 

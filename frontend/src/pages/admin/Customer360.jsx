@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { PageHeader } from "./_shared";
-import { fmtINR, fmtNum, fmtDate, tierClass } from "@/lib/format";
+import { fmtMoney2, fmtNum, fmtDate, tierClass } from "@/lib/format";
 import { Search, Download, ChevronLeft, ChevronRight } from "lucide-react";
 
 const PAGE_SIZE = 100;
@@ -140,7 +140,7 @@ export default function Customer360() {
                   <td className="font-mono text-xs">{c.mobile}</td>
                   <td className="font-medium">{c.name || "—"}</td>
                   <td className="text-right font-mono">{fmtNum(c.visit_count)}</td>
-                  <td className="text-right font-mono">{fmtINR(c.lifetime_spend)}</td>
+                  <td className="text-right font-mono">{fmtMoney2(c.lifetime_spend)}</td>
                   <td className="text-right font-mono">{fmtNum(c.visit_count)}</td>
                   <td className="text-xs whitespace-nowrap">{fmtDate(c.last_visit_at)}</td>
                   <td className="text-right font-mono text-emerald-700">{fmtNum(c.lifetime_points_earned)}</td>

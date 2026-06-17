@@ -90,6 +90,31 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Canonical display timezone for the whole platform.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _to_ist_parts(iso: Optional[str]) -> Tuple[str, str]:
+    """(date 'YYYY-MM-DD', time 'HH:MM') for an ISO bill_date, rendered in IST so it
+    always matches the dashboard (which also renders in Asia/Kolkata). Naive values
+    are assumed UTC (how historic uploads are stored)."""
+    if not iso:
+        return "", ""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)   # naive values are treated as IST (matches the frontend parser)
+        dt = dt.astimezone(IST)
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+    except Exception:
+        return iso[:10], (iso[11:16] if len(iso) >= 16 else "")
+
+
+def _ist_date(iso: Optional[str]) -> Optional[str]:
+    d, _ = _to_ist_parts(iso)
+    return d or None
+
+
 def _recency_cutoffs(now: datetime) -> Tuple[str, str]:
     """ISO cutoff strings: anything >= cut6 is Active, >= cut12 (and < cut6) is
     Dormant, the rest Lapsed."""
@@ -180,7 +205,10 @@ async def _visit_map(mobiles: List[str], timeout_s: Optional[int] = None) -> Dic
         {"$match": {"customer_mobile": {"$in": mobiles}}},
         {"$group": {
             "_id": "$customer_mobile",
-            "days": {"$addToSet": {"$substrCP": [{"$ifNull": ["$bill_date", ""]}, 0, 10]}},
+            "days": {"$addToSet": {"$dateToString": {
+                "date": {"$convert": {"input": "$bill_date", "to": "date",
+                                      "onError": None, "onNull": None}},
+                "format": "%Y-%m-%d", "timezone": "Asia/Kolkata"}}},
             "sale": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 0, 1]}},
             "ret": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 1, 0]}},
         }},
@@ -211,7 +239,8 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
     reg_store = stores.get((cust or {}).get("registered_store_id") or
                            (cust or {}).get("home_store_id") or "", {})
 
-    last_visit = (visit or {}).get("last") or ((cust or {}).get("last_visit_at") or "")[:10] or None
+    bd_date, bd_time = _to_ist_parts(bill_date)
+    last_visit = (visit or {}).get("last") or _ist_date((cust or {}).get("last_visit_at")) or None
     net_before_tax = round(float(tx.get("net_amount_before_tax") or tx.get("net_amount") or 0), 2)
     total_tax = round(float(tx.get("tax_amount") or 0), 2)
     total_disc = round(float(tx.get("discount_amount") or tx.get("discount") or 0), 2)
@@ -219,8 +248,8 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
     total_bill = round(float(total_bill), 2) if total_bill not in (None, "") else round(net_before_tax + total_tax, 2)
 
     return {
-        "bill_date": bill_date[:10],
-        "bill_time": bill_date[11:16] if len(bill_date) >= 16 else "",
+        "bill_date": bd_date,
+        "bill_time": bd_time,
         "bill_type": "Return" if tx.get("is_return") else "Regular",
         "customer_mobile": tx.get("customer_mobile") or "",
         "reg_store": reg_store.get("name") or reg_store.get("code") or "",
