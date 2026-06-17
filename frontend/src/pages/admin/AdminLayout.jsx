@@ -103,6 +103,7 @@ const SECTIONS = [
     label: "REPORTS",
     items: [
       { to: "/admin/legacy-reports", icon: FileBarChart, label: "Reports (Legacy)", testid: "nav-legacy-reports" },
+      { to: "/admin/reports/shopper-bills", icon: FileBarChart, label: "Shopper Bill Report", testid: "nav-shopper-bills" },
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },
       { to: "/admin/reports/digests", icon: FileText, label: "Exec Digests", testid: "nav-reports-digests" },
       { to: "/admin/formula-catalog", icon: FileText, label: "Formula Catalog", testid: "nav-formula" },

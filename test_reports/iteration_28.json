@@ -1,0 +1,31 @@
+{
+  "summary": "Iteration 28 — Frontend validation of new Shopper Bill Report (/admin/reports/shopper-bills). All 22 columns render, filters/sort/pagination/quick-ranges/recency-path/CSV download all working end-to-end against the live preview backend. No bugs found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/frontend/src/pages/admin/ShopperBillReport.jsx"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "ShopperBillReport.jsx (334 lines) is well-structured; COLS metadata-driven rendering keeps the component clean.",
+    "exportCsv() correctly reads token from localStorage and streams via fetch; downloaded blob filename uses today's date. ✅",
+    "Recency path correctly hides the total (header shows 'bills (recency-filtered)' and pagination renders 'Page N' without 'of M'). hasMore flag drives Next-button enablement. Verified Active recency Page 1 → Page 2 navigation works.",
+    "Minor UX nit (NOT a bug): REPORTS sidebar section is collapsed by default — a first-time user must click 'REPORTS' to reveal the 'Shopper Bill Report' link. Consistent with how other sidebar sections behave so it's acceptable.",
+    "Date inputs use the browser-native HTML5 date picker (type=\"date\") rather than a styled calendar. Acceptable per spec; if design parity with rest of CRM matters, swap to shadcn Calendar later."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped per request)", "frontend": "100%"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (CRM portal)",
+  "seed_data_creation": "None — report is read-only as specified.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Verified flows on preview (https://fundle-brain-ai-1.preview.emergentagent.com/admin/reports/shopper-bills): (1) Login + sidebar REPORTS > nav-shopper-bills expand+click navigates correctly; (2) Direct URL navigation also works; (3) 22 columns render with exact data-testids sbr-th-{key}; (4) Default 30-day window (2026-05-18 → 2026-06-17) returned '50 of 19,404 bills'; (5) Quick buttons sbr-q7/q30/q90/qmtd/q365 each correctly updated start_date; (6) Bill Type=Return Apply → only Return rows (6 of 6); (7) Sort on sbr-th-total_bill_amount shows arrow on active sort column; (8) Pagination 19,404 bills / 389 pages (Page 1→Page 2 verified); (9) Page-size 100 returns 100 rows; (10) Recency=Active path returns 'Active (0-6M)' cells only, header '50 bills (recency-filtered)', and Next pagination works (Page 1→Page 2); (11) CSV download triggered (file shopper_bill_report_2026-06-17.csv saved) — /api/shopper-report/export returned HTTP 200 with content-type text/csv. Note: Customer Type=New filter returned 0 rows in the 30-day window because the PERF seed customers are nearly all 'existing' — expected behaviour for this seed, not a frontend bug. No console errors observed.",
+  "rca of the issue": "Not applicable — no issues found."
+}

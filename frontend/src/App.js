@@ -80,6 +80,7 @@ import CustomerReactivate from "@/pages/admin/support_desk/CustomerReactivate";
 import UnsubscribeCustomer from "@/pages/admin/support_desk/UnsubscribeCustomer";
 import SupportDeskAuditLog from "@/pages/admin/support_desk/SupportDeskAuditLog";
 import LegacyReportsHub from "@/pages/admin/legacy_reports/LegacyReportsHub";
+import ShopperBillReport from "@/pages/admin/ShopperBillReport";
 import LRCustomerData from "@/pages/admin/legacy_reports/CustomerData";
 import LRTransactionData from "@/pages/admin/legacy_reports/TransactionData";
 import LRRepeatCustomers from "@/pages/admin/legacy_reports/RepeatCustomers";
@@ -217,6 +218,7 @@ function App() {
             <Route path="legacy-reports/location-wise-customers" element={<ProtectedRoute><LRLocationWise /></ProtectedRoute>} />
             <Route path="legacy-reports/expiry-points" element={<ProtectedRoute><LRExpiryPoints /></ProtectedRoute>} />
             <Route path="legacy-reports/active-coupons" element={<ProtectedRoute><LRActiveCoupons /></ProtectedRoute>} />
+            <Route path="reports/shopper-bills" element={<ProtectedRoute><ShopperBillReport /></ProtectedRoute>} />
           </Route>
 
           {/* Store ops portal */}
