@@ -5,6 +5,39 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-17 — NEW: Shopper Bill Report (bill-level report) under REPORTS (iter 73)
+
+Client asked for a bill-level report of everyone who shopped in a date range, with 22
+columns and "all possible filters + sorting + date range". Built as a dedicated page
+(`/admin/reports/shopper-bills`, nav `nav-shopper-bills` under REPORTS).
+- **Columns (one row per BILL):** Bill Date · Time · Bill Type (Return/Regular —
+  *Exchange is treated as Return per client*) · Customer Mobile · Reg Store (CRM
+  registration store) · Store Code · Trans Store Name · Trans ID · Bill # · Customer
+  Type (New/Existing) · Recency · Last Visit · 2nd-last Visit · Total Visits · Zone ·
+  Customer City · Net before tax · Total Tax · Total Discount · Total Bill Amount ·
+  Lifetime Purchase · Lifetime Bill Cuts (**NET** = sale bills − return bills).
+- **Recency (from TODAY back to last visit):** Active 0-6M / Dormant 6-12M / Lapsed 12M+.
+- **Backend `routes/shopper_report_routes.py`** (2 routers): `GET /shopper-report/bills`
+  (paginated listing + 22-col contract), `GET /shopper-report/filter-options`
+  (stores+zones), and `export_router GET /shopper-report/export` (streamed CSV, OWN
+  router with NO db_deadline so a large export streams; per-batch enrichment wrapped in
+  its own pymongo.timeout; cap 200K rows).
+- **Scale-safe design:** non-recency listing = indexed find on bill_date + page-scoped
+  enrichment (customer lookup + a bounded per-mobile aggregate for 2nd-last-visit & net
+  bill cuts + store-master preload). Recency filter (a customer attribute → needs a join)
+  uses sort-FIRST (index-backed) → indexed point `$lookup` → bucket `$match` → `$limit`
+  (short-circuits; no full-set `$facet`/count) with `maxTimeMS` guard → friendly 400 if
+  too heavy; exact total intentionally omitted for that path (`has_more` drives Next).
+- **Frontend** `ShopperBillReport.jsx`: date range + quick presets (7d/30d/90d/MTD/1y),
+  Bill Type / Customer Type / Recency / Store / Zone / City / search filters, clickable
+  sortable headers (bill_date, mobile, bill #, bill amount, trans store), 50/100/200
+  page sizes, Prev/Next, colored Bill-Type & Recency badges, "Download CSV".
+- **Verified:** pytest `tests/iteration73_shopper_report_test.py` 8/8; testing_agent
+  iteration_28 frontend **100%** (filters, header sort, pagination, recency path, CSV
+  download all working at 1.5M-txn preview scale). ⚠️ Redeploy required for production.
+
+---
+
 ## 2026-06-11 — FIX production deployment MaxTimeMSExpired on dashboards (iter 70)
 
 Production Atlas connection string uses an aggressive `timeoutMS=10000`. The customer-dashboard

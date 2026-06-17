@@ -25,7 +25,7 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 - **DATA** *(new)* — Historical Upload
 - **OPERATIONS** — Stores, Item Master, API Monitor
 - **SUPPORT** — Tickets, NPS Inbox
-- **REPORTS** — Reports & Exports, Exec Digests, Formula Catalog
+- **REPORTS** — Reports (Legacy), Shopper Bill Report, Reports & Exports, Exec Digests, Formula Catalog
 - **CONFIGURATION** — Loyalty Rules, Public Site CMS
 - **ADMINISTRATION** — User Management
 
