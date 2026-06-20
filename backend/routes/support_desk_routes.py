@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from database import (
     customers_col, points_ledger_col, coupons_col, coupon_redemptions_col,
-    audit_logs_col,
+    audit_logs_col, transactions_col, message_log_col, nps_col, tickets_col,
 )
 from auth import get_current_user, require_roles, log_audit
 
@@ -309,6 +309,86 @@ async def customer_reactivate(
     await log_audit(user, "support_desk.customer_reactivate", "customer", norm,
                     {"reason": payload.reason})
     return {"ok": True, "mobile": norm}
+
+
+# ---------------- Update customer mobile (full migration) ----------------
+
+class UpdateMobileReq(BaseModel):
+    old_mobile: str
+    new_mobile: str
+    reason: str
+
+
+@router.post("/update-mobile")
+async def update_customer_mobile(
+    payload: UpdateMobileReq,
+    user: dict = Depends(require_roles("super_admin", "brand_admin", "support_agent")),
+):
+    """Change a customer's mobile and FULLY migrate their history to the new number.
+
+    Re-keys every bill / points ledger row / coupon redemption / OTP session /
+    message / NPS / ticket from the old number to the new one, so all analytics &
+    lifetime stats follow the customer. The OLD number is preserved on the customer
+    record (previous_mobile + previous_mobiles[] with timestamp) for display/audit.
+    """
+    old = _norm_mobile(payload.old_mobile)
+    new = _norm_mobile(payload.new_mobile)
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="Valid old and new mobile numbers are required.")
+    if old == new:
+        raise HTTPException(status_code=400, detail="Old and new numbers are identical.")
+    if not (payload.reason or "").strip():
+        raise HTTPException(status_code=400, detail="A reason is required.")
+
+    cust = await customers_col.find_one({"mobile": old}, {"_id": 0})
+    if not cust:
+        raise HTTPException(status_code=404, detail=f"No customer found with mobile {old}.")
+    clash = await customers_col.find_one({"mobile": new}, {"_id": 0, "name": 1})
+    if clash:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Mobile {new} already belongs to another customer "
+                   f"({clash.get('name') or 'unnamed'}). Merging accounts is not supported.")
+
+    # Re-key history (customer_mobile on most collections; `mobile` on OTP sessions).
+    rekeyed: Dict[str, int] = {}
+    for name, col, field in [
+        ("transactions", transactions_col, "customer_mobile"),
+        ("points_ledger", points_ledger_col, "customer_mobile"),
+        ("coupon_redemptions", coupon_redemptions_col, "customer_mobile"),
+        ("coupons", coupons_col, "customer_mobile"),
+        ("otp_sessions", pos_otp_col, "mobile"),
+        ("messages", message_log_col, "customer_mobile"),
+        ("nps", nps_col, "customer_mobile"),
+        ("tickets", tickets_col, "customer_mobile"),
+    ]:
+        try:
+            res = await col.update_many({field: old}, {"$set": {field: new}})
+            rekeyed[name] = res.modified_count
+        except Exception:
+            rekeyed[name] = -1  # collection/field absent — skip silently
+
+    # Update the customer master, keeping the old number for display/audit.
+    prev = cust.get("previous_mobiles") or []
+    prev.append({"mobile": old, "changed_at": _now_iso(),
+                 "changed_by": user.get("email"), "reason": payload.reason.strip()})
+    await customers_col.update_one(
+        {"mobile": old},
+        {"$set": {
+            "mobile": new,
+            "previous_mobile": old,
+            "previous_mobiles": prev,
+            "mobile_changed_at": _now_iso(),
+            "mobile_changed_by": user.get("email"),
+        }},
+    )
+    await log_audit(user, "support_desk.update_mobile", "customer", cust.get("id"),
+                    {"old_mobile": old, "new_mobile": new, "reason": payload.reason.strip(),
+                     "rekeyed": rekeyed})
+    return {"status": "ok", "old_mobile": old, "new_mobile": new,
+            "customer_id": cust.get("id"), "customer_name": cust.get("name"),
+            "rekeyed": rekeyed, "changed_at": _now_iso()}
+
 
 
 @router.get("/deactivated-customers")

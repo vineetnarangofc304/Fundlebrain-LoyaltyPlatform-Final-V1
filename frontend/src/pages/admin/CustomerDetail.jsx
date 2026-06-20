@@ -37,6 +37,19 @@ export default function CustomerDetail() {
   const [pointsAmt, setPointsAmt] = useState(0);
   const [note, setNote] = useState("");
   const [drill, setDrill] = useState(null);
+  const [jumpQ, setJumpQ] = useState("");
+
+  const jumpToCustomer = async () => {
+    const q = jumpQ.trim();
+    if (!q) return;
+    try {
+      const r = await api.get("/customers", { params: { q, limit: 1, skip: 0 } });
+      const list = r.data?.customers || r.data?.rows || (Array.isArray(r.data) ? r.data : []);
+      const cid = list[0]?.id;
+      if (cid) { setJumpQ(""); navigate(`/admin/customers/${cid}`); }
+      else toast.error("No customer found for that search");
+    } catch { toast.error("Search failed"); }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -86,9 +99,23 @@ export default function CustomerDetail() {
         title={c.name || c.mobile}
         subtitle="CUSTOMER 360 · LIVE COMPUTED"
         actions={
-          <Link to="/admin/customers" className="k-btn k-btn-outline k-btn-sm">
-            <ArrowLeft className="w-3.5 h-3.5" /> All customers
-          </Link>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <input
+                className="k-input k-input-sm !pl-8 w-56"
+                placeholder="Jump to customer (mobile / name)…"
+                value={jumpQ}
+                onChange={(e) => setJumpQ(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && jumpToCustomer()}
+                data-testid="cust-jump-search"
+              />
+              <Sparkles className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400" />
+            </div>
+            <button className="k-btn kazo-bg-burgundy text-white k-btn-sm" onClick={jumpToCustomer} data-testid="cust-jump-go">Go</button>
+            <Link to="/admin/customers" className="k-btn k-btn-outline k-btn-sm">
+              <ArrowLeft className="w-3.5 h-3.5" /> All customers
+            </Link>
+          </div>
         }
       />
 
@@ -126,19 +153,26 @@ export default function CustomerDetail() {
             <div className="font-display text-3xl mb-1" data-testid="cust-name">
               {c.name || c.mobile}
             </div>
-            <div className="text-xs text-neutral-500 font-mono mb-4">{c.mobile} · {c.email || "—"}</div>
+            <div className="text-sm text-neutral-600 font-mono mb-4" data-testid="cust-contact">
+              {c.mobile} · {c.email || "—"}
+              {c.previous_mobile && (
+                <span className="ml-2 text-xs text-amber-700" data-testid="cust-prev-mobile">
+                  (was {c.previous_mobile})
+                </span>
+              )}
+            </div>
 
-            <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-sm">
-              <div className="text-neutral-500 flex items-center gap-1.5"><MapPin className="w-3 h-3" /> City</div>
-              <div>{c.city || "—"}</div>
-              <div className="text-neutral-500 flex items-center gap-1.5"><Calendar className="w-3 h-3" /> Birthday</div>
-              <div>{c.birthday || "—"}</div>
+            <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-base">
+              <div className="text-neutral-500 flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5" /> City</div>
+              <div className="font-medium">{c.city || "—"}</div>
+              <div className="text-neutral-500 flex items-center gap-1.5"><Calendar className="w-3.5 h-3.5" /> Birthday</div>
+              <div className="font-medium">{c.birthday || "—"}</div>
               <div className="text-neutral-500">First purchase</div>
-              <div>{fmtDate(lt.first_purchase)}</div>
+              <div className="font-medium">{fmtDate(lt.first_purchase)}</div>
               <div className="text-neutral-500">Last purchase</div>
-              <div>{fmtDate(lt.last_purchase)}</div>
+              <div className="font-medium">{fmtDate(lt.last_purchase)}</div>
               <div className="text-neutral-500">Days since visit</div>
-              <div className="font-mono">{rfm.recency_days}</div>
+              <div className="font-mono font-medium">{rfm.recency_days}</div>
             </div>
           </div>
 

@@ -211,6 +211,11 @@ async def _visit_map(mobiles: List[str], timeout_s: Optional[int] = None) -> Dic
                 "format": "%Y-%m-%d", "timezone": "Asia/Kolkata"}}},
             "sale": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 0, 1]}},
             "ret": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 1, 0]}},
+            "paid": {"$sum": {"$cond": [
+                {"$ne": [{"$ifNull": ["$net_amount_before_tax", None]}, None]},
+                {"$add": ["$net_amount_before_tax", {"$ifNull": ["$tax_amount", 0]}]},
+                {"$ifNull": ["$net_amount", 0]},
+            ]}},
         }},
     ]
     out: Dict[str, Dict[str, Any]] = {}
@@ -222,6 +227,7 @@ async def _visit_map(mobiles: List[str], timeout_s: Optional[int] = None) -> Dic
                 "last": days[0] if days else None,
                 "second": days[1] if len(days) > 1 else None,
                 "net_cuts": int(r.get("sale", 0)) - int(r.get("ret", 0)),
+                "paid": round(float(r.get("paid", 0) or 0), 2),
             }
 
     if timeout_s:
@@ -268,7 +274,7 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
         "total_tax": total_tax,
         "total_discount": total_disc,
         "total_bill_amount": total_bill,
-        "lifetime_purchase": round(float((cust or {}).get("lifetime_spend") or 0), 2) if cust else "",
+        "lifetime_purchase": (visit or {}).get("paid", "") if visit else "",
         "lifetime_bill_cuts": (visit or {}).get("net_cuts", "") if visit else "",
     }
 
@@ -316,6 +322,15 @@ async def shopper_bills(
         # and $limit so the pipeline short-circuits once a page is filled. We skip
         # the (expensive) exact total for this path — pagination uses "has more".
         cut6, cut12 = _recency_cutoffs(now)
+        # SCALE FIX: a dormant/lapsed customer's bills are ALL older than the bucket
+        # cutoff (their last visit is, by definition, before it). So we can safely cap
+        # bill_date — this keeps the scan on a small, index-backed slice of OLD bills
+        # instead of walking every recent (active) bill. Active needs no extra bound.
+        bucket_max = cut12 if recency == "lapsed" else cut6 if recency == "dormant" else None
+        if bucket_max:
+            bd = dict(match.get("bill_date") or {})
+            bd["$lt"] = bucket_max if "$lt" not in bd else min(bd["$lt"], bucket_max)
+            match["bill_date"] = bd
         pipe: List[Dict[str, Any]] = [
             {"$match": match},
             {"$sort": {sort_field: 1 if sort_dir == "asc" else -1, "_id": 1}},

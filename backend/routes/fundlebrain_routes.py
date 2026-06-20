@@ -221,19 +221,27 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
             "discount": {"$sum": "$discount_amount"},
             "visits": {"$sum": 1},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+            "paid": {"$sum": {"$cond": [
+                {"$ne": [{"$ifNull": ["$net_amount_before_tax", None]}, None]},
+                {"$add": ["$net_amount_before_tax", {"$ifNull": ["$tax_amount", 0]}]},
+                {"$ifNull": ["$net_amount", 0]},
+            ]}},
             "first": {"$min": "$bill_date"},
             "last": {"$max": "$bill_date"},
         }},
     ]
     life = (await transactions_col.aggregate(lifetime_pipe).to_list(1)) or [{}]
     life = life[0] if life else {}
+    _visits = customer.get("visit_count") or (life.get("visits", 0) or 0)
+    _paid = round(life.get("paid", 0) or 0, 2)
     lifetime = {
         "spend": round(life.get("spend", 0) or 0, 2),
+        "paid": _paid,
         "gross": round(life.get("gross", 0) or 0, 2),
         "discount": round(life.get("discount", 0) or 0, 2),
-        "visits": life.get("visits", 0) or 0,
+        "visits": _visits,
         "items": life.get("items", 0) or 0,
-        "aov": round((life.get("spend", 0) or 0) / (life.get("visits", 1) or 1), 2) if life.get("visits") else 0,
+        "aov": round(_paid / _visits, 2) if _visits else 0,
         "first_purchase": life.get("first"),
         "last_purchase": life.get("last"),
     }
@@ -372,6 +380,11 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
             "discount": {"$sum": "$discount_amount"},
             "visits": {"$sum": 1},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+            "paid": {"$sum": {"$cond": [
+                {"$ne": [{"$ifNull": ["$net_amount_before_tax", None]}, None]},
+                {"$add": ["$net_amount_before_tax", {"$ifNull": ["$tax_amount", 0]}]},
+                {"$ifNull": ["$net_amount", 0]},
+            ]}},
             "first": {"$min": "$bill_date"},
             "last": {"$max": "$bill_date"},
             "first_store": {"$first": "$store_id"},
@@ -379,13 +392,16 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
     ]
     life = (await transactions_col.aggregate(lifetime_pipe).to_list(1)) or [{}]
     life = life[0] if life else {}
+    _visits = customer.get("visit_count") or (life.get("visits", 0) or 0)
+    _paid = round(life.get("paid", 0) or 0, 2)
     lifetime = {
         "spend": round(life.get("spend", 0) or 0, 2),
+        "paid": _paid,
         "gross": round(life.get("gross", 0) or 0, 2),
         "discount": round(life.get("discount", 0) or 0, 2),
-        "visits": life.get("visits", 0) or 0,
+        "visits": _visits,
         "items": life.get("items", 0) or 0,
-        "aov": round((life.get("spend", 0) or 0) / (life.get("visits", 1) or 1), 2) if life.get("visits") else 0,
+        "aov": round(_paid / _visits, 2) if _visits else 0,
         "first_purchase": life.get("first"),
         "last_purchase": life.get("last"),
     }

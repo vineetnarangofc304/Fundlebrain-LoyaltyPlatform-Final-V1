@@ -4,12 +4,16 @@ Powers `/enterprise/live-monitor` and serves as a strong report dashboard.
 Bills WITH mobile = green; bills WITHOUT mobile = red "Lost Opportunity".
 """
 from __future__ import annotations
+import csv
+import io
 import secrets
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
+import pymongo
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from database import transactions_col, customers_col, stores_col
@@ -26,34 +30,27 @@ def _now_iso():
 IST_TZ = timezone(timedelta(hours=5, minutes=30))
 
 
-@router.get("/transactions")
-async def live_transactions(
-    limit: int = Query(200, ge=1, le=2000),
-    since: Optional[str] = Query(None, description="ISO timestamp — return only newer bills"),
-    since_minutes: Optional[int] = Query(None, ge=1, le=525600,
-        description="Convenience window in minutes (1 = 1 min, 1440 = 1d, up to 365d)."
-        " Overrides `since` if both given."),
-    start_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range start (overrides since_minutes)"),
-    end_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range end (inclusive)"),
-    store_id: Optional[str] = None,
-    store_code: Optional[str] = None,
-    city: Optional[str] = None,
-    zone: Optional[str] = None,
-    region: Optional[str] = None,
-    has_mobile: Optional[str] = Query(None, description="all | yes | no — filter by mobile presence"),
-    min_amount: Optional[float] = None,
-    max_amount: Optional[float] = None,
-    payment_mode: Optional[str] = None,
-    source: Optional[str] = Query(None, description="pos_ewards | historic_upload | etc"),
-    is_return: Optional[bool] = None,
-    user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
-                                         "marketing_manager", "regional_manager",
-                                         "analytics_viewer", "readonly_executive")),
-):
-    """Paginated list of recent transactions for the cockpit table."""
+def _ist_parts(iso: Optional[str]):
+    """(YYYY-MM-DD, HH:MM) in IST so the export matches the dashboard."""
+    if not iso:
+        return "", ""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST_TZ)
+        dt = dt.astimezone(IST_TZ)
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+    except Exception:
+        return str(iso)[:10], (str(iso)[11:16] if len(str(iso)) >= 16 else "")
+
+
+async def _build_live_filter(start_date=None, end_date=None, since=None, since_minutes=None,
+                             store_id=None, store_code=None, city=None, zone=None, region=None,
+                             source=None, is_return=None, has_mobile=None,
+                             min_amount=None, max_amount=None, payment_mode=None) -> dict:
+    """Shared bill filter used by the live-monitor listing AND the CSV export."""
     fil: dict = {}
     if start_date or end_date:
-        # Explicit date range wins over the relative window
         dr: dict = {}
         if start_date:
             dr["$gte"] = start_date
@@ -61,8 +58,6 @@ async def live_transactions(
             dr["$lte"] = end_date + "T23:59:59.999Z"
         fil["bill_date"] = dr
     elif since_minutes:
-        # Compute cutoff so the table matches whatever Stats Window the
-        # frontend is using — keeps the KPI strip and the row list consistent.
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=since_minutes)).isoformat()
         fil["bill_date"] = {"$gte": cutoff}
     elif since:
@@ -97,11 +92,42 @@ async def live_transactions(
         fil["net_amount"] = amt_fil
     if payment_mode:
         fil["payment_mode"] = payment_mode
-
-    # Region filter: resolve via stores
     if region:
         store_ids = [s["id"] async for s in stores_col.find({"region": region}, {"_id": 0, "id": 1})]
         fil["store_id"] = {"$in": store_ids}
+    return fil
+
+
+@router.get("/transactions")
+async def live_transactions(
+    limit: int = Query(200, ge=1, le=2000),
+    since: Optional[str] = Query(None, description="ISO timestamp — return only newer bills"),
+    since_minutes: Optional[int] = Query(None, ge=1, le=525600,
+        description="Convenience window in minutes (1 = 1 min, 1440 = 1d, up to 365d)."
+        " Overrides `since` if both given."),
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range start (overrides since_minutes)"),
+    end_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range end (inclusive)"),
+    store_id: Optional[str] = None,
+    store_code: Optional[str] = None,
+    city: Optional[str] = None,
+    zone: Optional[str] = None,
+    region: Optional[str] = None,
+    has_mobile: Optional[str] = Query(None, description="all | yes | no — filter by mobile presence"),
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+    payment_mode: Optional[str] = None,
+    source: Optional[str] = Query(None, description="pos_ewards | historic_upload | etc"),
+    is_return: Optional[bool] = None,
+    user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
+                                         "marketing_manager", "regional_manager",
+                                         "analytics_viewer", "readonly_executive")),
+):
+    """Paginated list of recent transactions for the cockpit table."""
+    fil = await _build_live_filter(
+        start_date=start_date, end_date=end_date, since=since, since_minutes=since_minutes,
+        store_id=store_id, store_code=store_code, city=city, zone=zone, region=region,
+        source=source, is_return=is_return, has_mobile=has_mobile,
+        min_amount=min_amount, max_amount=max_amount, payment_mode=payment_mode)
 
     rows = await transactions_col.find(fil, {"_id": 0}).sort("bill_date", -1).limit(limit).to_list(limit)
 
@@ -182,6 +208,113 @@ async def live_transactions(
             "raw_mobile": r.get("raw_mobile"),
         })
     return {"rows": enriched, "count": len(enriched), "as_of": _now_iso()}
+
+
+_EXPORT_COLS = [
+    ("Bill Date", "bill_date"), ("Bill Time", "bill_time"), ("Bill Number", "bill_number"),
+    ("Store Name", "store_name"), ("Store Code", "store_code"), ("City", "city"), ("Zone", "zone"),
+    ("Customer Mobile", "customer_mobile"), ("Customer Name", "customer_name"), ("Tier", "tier"),
+    ("Customer Status", "customer_status"), ("Bill Type", "bill_type"),
+    ("Net Before Tax", "net_before_tax"), ("Tax", "tax"), ("Discount", "discount"),
+    ("Total Paid", "total_paid"), ("Points Earned", "points_earned"),
+    ("Points Redeemed", "points_redeemed"), ("Payment Mode", "payment_mode"), ("Source", "source"),
+]
+_EXPORT_MAX = 100_000
+
+
+@router.get("/export")
+async def live_export(
+    since: Optional[str] = None,
+    since_minutes: Optional[int] = Query(None, ge=1, le=525600),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    store_id: Optional[str] = None,
+    store_code: Optional[str] = None,
+    city: Optional[str] = None,
+    zone: Optional[str] = None,
+    region: Optional[str] = None,
+    has_mobile: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+    payment_mode: Optional[str] = None,
+    source: Optional[str] = None,
+    is_return: Optional[bool] = None,
+    user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
+                                         "marketing_manager", "regional_manager",
+                                         "analytics_viewer", "readonly_executive")),
+):
+    """Streamed CSV export of the cockpit bills (honours the same filters)."""
+    fil = await _build_live_filter(
+        start_date=start_date, end_date=end_date, since=since, since_minutes=since_minutes,
+        store_id=store_id, store_code=store_code, city=city, zone=zone, region=region,
+        source=source, is_return=is_return, has_mobile=has_mobile,
+        min_amount=min_amount, max_amount=max_amount, payment_mode=payment_mode)
+    keys = [k for _, k in _EXPORT_COLS]
+
+    async def _gen():
+        store_map = {}
+        async for s in stores_col.find({}, {"_id": 0, "id": 1, "code": 1, "name": 1, "city": 1, "region": 1}):
+            if s.get("id"):
+                store_map[s["id"]] = s
+        hb = io.StringIO(); csv.writer(hb).writerow([lbl for lbl, _ in _EXPORT_COLS]); yield hb.getvalue()
+
+        written = 0
+        batch = []
+
+        async def _emit(rows):
+            nonlocal written
+            mobiles = list({r.get("customer_mobile") for r in rows if r.get("customer_mobile")})
+            cust = {}
+            if mobiles:
+                with pymongo.timeout(30):
+                    async for c in customers_col.find({"mobile": {"$in": mobiles}},
+                                                      {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "visit_count": 1}):
+                        cust[c["mobile"]] = c
+            out = io.StringIO(); w = csv.writer(out)
+            for r in rows:
+                st = store_map.get(r.get("store_id")) or {}
+                c = cust.get(r.get("customer_mobile")) or {}
+                nbt = r.get("net_amount_before_tax")
+                nbt = float(nbt) if nbt not in (None, "") else float(r.get("net_amount") or 0)
+                tax = float(r.get("tax_amount") or 0)
+                bd, bt = _ist_parts(r.get("bill_date"))
+                row = {
+                    "bill_date": bd, "bill_time": bt, "bill_number": r.get("bill_number") or "",
+                    "store_name": r.get("store_name") or st.get("name") or "",
+                    "store_code": r.get("store_code") or st.get("code") or "",
+                    "city": r.get("city") or st.get("city") or "",
+                    "zone": r.get("zone") or st.get("region") or "",
+                    "customer_mobile": r.get("customer_mobile") or "",
+                    "customer_name": r.get("customer_name") or c.get("name") or "",
+                    "tier": c.get("tier") or r.get("tier") or "",
+                    "customer_status": "walk_in" if not r.get("customer_mobile") else (
+                        "new" if (c.get("visit_count") or 0) <= 1 else "repeat"),
+                    "bill_type": "Return" if r.get("is_return") else "Regular",
+                    "net_before_tax": round(nbt, 2), "tax": round(tax, 2),
+                    "discount": round(float(r.get("discount_amount") or 0), 2),
+                    "total_paid": round((float(r.get("bill_with_tax")) if r.get("bill_with_tax") not in (None, "") else nbt + tax), 2),
+                    "points_earned": r.get("points_earned", 0),
+                    "points_redeemed": r.get("points_redeemed", 0),
+                    "payment_mode": r.get("payment_mode") or "", "source": r.get("source") or "",
+                }
+                w.writerow([row.get(k, "") for k in keys])
+                written += 1
+            return out.getvalue()
+
+        with pymongo.timeout(60):
+            cursor = transactions_col.find(fil, {"_id": 0}).sort("bill_date", -1)
+        async for r in cursor:
+            batch.append(r)
+            if len(batch) >= 2000:
+                yield await _emit(batch); batch = []
+                if written >= _EXPORT_MAX:
+                    break
+        if batch and written < _EXPORT_MAX:
+            yield await _emit(batch)
+
+    fname = f"live_monitor_{datetime.now(IST_TZ).date().isoformat()}.csv"
+    return StreamingResponse(_gen(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @router.get("/stats")
