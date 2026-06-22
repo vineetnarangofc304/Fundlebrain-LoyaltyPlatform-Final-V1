@@ -5,6 +5,42 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-22 — Live Monitor default + 4 reports from client Excel/CSV formats (iter 31, frontend 6/6 PASS)
+
+⚠️ Redeploy required for production. All verified (testing_agent iteration_31 frontend 100%; backend curl-verified).
+
+- **Login landing + nav order** — Live Bill Monitor is now the `/admin` index route (login lands here)
+  and the FIRST item in the DASHBOARDS sidebar group; Command Center is second (now at
+  `/admin/dashboards/command-center`). (`App.js`, `AdminLayout.jsx`)
+- **New backend module `reports_kpi_routes.py`** (`/api/kpi-reports/*`, db_deadline + deadline-free
+  export router):
+  - `GET /store-kpi` (+ `/store-kpi/export`) — per-store KPIs grouped by store_id: Overall Sales,
+    Discount, Net-before-tax, Tax, Fresh/Return bills & value, New/Repeat txns & ATV, Mapped/Unmapped
+    txns, Overall/New/Existing customer counts (distinct via $addToSet), Overall ATV. Optional YoY
+    `compare=true` (prior 1–2 years, growth%). Store identity backfilled from the stores master when
+    bills lack denormalized fields.
+  - `GET /crm-customers` (+ `/export`) — customer master (mobile, name, city/state, tier, card_validity,
+    points balance/redeemed, total billing, visits, days-since-visit, last/first visit, DOB/DOA) with
+    filters (search, city/state, tier, card validity, recency, min/max visits/points, min billing),
+    sorting, pagination, streamed CSV export.
+  - `GET /crm-summary` — tier mix, recency buckets, top cities, totals (for the report charts).
+  - `GET /trend` — sales/discount/bills/returns/new/repeat/customers bucketed day/week/month.
+  - `GET /filter-options` — zones, cities, store_classes, tiers, card_validities, states.
+- **New frontend reports** (under REPORTS sidebar group), all with sortable columns, rich filters,
+  show/hide **column picker**, charts, and CSV export — built on a shared `reportkit.jsx`
+  (`useColumns` + `ColumnPicker` + `ReportTable`):
+  - `StoreKPIReport.jsx` (`/admin/reports/store-kpi`) — KPI tiles, Top-10 sales bar, New-vs-Repeat
+    stacked bar, YoY toggle that surfaces growth columns.
+  - `CRMCustomerReport.jsx` (`/admin/reports/crm-customers`) — KPI tiles, tier donut, recency bar,
+    top-cities bar, paginated table (~800k customers).
+  - `KPITrends.jsx` (`/admin/reports/kpi-trends`) — daily/weekly/monthly Sales area, Bills-vs-Returns
+    bar, New/Repeat/Customers line; client-side CSV export.
+- **Shopper Bill Report** — added a **Store Class** column + the shared column show/hide picker.
+- Source reference files mapped: MARCH KPI / Store_wise_KPI → Store KPI; CRM_Report.csv → CRM report;
+  Weekly_KPI → KPI Trends; "sale report …may" lifecycle/class → Shopper Bill Report recency + Store Class.
+
+---
+
 ## 2026-06-22 — Kazo_Dashboard_Changes DOCX: 7 dashboard fixes (iter 30, frontend 7/7 PASS)
 
 Client DOCX listed 7 changes. All implemented + verified (testing_agent iteration_30 = 100%

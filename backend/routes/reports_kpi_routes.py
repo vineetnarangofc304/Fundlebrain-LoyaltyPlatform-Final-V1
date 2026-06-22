@@ -152,7 +152,36 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
 async def _run_store_kpi(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     pipe = [{"$match": match}, _store_group_stage()]
     raw = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(2000)
-    return [_finalize_store_row(g) for g in raw]
+    rows = [_finalize_store_row(g) for g in raw]
+    await _fill_store_identity(rows)
+    return rows
+
+
+async def _fill_store_identity(rows: List[Dict[str, Any]]) -> None:
+    """Backfill store_name / code / class / zone from the stores master when the bill
+    rows didn't carry the denormalized values (keeps the report readable on any data)."""
+    ids = [r["store_id"] for r in rows if r.get("store_id") and (
+        r.get("store_name") in (None, "—") or r.get("store_code") in (None, "—")
+        or r.get("store_class") in (None, "—") or r.get("zone") in (None, "—"))]
+    if not ids:
+        return
+    from database import stores_col
+    smap = {}
+    async for s in stores_col.find({"id": {"$in": ids}},
+                                   {"_id": 0, "id": 1, "name": 1, "code": 1, "store_class": 1, "region": 1}):
+        smap[s["id"]] = s
+    for r in rows:
+        s = smap.get(r.get("store_id"))
+        if not s:
+            continue
+        if r.get("store_name") in (None, "—"):
+            r["store_name"] = s.get("name") or r["store_name"]
+        if r.get("store_code") in (None, "—"):
+            r["store_code"] = s.get("code") or r["store_code"]
+        if r.get("store_class") in (None, "—"):
+            r["store_class"] = s.get("store_class") or r["store_class"]
+        if r.get("zone") in (None, "—"):
+            r["zone"] = s.get("region") or r["zone"]
 
 
 STORE_SORT_FIELDS = {

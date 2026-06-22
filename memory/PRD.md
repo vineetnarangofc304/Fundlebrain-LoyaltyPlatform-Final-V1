@@ -1925,3 +1925,13 @@ Customer 360 + Shopper Report. 5b. Recency Dormant/Lapsed now populate (date ran
 those buckets + a specific search). 6. Lifetime Purchase = net+tax, excl discount, everywhere.
 7. New Support Desk "Update Mobile Number" page (full history re-key, old number preserved).
 ⚠️ Production redeploy required for these to go live.
+
+## 2026-06-22 (pt2) — Live Monitor default + 4 new reports — DONE
+- Live Bill Monitor is the login landing + first menu item; Command Center second.
+- New `reports_kpi_routes.py` (/api/kpi-reports/*): store-kpi (+YoY +export), crm-customers (+export),
+  crm-summary, trend, filter-options. All curl-verified.
+- New report pages (REPORTS group), all with sort + filters + column show/hide + charts + CSV export:
+  Store KPI Report, CRM Customer Report, KPI Trends. Shopper Bill Report got a Store Class column +
+  column picker. Shared frontend kit: reportkit.jsx (useColumns/ColumnPicker/ReportTable).
+- Verified: testing_agent iteration_31 = frontend 6/6 PASS. ⚠️ Production redeploy required.
+- NOTE: in PREVIEW seed data, store_class shows "—" (seed stores lack it) — production stores carry it.
