@@ -151,7 +151,7 @@ function App() {
 
           {/* Admin */}
           <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
-            <Route index element={<CommandCenter />} />
+            <Route index element={<LiveMonitorPage />} />
             <Route path="dashboards" element={<CommandCenter />} />
             <Route path="dashboards/command-center" element={<CommandCenter />} />
             <Route path="cockpit" element={<ExecutiveCockpit />} />
