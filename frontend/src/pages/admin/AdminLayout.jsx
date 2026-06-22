@@ -5,7 +5,7 @@ import {
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
   Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound,
   Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter, Cake, ClipboardCheck,
-  PanelLeftClose, PanelLeftOpen
+  PanelLeftClose, PanelLeftOpen, Smartphone
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { BRAND } from "@/brand.config";
@@ -95,6 +95,7 @@ const SECTIONS = [
       { to: "/admin/support-desk/reactivate-redeem-points", icon: Award, label: "Reactivate Redeem Points", testid: "nav-sd-rrp" },
       { to: "/admin/support-desk/customer-deactivate", icon: UserCog, label: "Customer Deactivate", testid: "nav-sd-deact" },
       { to: "/admin/support-desk/customer-reactivate", icon: UserCog, label: "Customer Reactivate", testid: "nav-sd-react" },
+      { to: "/admin/support-desk/update-mobile", icon: Smartphone, label: "Update Mobile Number", testid: "nav-sd-mobile" },
       { to: "/admin/support-desk/unsubscribe", icon: MessageSquare, label: "Unsubscribe Customer", testid: "nav-sd-unsub" },
       { to: "/admin/support-desk/audit-log", icon: ShieldCheck, label: "Support Desk Audit", testid: "nav-sd-audit" },
     ],

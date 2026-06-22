@@ -240,8 +240,11 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
     total = parse_float(r.get("Total Revenue Kazo") or r.get("Total Revenue KAZO")
                         or r.get("Total Revenue") or r.get("Total"))
     # Gross billing (MRP before discount) — used as the loyalty/spend base for history.
+    # NOTE: never source per-bill gross from a *lifetime* column — "Total Billing
+    # Lifetime" is a customer-level running total repeated on every bill row, which
+    # made every bill show the SAME gross. Only true per-bill billing columns here.
     bill_amount = parse_float(r.get("Total Billing KAZO") or r.get("Total Billing Kazo")
-                              or r.get("Total Billing") or r.get("Total Billing Lifetime")
+                              or r.get("Total Billing")
                               or r.get("Bill Amount") or r.get("Bill Amt"))
     if total == 0 and net:
         total = net + tax - discount

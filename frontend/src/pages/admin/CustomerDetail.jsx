@@ -44,7 +44,7 @@ export default function CustomerDetail() {
     if (!q) return;
     try {
       const r = await api.get("/customers", { params: { q, limit: 1, skip: 0 } });
-      const list = r.data?.customers || r.data?.rows || (Array.isArray(r.data) ? r.data : []);
+      const list = r.data?.items || r.data?.customers || r.data?.rows || (Array.isArray(r.data) ? r.data : []);
       const cid = list[0]?.id;
       if (cid) { setJumpQ(""); navigate(`/admin/customers/${cid}`); }
       else toast.error("No customer found for that search");
@@ -187,7 +187,7 @@ export default function CustomerDetail() {
               </div>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <KPICard label="Lifetime Spend" value={fmtMoney2(lt.spend)} accent="burgundy" testid="cust-lts" />
+              <KPICard label="Lifetime Spend" value={fmtMoney2(lt.paid ?? lt.spend)} accent="burgundy" testid="cust-lts" />
               <KPICard label="Points Balance" value={fmtNum(c.points_balance)} accent="amber" testid="cust-points" />
               <KPICard label="Visits" value={fmtNum(lt.visits)} accent="teal" testid="cust-visits" />
               <KPICard label="Avg basket" value={fmtMoney2(lt.aov)} accent="indigo" testid="cust-aov" />
@@ -219,11 +219,13 @@ export default function CustomerDetail() {
               sort: [["bill_date", -1]],
               columns: [
                 { key: "bill_number", label: "Bill #", mono: true },
-                { key: "bill_date", label: "Date" },
-                { key: "store_id", label: "Store", mono: true },
-                { key: "gross_amount", label: "Gross ₹", align: "right", render: (v) => fmtMoney2(v) },
+                { key: "bill_date", label: "Date", render: (v) => fmtDate(v) },
+                { key: "store_name", label: "Store", render: (v) => v || "—" },
+                { key: "net_amount_before_tax", label: "Net (pre-tax)", align: "right", render: (v, r) => fmtMoney2(v ?? r.net_amount) },
+                { key: "tax_amount", label: "Tax", align: "right", render: (v) => fmtMoney2(v) },
                 { key: "discount_amount", label: "Discount", align: "right", render: (v) => fmtMoney2(v) },
-                { key: "net_amount", label: "Net ₹", align: "right", render: (v) => fmtMoney2(v) },
+                { key: "bill_amount", label: "Bill Amount", align: "right", render: (_v, r) => fmtMoney2(Number(r.net_amount_before_tax ?? r.net_amount ?? 0) + Number(r.tax_amount || 0)) },
+                { key: "net_amount", label: "Net", align: "right", render: (v) => fmtMoney2(v) },
                 { key: "points_earned", label: "Pts +", align: "right" },
                 { key: "points_redeemed", label: "Pts −", align: "right" },
                 { key: "coupon_code", label: "Coupon" },

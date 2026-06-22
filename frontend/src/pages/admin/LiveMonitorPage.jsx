@@ -1,13 +1,13 @@
 /* Live Monitor — cockpit-style real-time view of every bill flowing into Fundle.
    Green = mobile attached. Red = "Lost Opportunity" (anonymous walk-in / no mobile). */
 import { useEffect, useMemo, useRef, useState } from "react";
-import api from "@/lib/api";
+import api, { API_URL } from "@/lib/api";
 import { PageHeader, SectionHeading } from "./_shared";
 import { fmtDateTimeISO, fmtMoney2 } from "@/lib/format";
 import { toast } from "sonner";
 import {
   Activity, ShoppingBag, AlertTriangle, CheckCircle2, RefreshCw, Pause, Play,
-  Phone, PhoneOff, MapPin, Receipt, Filter, X, TrendingDown, Coins, Award, Calculator,
+  Phone, PhoneOff, MapPin, Receipt, Filter, X, TrendingDown, Coins, Award, Calculator, Download,
 } from "lucide-react";
 
 const PALETTE = {
@@ -95,6 +95,40 @@ export default function LiveMonitorPage() {
 
   const loadStores = () => api.get("/stores").then((r) => setStores(r.data || [])).catch(() => {});
 
+  // Streamed CSV export of the cockpit bills, honouring the current filters + window.
+  const exportCsv = async () => {
+    const hasRange = filters.start_date || filters.end_date;
+    const p = {};
+    if (hasRange) {
+      if (filters.start_date) p.start_date = filters.start_date;
+      if (filters.end_date) p.end_date = filters.end_date;
+    } else if (statsWindow === "today") {
+      const d = istTodayIso(); p.start_date = d; p.end_date = d;
+    } else {
+      p.since_minutes = Number(statsWindow);
+    }
+    Object.entries(filters).forEach(([k, v]) => {
+      if (k === "start_date" || k === "end_date") return;
+      if (v !== "" && v !== "all") p[k] = v;
+    });
+    try {
+      const token = localStorage.getItem("kazo_token");
+      const usp = new URLSearchParams(p);
+      const res = await fetch(`${API_URL}/live-monitor/export?${usp.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }, credentials: "include",
+      });
+      if (!res.ok) throw new Error("export failed");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `live_monitor_${istTodayIso()}.csv`; a.click();
+      window.URL.revokeObjectURL(url);
+      toast.success("Export downloaded");
+    } catch {
+      toast.error("Export failed — try a narrower window");
+    }
+  };
+
   // Re-credit points for bills that earned 0 (e.g. captured before the earn-engine fix).
   // Dry-run first to preview, then confirm to apply. Idempotent on the backend.
   const recalcPoints = async () => {
@@ -157,6 +191,20 @@ export default function LiveMonitorPage() {
   const clearFilters = () => setFilters({ store_id: "", region: "", has_mobile: "all", payment_mode: "", source: "", min_amount: "", max_amount: "", start_date: "", end_date: "" });
   const activeFilterCount = useMemo(() =>
     Object.values(filters).filter((v) => v !== "" && v !== "all").length, [filters]);
+  // De-duplicate the store dropdown by NAME — production store master was bulk-uploaded
+  // more than once, producing two docs (different ids/codes) per physical store, so each
+  // store name appeared twice. Collapse them to a single option.
+  const storeOptions = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const s of stores) {
+      const key = String(s.name || s.code || s.id || "").trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+    }
+    return out;
+  }, [stores]);
   const windowEyebrow = (filters.start_date || filters.end_date)
     ? `${filters.start_date || "…"} → ${filters.end_date || "…"}`
     : statsWindow === "today" ? "TODAY (IST)" : `LAST ${statsWindow} MIN`;
@@ -176,6 +224,9 @@ export default function LiveMonitorPage() {
             </button>
             <button onClick={load} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-refresh">
               <RefreshCw className="w-3.5 h-3.5" /> Refresh now
+            </button>
+            <button onClick={exportCsv} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-export">
+              <Download className="w-3.5 h-3.5" /> Export CSV
             </button>
           </>
         }
@@ -212,7 +263,7 @@ export default function LiveMonitorPage() {
             ]} testid="lm-fil-mobile" />
             <Select label="Store" value={filters.store_id} onChange={(v) => setFilters({ ...filters, store_id: v })} options={[
               { value: "", label: "All stores" },
-              ...stores.map((s) => ({ value: s.id, label: s.name || s.code })),
+              ...storeOptions.map((s) => ({ value: s.id, label: s.name || s.code })),
             ]} testid="lm-fil-store" />
             <Select label="Source" value={filters.source} onChange={(v) => setFilters({ ...filters, source: v })} options={[
               { value: "", label: "All" },

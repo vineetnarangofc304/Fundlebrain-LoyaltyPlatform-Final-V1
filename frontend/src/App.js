@@ -79,6 +79,7 @@ import CustomerDeactivate from "@/pages/admin/support_desk/CustomerDeactivate";
 import CustomerReactivate from "@/pages/admin/support_desk/CustomerReactivate";
 import UnsubscribeCustomer from "@/pages/admin/support_desk/UnsubscribeCustomer";
 import SupportDeskAuditLog from "@/pages/admin/support_desk/SupportDeskAuditLog";
+import UpdateMobile from "@/pages/admin/support_desk/UpdateMobile";
 import LegacyReportsHub from "@/pages/admin/legacy_reports/LegacyReportsHub";
 import ShopperBillReport from "@/pages/admin/ShopperBillReport";
 import LRCustomerData from "@/pages/admin/legacy_reports/CustomerData";
@@ -202,6 +203,7 @@ function App() {
             <Route path="support-desk/reactivate-redeem-points" element={<ProtectedRoute roles={["super_admin","brand_admin","support_agent"]}><ReactivateRedeemPoints /></ProtectedRoute>} />
             <Route path="support-desk/customer-deactivate" element={<ProtectedRoute roles={["super_admin","brand_admin","support_agent"]}><CustomerDeactivate /></ProtectedRoute>} />
             <Route path="support-desk/customer-reactivate" element={<ProtectedRoute roles={["super_admin","brand_admin","support_agent"]}><CustomerReactivate /></ProtectedRoute>} />
+            <Route path="support-desk/update-mobile" element={<ProtectedRoute roles={["super_admin","brand_admin","support_agent"]}><UpdateMobile /></ProtectedRoute>} />
             <Route path="support-desk/unsubscribe" element={<ProtectedRoute roles={["super_admin","brand_admin","support_agent"]}><UnsubscribeCustomer /></ProtectedRoute>} />
             <Route path="support-desk/audit-log" element={<ProtectedRoute roles={["super_admin","brand_admin","support_agent","crm_manager"]}><SupportDeskAuditLog /></ProtectedRoute>} />
 

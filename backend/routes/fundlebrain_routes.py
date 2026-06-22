@@ -220,6 +220,8 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
             "gross": {"$sum": "$gross_amount"},
             "discount": {"$sum": "$discount_amount"},
             "visits": {"$sum": 1},
+            "sale_visits": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 0, 1]}},
+            "returns": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 1, 0]}},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
             "paid": {"$sum": {"$cond": [
                 {"$ne": [{"$ifNull": ["$net_amount_before_tax", None]}, None]},
@@ -232,7 +234,13 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
     ]
     life = (await transactions_col.aggregate(lifetime_pipe).to_list(1)) or [{}]
     life = life[0] if life else {}
-    _visits = customer.get("visit_count") or (life.get("visits", 0) or 0)
+    # Visits = PURCHASE (non-return) bills, computed live so it matches the Shopper
+    # Report. Falls back to the stored counter only for master-CSV customers that have
+    # no bill rows at all.
+    _has_bills = bool(life.get("visits"))
+    _sale_visits = int(life.get("sale_visits", 0) or 0)
+    _returns = int(life.get("returns", 0) or 0)
+    _visits = _sale_visits if _has_bills else (customer.get("visit_count") or 0)
     _paid = round(life.get("paid", 0) or 0, 2)
     lifetime = {
         "spend": round(life.get("spend", 0) or 0, 2),
@@ -240,6 +248,8 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
         "gross": round(life.get("gross", 0) or 0, 2),
         "discount": round(life.get("discount", 0) or 0, 2),
         "visits": _visits,
+        "returns": _returns,
+        "net_bill_cuts": _sale_visits - _returns,
         "items": life.get("items", 0) or 0,
         "aov": round(_paid / _visits, 2) if _visits else 0,
         "first_purchase": life.get("first"),
@@ -253,8 +263,8 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
         "lifetime": lifetime,
         "rfm": {
             "recency_days": recency_days,
-            "frequency": customer.get("visit_count", 0),
-            "monetary": round(customer.get("lifetime_spend", 0) or 0, 2),
+            "frequency": _visits,
+            "monetary": _paid,
             "r": r_q, "f": f_q, "m": m_q,
             "score": f"{r_q}{f_q}{m_q}",
             "segment": segment,

@@ -134,6 +134,12 @@ def _recency_label(last_visit: Optional[str], now: datetime) -> str:
     return "Lapsed (12M+)"
 
 
+def _recency_bucket(label: str) -> str:
+    """Map a recency LABEL ('Active (0-6M)' …) back to its bucket key."""
+    return ("active" if "Active" in label else "dormant" if "Dormant" in label
+            else "lapsed" if "Lapsed" in label else "unknown")
+
+
 def _build_match(start_date, end_date, bill_type, customer_type, store_id, zone,
                  city, q) -> Dict[str, Any]:
     m: Dict[str, Any] = {}
@@ -226,6 +232,7 @@ async def _visit_map(mobiles: List[str], timeout_s: Optional[int] = None) -> Dic
             out[r["_id"]] = {
                 "last": days[0] if days else None,
                 "second": days[1] if len(days) > 1 else None,
+                "sale": int(r.get("sale", 0)),                 # purchase (non-return) bills = "Total Visits"
                 "net_cuts": int(r.get("sale", 0)) - int(r.get("ret", 0)),
                 "paid": round(float(r.get("paid", 0) or 0), 2),
             }
@@ -267,7 +274,10 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
         "recency": _recency_label(last_visit, now),
         "last_visit": last_visit or "",
         "second_last_visit": (visit or {}).get("second") or "",
-        "total_visits": (cust or {}).get("visit_count") if cust else "",
+        # Total Visits = number of PURCHASE (non-return) bills, computed live from the
+        # bill data so it matches Customer 360 (the stored visit_count counted returns
+        # too and could be stale → the "11 vs 12" mismatch).
+        "total_visits": (visit or {}).get("sale") if visit else ((cust or {}).get("visit_count") if cust else ""),
         "zone": tx.get("zone") or store.get("region") or "",
         "customer_city": (cust or {}).get("city") or tx.get("city") or "",
         "net_before_tax": net_before_tax,
@@ -361,7 +371,12 @@ async def shopper_bills(
         has_more = len(raw) > limit
         raw = raw[:limit]
         total = None   # exact total intentionally omitted for the recency path
-        return {"total": total, "rows": await _enrich(raw, stores, now),
+        rows = await _enrich(raw, stores, now)
+        # customer.last_visit_at (used for the index-backed pre-filter) can be stale, so
+        # re-validate each row against its bill-derived recency label and keep only the
+        # ones that truly fall in the selected bucket — no more "Active" rows under Lapsed.
+        rows = [r for r in rows if _recency_bucket(r.get("recency", "")) == recency]
+        return {"total": total, "rows": rows,
                 "offset": offset, "limit": limit, "has_more": has_more,
                 "columns": [{"key": k, "label": l} for k, l in COLUMNS]}
 
@@ -431,10 +446,7 @@ async def export_csv(
             for fr in formatted:
                 if keep_recency:
                     # Recency label → bucket key; skip rows outside the chosen bucket.
-                    lbl = fr.get("recency", "")
-                    bucket = ("active" if "Active" in lbl else "dormant" if "Dormant" in lbl
-                              else "lapsed" if "Lapsed" in lbl else "unknown")
-                    if bucket != keep_recency:
+                    if _recency_bucket(fr.get("recency", "")) != keep_recency:
                         continue
                 ww.writerow([fr.get(k, "") for k in keys])
                 written += 1
