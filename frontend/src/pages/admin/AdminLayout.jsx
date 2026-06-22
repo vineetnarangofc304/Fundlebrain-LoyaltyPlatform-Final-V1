@@ -105,6 +105,9 @@ const SECTIONS = [
     items: [
       { to: "/admin/legacy-reports", icon: FileBarChart, label: "Reports (Legacy)", testid: "nav-legacy-reports" },
       { to: "/admin/reports/shopper-bills", icon: FileBarChart, label: "Shopper Bill Report", testid: "nav-shopper-bills" },
+      { to: "/admin/reports/store-kpi", icon: StoreIcon, label: "Store KPI Report", testid: "nav-store-kpi" },
+      { to: "/admin/reports/crm-customers", icon: UserRound, label: "CRM Customer Report", testid: "nav-crm-report" },
+      { to: "/admin/reports/kpi-trends", icon: TrendingUp, label: "KPI Trends", testid: "nav-kpi-trends" },
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },
       { to: "/admin/reports/digests", icon: FileText, label: "Exec Digests", testid: "nav-reports-digests" },
       { to: "/admin/formula-catalog", icon: FileText, label: "Formula Catalog", testid: "nav-formula" },

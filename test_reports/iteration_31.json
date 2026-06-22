@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 31 — Frontend regression on Kazo 'Live Monitor default + 4 new reports + SBR Store Class' task. All 6 feature areas verified end-to-end against the live preview. One critical ReferenceError in ShopperBillReport.jsx was found and fixed (one-line, well-defined coding bug); the rest passed without changes.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Store KPI Report table",
+        "issues": [
+          "First 4 columns (Store Code, Store, Class, Zone) render as '—' for every row in seed data — only City is populated. Overall Sales / Fresh Bills / Customers ARE populated as required, so this passes the explicit data-sanity check, but the report would be more useful if store_code/name/class/zone were also surfaced. Likely the /api/kpi-reports/store-kpi response is missing those fields, or the frontend column keys don't match the API response keys. Worth a follow-up by main agent (non-blocker)."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/frontend/src/pages/admin/ShopperBillReport.jsx",
+    "/app/frontend/src/pages/admin/StoreKPIReport.jsx",
+    "/app/frontend/src/pages/admin/CRMCustomerReport.jsx",
+    "/app/frontend/src/pages/admin/KPITrends.jsx",
+    "/app/frontend/src/pages/admin/reportkit.jsx"
+  ],
+  "action_items": [
+    "(OPTIONAL) Surface store_code / store_name / store_class / zone in the Store KPI table — current API response (or column-key mapping) leaves these 4 columns showing '—' for all 56 stores; only City populates.",
+    "(OPTIONAL) Consider adding a unit-style smoke test that imports each *Report.jsx — would have caught the SBR 'cols is not defined' ReferenceError before merge."
+  ],
+  "critical_code_review_comments": [
+    "CRITICAL (now fixed by this testing agent): ShopperBillReport.jsx referenced an undefined variable `cols` on lines 301 and 320 — the table render used `cols.map(...)` but only `COLS` (constant) and the `useColumns` hook output `{visible, toggle, reset}` were defined. The first navigation to /admin/reports/shopper-bills produced an Uncaught runtime error 'cols is not defined' and the page rendered nothing. Fix applied: derived `const cols = COLS.filter((c) => visible.has(c.key));` right after the useColumns hook (one line at line 81). After fix the table renders 23 default headers including the new Store Class column, the sbr-cols-btn opens a menu of 23 togglable options, and toggling reduces headers (23 → 22). RECOMMEND main agent re-export columns helper from reportkit (or refactor SBR to use ReportTable) to prevent this kind of drift in future.",
+    "All 4 new reports follow a consistent shared pattern via reportkit.jsx (useColumns + ColumnPicker + ReportTable). data-testids are exhaustive and consistent — great testability.",
+    "KPI Trends granularity dropdown values are 'day' / 'week' / 'month' (not 'daily'/'monthly'); page already loads with the requested monthly default (7-point sales line in seed data). Default date range is now() − 1y → now(), so plenty of data on first paint — good DX.",
+    "CRM Customer Report correctly shows '800,061 customers' total (matches backend curl-verified count). Pagination, sort, column-hide, filters, CSV download all work. Customer table renders 50 rows by default and 50 after page-size change — confirmed.",
+    "Store KPI: YoY toggle correctly adds SALES (PY) / SALES GROWTH / CUST (PY) / CUST GROWTH columns on re-apply — good. Default date window (this month) shows few rows on seed data as anticipated; '1y' quick-range button widens to 56 stores immediately."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/admin/ShopperBillReport.jsx"
+  ],
+  "success_rate": { "backend": "n/a (frontend-only run, backend pre-verified via curl per task)", "frontend": "100% (6/6 feature areas after SBR fix)" },
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (CRM portal /crm/login)",
+  "seed_data_creation": "None — read-only verification.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Verified on https://fundle-brain-ai-1.preview.emergentagent.com on 2026-06-22:\n\n  • NAV/DEFAULT: After login, URL = /admin and lm-export button is visible → Live Monitor is the new landing. nav-live-monitor (y=236.5) renders ABOVE nav-command-center (y=272) in the Dashboards group. Clicking Command Center navigates to /admin/dashboards/command-center and the dashboard loads.\n\n  • STORE KPI (/admin/reports/store-kpi, nav-store-kpi present): skpi-kpi-sales, skpi-chart-sales, skpi-chart-newrepeat, skpi-table all render. With default 'this month' window few rows show — clicking skpi-1y + skpi-apply loads 51 stores with non-zero Overall Sales/Fresh Bills/Customers (e.g. Mumbai ₹2,78,50,726.35 / 5,893 / 5,642). Clicking skpi-table-th-overall_sales toggles sort (first-row text changed twice). skpi-cols-btn opens skpi-cols-menu with 25 togglable options (skpi-cols-opt-<key>); toggling skpi-cols-opt-store_code dropped headers 15 → 14. skpi-compare toggle (Year-over-Year) + Apply adds 'SALES (PY)' / 'SALES GROWTH' / 'CUST (PY)' / 'CUST GROWTH' headers. skpi-export triggered a download of `store_kpi_2026-06-22.csv`.\n\n  • CRM CUSTOMER (/admin/reports/crm-customers, nav-crm-report present): crm-customer-report, crm-kpi-cust, crm-kpi-billing, crm-chart-tier, crm-chart-recency, crm-chart-cities, crm-table all render. Page shows '50 of 157,907 customers' after gold-tier + min-billing 1000 filter; unfiltered the total reads '800,061 customers'. crm-table-th-lifetime_spend click changed the first row (sort works). crm-cols-btn → crm-cols-menu opens; toggling crm-cols-opt-lifetime_spend reduced headers 9 → 8. crm-next clicked changed the first row (pagination works). crm-page-size set to '50' → 50 rows. crm-export downloaded `crm_customers_2026-06-22.csv`.\n\n  • KPI TRENDS (/admin/reports/kpi-trends, nav-kpi-trends present): kpi-trends, trend-chart-sales (default monthly produces 7-path SVG series), trend-chart-bills, trend-chart-newrepeat all render. trend-granularity values are 'day' / 'week' / 'month'. Changing to 'day' + trend-apply re-rendered the chart with 6 paths; switching to 'week' likewise. trend-export downloaded `kpi_trend_week_2026-06-22.csv` (or `_day`/`_month` depending on selection).\n\n  • SHOPPER BILL REPORT (/admin/reports/shopper-bills): WAS BROKEN with a runtime error 'cols is not defined' — page wouldn't render. Fixed in this run by adding `const cols = COLS.filter((c) => visible.has(c.key));` after the useColumns destructure (line 81). After fix: sbr-cols-btn visible, sbr-th-store_class header rendered (Store Class column present), sbr-cols-menu opens with 23 togglable options, toggling first option reduced headers 23 → 22, 50 rows render.\n\n  • DATA SANITY: Store KPI 1Y view shows populated Overall Sales / Discount / Fresh Bills / Customers / Existing Customers for all 51 sample rows. CRM total = 800,061 customers (matches '~800k' spec). KPI Trends monthly produced a multi-point sales line (7 path elements in the SVG). All good.\n\n  • Console: After the SBR fix, no PAGEERROR events fired during the run. Only React-DevTools-style benign warnings.",
+  "rca of the issue": "ShopperBillReport.jsx broke at runtime because the developer added the new shared ColumnPicker + useColumns plumbing (line 80) but left the JSX table render (lines 301 and 320) referencing an undeclared `cols` identifier — presumably from a prior local-state implementation. There is no `const cols = ...` anywhere in the file, so React threw 'ReferenceError: cols is not defined' on first render and the entire route returned the dev error overlay. Reproduction: log in as superadmin → navigate to /admin/reports/shopper-bills → red 'Uncaught runtime errors' overlay with stack pointing at ShopperBillReport.jsx. Mitigation applied: one-line addition at line 81 derives `cols` from the COLS constant and the `visible` Set returned by useColumns: `const cols = COLS.filter((c) => visible.has(c.key));`. After the fix the table renders fully, the new Store Class column is visible, the show/hide picker works (23 → 22 headers when one column is toggled off), and there are no console/page errors. RECOMMENDED follow-up: refactor ShopperBillReport to use the shared ReportTable from reportkit.jsx (same as Store KPI / CRM / Trends) to eliminate this duplicated logic entirely."
+}

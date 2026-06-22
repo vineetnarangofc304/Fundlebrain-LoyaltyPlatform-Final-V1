@@ -4,6 +4,7 @@
 import { useState, useEffect, useCallback } from "react";
 import api, { API_URL } from "@/lib/api";
 import { PageHeader } from "./_shared";
+import { ColumnPicker, useColumns } from "./reportkit";
 import { fmtMoney2, fmtNum } from "@/lib/format";
 import { Download, RefreshCw, Search, ArrowUp, ArrowDown } from "lucide-react";
 import { toast } from "sonner";
@@ -28,6 +29,7 @@ const COLS = [
   { key: "second_last_visit", label: "2nd Last Visit", mono: true },
   { key: "total_visits", label: "Total Visits", num: true },
   { key: "zone", label: "Zone" },
+  { key: "store_class", label: "Store Class" },
   { key: "customer_city", label: "City" },
   { key: "net_before_tax", label: "Net (pre-tax)", num: true, money: true },
   { key: "total_tax", label: "Tax", num: true, money: true },
@@ -75,6 +77,8 @@ export default function ShopperBillReport() {
   const [exporting, setExporting] = useState(false);
   const [opts, setOpts] = useState({ stores: [], zones: [] });
 
+  const { visible, toggle, reset } = useColumns(COLS, "kazo-shopper-cols");
+  const cols = COLS.filter((c) => visible.has(c.key));
   const set = (k, v) => setParams((p) => ({ ...p, [k]: v }));
 
   const cleanParams = useCallback(() => {
@@ -176,9 +180,12 @@ export default function ShopperBillReport() {
     <div data-testid="shopper-bill-report">
       <PageHeader title="Shopper Bill Report" subtitle="REPORTS · BILL-LEVEL"
         actions={
-          <button onClick={exportCsv} disabled={exporting} className="k-btn k-btn-outline" data-testid="sbr-export">
-            <Download className={`w-3.5 h-3.5 ${exporting ? "animate-pulse" : ""}`} /> {exporting ? "Preparing…" : "Download CSV"}
-          </button>
+          <div className="flex items-center gap-2">
+            <ColumnPicker columns={COLS} visible={visible} toggle={toggle} reset={reset} testid="sbr-cols" />
+            <button onClick={exportCsv} disabled={exporting} className="k-btn k-btn-outline" data-testid="sbr-export">
+              <Download className={`w-3.5 h-3.5 ${exporting ? "animate-pulse" : ""}`} /> {exporting ? "Preparing…" : "Download CSV"}
+            </button>
+          </div>
         }
       />
       <div className="p-8 space-y-6">
@@ -292,7 +299,7 @@ export default function ShopperBillReport() {
             <table className="w-full text-sm whitespace-nowrap" data-testid="sbr-table">
               <thead className="border-b border-black/10 text-left">
                 <tr>
-                  {COLS.map((c) => (
+                  {cols.map((c) => (
                     <th key={c.key}
                       onClick={() => onSort(c)}
                       className={`py-2 px-2 text-[10px] uppercase tracking-widest text-neutral-500 ${c.num ? "text-right" : ""} ${c.sort ? "cursor-pointer hover:text-neutral-900 select-none" : ""}`}
@@ -311,7 +318,7 @@ export default function ShopperBillReport() {
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={`${r.bill_number}-${i}`} className="border-b border-black/5 hover:bg-amber-50/40">
-                    {COLS.map((c) => (
+                    {cols.map((c) => (
                       <td key={c.key} className={`py-2 px-2 ${c.mono ? "font-mono text-xs" : ""} ${c.num ? "text-right font-mono" : ""}`}>
                         {c.key === "bill_type" || c.key === "recency"
                           ? badge(c.key, r[c.key])
