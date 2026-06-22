@@ -1913,3 +1913,15 @@ See `/app/memory/test_credentials.md` — Brand Admin: `admin@kazo.com / Kazo@20
 - AI insight cache is in-memory (single worker only)
 - Digest PDF stored as base64 in MongoDB (≤ 800 KB cap); move to GridFS or S3 for large reports
 - Historic ingest stitches chunks in memory then runs `_run_ingest_job` with the full text; for true multi-million-row imports switch to streaming `csv.DictReader` over a temp file
+
+## 2026-06-22 — Kazo_Dashboard_Changes DOCX (7 items) — DONE
+All 7 client dashboard changes implemented & verified (testing_agent iter_30 frontend 7/7,
+backend curl-verified). See CHANGELOG.md 2026-06-22 for full detail. Summary:
+1. Live Monitor "Export CSV" button. 2. De-dup store dropdown (prod master uploaded 2×).
+3. Customer 360 jump-search fixed (was reading wrong API key). 4. Drilldown gross-on-every-bill
+fixed (ingest no longer maps gross from "Total Billing Lifetime"; drilldown shows per-bill
+Net/Tax/Discount/Bill-Amount). 5. Visits = purchase (non-return) bills, consistent across
+Customer 360 + Shopper Report. 5b. Recency Dormant/Lapsed now populate (date range dropped for
+those buckets + a specific search). 6. Lifetime Purchase = net+tax, excl discount, everywhere.
+7. New Support Desk "Update Mobile Number" page (full history re-key, old number preserved).
+⚠️ Production redeploy required for these to go live.

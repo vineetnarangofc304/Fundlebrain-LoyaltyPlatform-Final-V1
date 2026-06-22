@@ -85,9 +85,10 @@ export default function ShopperBillReport() {
     });
     // Recency (Dormant/Lapsed) describes a customer's GLOBAL last visit, which is
     // necessarily OLDER than a recent bill-date window — sending the default recent
-    // range would intersect to zero rows. Drop it so the backend's recency cutoff
-    // defines the window instead.
-    if (out.recency === "dormant" || out.recency === "lapsed") {
+    // range would intersect to zero rows. Same for a specific search (mobile / bill /
+    // trans-id): the matched bills may sit outside the default 30-day window. In both
+    // cases drop the date range so the search spans all history.
+    if (out.recency === "dormant" || out.recency === "lapsed" || out.q) {
       delete out.start_date;
       delete out.end_date;
     }
@@ -246,6 +247,9 @@ export default function ShopperBillReport() {
               <label className={lblCls}>Search (mobile / bill / trans ID)</label>
               <input value={params.q} onChange={(e) => set("q", e.target.value)} className={selCls}
                 onKeyDown={(e) => e.key === "Enter" && fetchReport(1)} data-testid="sbr-search" />
+              {params.q && (
+                <div className="text-[9px] text-amber-700 mt-1" data-testid="sbr-search-hint">Date range ignored — searches all history</div>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap">

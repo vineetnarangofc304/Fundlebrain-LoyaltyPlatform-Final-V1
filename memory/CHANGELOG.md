@@ -5,6 +5,50 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-22 — Kazo_Dashboard_Changes DOCX: 7 dashboard fixes (iter 30, frontend 7/7 PASS)
+
+Client DOCX listed 7 changes. All implemented + verified (testing_agent iteration_30 = 100%
+frontend; backend curl-verified). ⚠️ Redeploy required for production.
+- **#1 Live Monitor Export CSV** — new `lm-export` button in the header streams the
+  cockpit bills (honours current filters/window) via `GET /api/live-monitor/export`
+  (endpoint already existed; only the button was missing). `LiveMonitorPage.jsx`.
+- **#2 Store name shown twice** — production store master was bulk-uploaded more than once
+  (two docs per physical store, different ids/codes, same NAME). De-duplicated the Live
+  Monitor store dropdown by name (`storeOptions` useMemo).
+- **#3 Customer 360 jump-search was broken** — `jumpToCustomer` read `r.data.customers`,
+  but `/customers` returns `{total, items}` → always "No customer found". Fixed to read
+  `r.data.items`. Now navigates without clicking Back. `CustomerDetail.jsx`.
+- **#4 "View transactions" showed same gross on every bill** — ROOT CAUSE: historic ingest
+  mapped `gross_amount` from the `"Total Billing Lifetime"` column, a customer-level running
+  total repeated on every bill row. Removed that column from the per-bill `bill_amount`
+  mapping (`historic_routes.py`). Read-time fix for existing data: rewrote the Customer 360
+  drilldown columns to drop the buggy Gross column and show per-bill **Net (pre-tax) / Tax /
+  Discount / Bill Amount (= net+tax) / Net** instead. `CustomerDetail.jsx`.
+- **#5a Visit count 11 vs 12** — the stored `visit_count` counted RETURN bills too and could
+  be stale. Customer 360 (`customer_360_v2`) now computes **Visits = purchase (non-return)
+  bills live**, plus `returns` + `net_bill_cuts`; `rfm.frequency` uses it too. Shopper Bill
+  Report `total_visits` now uses the same live sale-bill count (`_visit_map` adds `sale`).
+  The two reports now agree (verified 14 visits / 9 net cuts for mobile 966681235).
+- **#5b Recency Dormant/Lapsed returned no rows** — the Shopper Report's default 30-day
+  date window intersected to zero for those buckets (their bills are old). Frontend now drops
+  the date range when recency ∈ {dormant, lapsed} (hint shown). Also added a post-enrich
+  re-validation (`_recency_bucket`) so the index-backed pre-filter (which uses the sometimes
+  stale `customers.last_visit_at`) can no longer surface a mislabelled row (no "Active" under
+  "Lapsed"). Bonus UX: a specific search (`q`) also ignores the date range so a mobile's bills
+  are always found.
+- **#6 Lifetime Purchase = Net WITH tax, EXCL discount** (user choice: everywhere) — Customer
+  360 "Lifetime Spend" KPI + RFM Monetary now use `lifetime.paid` (= net_before_tax + tax,
+  discount excluded). Shopper Report `lifetime_purchase` already used this. Verified ₹5,000
+  (not ₹6,000 gross) for mobile 966681235.
+- **#7 Support Desk → Update Mobile Number** — new page `support_desk/UpdateMobile.jsx`
+  (nav `nav-sd-mobile`, route `/admin/support-desk/update-mobile`): search a customer by
+  current mobile → enter new mobile + reason → `POST /api/support-desk/update-mobile`
+  fully re-keys all history (bills/points/coupons/OTP/messages/NPS/tickets) to the new number
+  while preserving the old number on the record; result panel shows rows-rekeyed per
+  collection. Backend was already built & tested.
+
+---
+
 ## 2026-06-17 — Exact 2-decimal amounts + IST date consistency (iter 73)
 
 Two user-reported issues fixed (live retail data — exactness matters):
