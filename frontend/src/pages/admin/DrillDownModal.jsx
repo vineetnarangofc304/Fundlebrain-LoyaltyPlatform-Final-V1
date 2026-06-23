@@ -12,6 +12,7 @@
 */
 import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
+import { requestExport } from "@/lib/exportClient";
 import { fmtDateTime } from "@/lib/format";
 import { X, Download, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 
@@ -59,21 +60,18 @@ export default function DrillDownModal({
   const exportCSV = async () => {
     setDownloading(true);
     try {
-      const res = await api.get("/dashboard/drilldown/csv", {
+      await requestExport({
+        report_type: "drilldown",
         params: {
           collection,
           filter: JSON.stringify(filter || {}),
           sort: sort ? JSON.stringify(sort) : undefined,
           columns: JSON.stringify(columns.map((c) => c.key)),
         },
-        responseType: "blob",
+        label: title ? `Drill-down · ${title}` : "Drill-down",
+        known_total: data?.total ?? null,
+        filename: `${collection}_${Date.now()}.csv`,
       });
-      const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${collection}_${Date.now()}.csv`;
-      a.click();
-      window.URL.revokeObjectURL(url);
     } catch (e) {
       setError("CSV export failed");
     } finally {

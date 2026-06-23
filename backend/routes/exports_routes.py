@@ -46,6 +46,18 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "shopper_bills": {"label": "Shopper Bill Report",   "path": "/shopper-report/export",         "filename": "shopper_bills"},
     "kpi_trends":    {"label": "KPI Trends",            "path": "/kpi-reports/trend/export",      "filename": "kpi_trends"},
     "live_monitor":  {"label": "Live Bill Monitor",     "path": "/live-monitor/export",           "filename": "live_monitor"},
+    # Legacy reports — GET endpoints that emit CSV when `export=csv` is passed.
+    "legacy_customer_data":           {"label": "Customer Data",           "path": "/legacy-reports/customer-data",            "filename": "customer_data"},
+    "legacy_transaction_data":        {"label": "Transaction Data",        "path": "/legacy-reports/transaction-data",         "filename": "transaction_data"},
+    "legacy_repeat_customers":        {"label": "Repeat Customers",        "path": "/legacy-reports/repeat-customers",         "filename": "repeat_customers"},
+    "legacy_top_customers":           {"label": "Top Customers",           "path": "/legacy-reports/top-customers",            "filename": "top_customers"},
+    "legacy_pending_bills":           {"label": "Pending Bills",           "path": "/legacy-reports/pending-bills",            "filename": "pending_bills"},
+    "legacy_feedback_data":           {"label": "Feedback Data",           "path": "/legacy-reports/feedback-data",            "filename": "feedback_data"},
+    "legacy_expiry_points":           {"label": "Expiry Points",           "path": "/legacy-reports/expiry-points",            "filename": "expiry_points"},
+    "legacy_active_coupons":          {"label": "Active Coupons",          "path": "/legacy-reports/active-coupons",           "filename": "active_coupons"},
+    "legacy_fraud_report":            {"label": "Fraud Report",            "path": "/legacy-reports/fraud-report",             "filename": "fraud_report"},
+    "legacy_missed_calls":            {"label": "Missed Calls",            "path": "/legacy-reports/missed-calls",             "filename": "missed_calls"},
+    "legacy_location_wise_customers": {"label": "Location Wise Customers",  "path": "/legacy-reports/location-wise-customers", "filename": "location_wise_customers"},
 }
 
 # ── object storage (sync requests wrapped in threads) ─────────────────────────

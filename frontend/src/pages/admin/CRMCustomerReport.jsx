@@ -2,12 +2,12 @@
    DOB/DOA …) with filters, sorting, show/hide columns, charts and CSV export.
    (Built from the client's "CRM_Report.csv" reference format.) */
 import { useState, useEffect, useCallback } from "react";
-import api, { API_URL } from "@/lib/api";
+import api from "@/lib/api";
+import { requestExport } from "@/lib/exportClient";
 import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "./_shared";
 import { ColumnPicker, ReportTable, useColumns } from "./reportkit";
 import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
 import { Download, Search, RefreshCw } from "lucide-react";
-import { toast } from "sonner";
 import { PieChart, Pie, Cell, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 
 const dateCell = (v) => (v ? fmtDate(v) : "—");
@@ -87,18 +87,16 @@ export default function CRMCustomerReport() {
   const exportCsv = async () => {
     setExporting(true);
     try {
-      const token = localStorage.getItem("kazo_token");
-      const usp = new URLSearchParams(cleanParams());
-      const res = await fetch(`${API_URL}/kpi-reports/crm-customers/export?${usp.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` }, credentials: "include",
+      await requestExport({
+        report_type: "crm_customers",
+        params: cleanParams(),
+        label: "CRM Customer Report",
+        known_total: total,
+        filename: `crm_customers_${new Date().toISOString().slice(0, 10)}.csv`,
       });
-      if (!res.ok) throw new Error();
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = `crm_customers_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
-      window.URL.revokeObjectURL(url);
-      toast.success("Export started");
-    } catch { toast.error("Export failed"); } finally { setExporting(false); }
+    } finally {
+      setExporting(false);
+    }
   };
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));

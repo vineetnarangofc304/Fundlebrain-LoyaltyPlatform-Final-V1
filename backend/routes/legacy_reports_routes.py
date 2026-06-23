@@ -246,6 +246,7 @@ async def fraud_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = Query(200, le=1000),
+    export: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     """Flags suspicious patterns:
@@ -301,7 +302,12 @@ async def fraud_report(
         })
 
     flags.sort(key=lambda f: (-{"high": 3, "medium": 2, "low": 1}.get(f.get("severity", "low"), 0)))
-    return {"total": len(flags), "flags": flags[:limit]}
+    flags = flags[:limit]
+    if export == "csv":
+        cols = ["type", "severity", "customer_mobile", "hour", "bill_count",
+                "total_amount", "points", "bill_number", "created_at"]
+        return _to_csv(flags, cols)
+    return {"total": len(flags), "flags": flags}
 
 
 # ============================================================
@@ -384,6 +390,7 @@ async def missed_calls_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = Query(200, le=1000),
+    export: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     """Returns IVR / missed-call captures.
@@ -391,11 +398,14 @@ async def missed_calls_report(
     Currently empty — surface ready for future IVR integration.
     Schema kept compatible with legacy Fundle's columns.
     """
+    cols = ["received_at", "mobile", "campaign_code", "status", "store_id"]
+    if export == "csv":
+        return _to_csv([], cols)
     return {
         "total": 0,
         "rows": [],
         "note": "No IVR / missed-call provider integrated yet. Surface ready for future hook.",
-        "expected_columns": ["received_at", "mobile", "campaign_code", "status", "store_id"],
+        "expected_columns": cols,
     }
 
 
@@ -408,6 +418,7 @@ async def location_wise_customers_report(
     zone: Optional[str] = None,
     start_date: Optional[str] = None,  # last visit between
     end_date: Optional[str] = None,
+    export: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     """Customer counts grouped by home_store_id."""
@@ -444,6 +455,10 @@ async def location_wise_customers_report(
             "lifetime_spend": round(d.get("lifetime_spend", 0) or 0, 2),
             "total_visits": d.get("total_visits", 0),
         })
+    if export == "csv":
+        cols = ["store_id", "store_name", "store_code", "city", "state", "zone",
+                "customer_count", "lifetime_spend", "total_visits"]
+        return _to_csv(rows, cols)
     return {"total": len(rows), "rows": rows}
 
 

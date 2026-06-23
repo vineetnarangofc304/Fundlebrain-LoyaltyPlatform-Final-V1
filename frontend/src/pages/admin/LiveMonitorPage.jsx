@@ -1,7 +1,8 @@
 /* Live Monitor — cockpit-style real-time view of every bill flowing into Fundle.
    Green = mobile attached. Red = "Lost Opportunity" (anonymous walk-in / no mobile). */
 import { useEffect, useMemo, useRef, useState } from "react";
-import api, { API_URL } from "@/lib/api";
+import api from "@/lib/api";
+import { requestExport } from "@/lib/exportClient";
 import { PageHeader, SectionHeading } from "./_shared";
 import { fmtDateTimeISO, fmtMoney2 } from "@/lib/format";
 import { toast } from "sonner";
@@ -111,22 +112,13 @@ export default function LiveMonitorPage() {
       if (k === "start_date" || k === "end_date") return;
       if (v !== "" && v !== "all") p[k] = v;
     });
-    try {
-      const token = localStorage.getItem("kazo_token");
-      const usp = new URLSearchParams(p);
-      const res = await fetch(`${API_URL}/live-monitor/export?${usp.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` }, credentials: "include",
-      });
-      if (!res.ok) throw new Error("export failed");
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = `live_monitor_${istTodayIso()}.csv`; a.click();
-      window.URL.revokeObjectURL(url);
-      toast.success("Export downloaded");
-    } catch {
-      toast.error("Export failed — try a narrower window");
-    }
+    await requestExport({
+      report_type: "live_monitor",
+      params: p,
+      label: "Live Bill Monitor",
+      known_total: stats?.bills_total ?? null,
+      filename: `live_monitor_${istTodayIso()}.csv`,
+    });
   };
 
   // Re-credit points for bills that earned 0 (e.g. captured before the earn-engine fix).

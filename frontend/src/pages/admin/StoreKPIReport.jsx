@@ -2,12 +2,13 @@
    growth, charts, sortable columns, show/hide columns and CSV export.
    (Built from the client's "MARCH KPI" / "Store_wise_KPI" reference formats.) */
 import { useState, useEffect, useCallback } from "react";
-import api, { API_URL } from "@/lib/api";
+import api from "@/lib/api";
+import { requestExport } from "@/lib/exportClient";
 import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "./_shared";
 import { ColumnPicker, ReportTable, useColumns, GrowthCell } from "./reportkit";
 import { fmtINR, fmtMoney2, fmtNum } from "@/lib/format";
 import { Download, Search, RefreshCw } from "lucide-react";
-import { toast } from "sonner";
+
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Cell, Legend } from "recharts";
 
 const monthStart = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10); };
@@ -94,19 +95,17 @@ export default function StoreKPIReport() {
   const exportCsv = async () => {
     setExporting(true);
     try {
-      const token = localStorage.getItem("kazo_token");
       const { compare, ...rest } = cleanParams();
-      const usp = new URLSearchParams(rest);
-      const res = await fetch(`${API_URL}/kpi-reports/store-kpi/export?${usp.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` }, credentials: "include",
+      await requestExport({
+        report_type: "store_kpi",
+        params: rest,
+        label: "Store KPI Report",
+        known_total: data.count ?? (data.rows || []).length,
+        filename: `store_kpi_${today()}.csv`,
       });
-      if (!res.ok) throw new Error();
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = `store_kpi_${today()}.csv`; a.click();
-      window.URL.revokeObjectURL(url);
-      toast.success("Export downloaded");
-    } catch { toast.error("Export failed"); } finally { setExporting(false); }
+    } finally {
+      setExporting(false);
+    }
   };
 
   const t = data.totals || {};

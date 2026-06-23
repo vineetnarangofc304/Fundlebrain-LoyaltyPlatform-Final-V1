@@ -85,6 +85,7 @@ import ShopperBillReport from "@/pages/admin/ShopperBillReport";
 import StoreKPIReport from "@/pages/admin/StoreKPIReport";
 import CRMCustomerReport from "@/pages/admin/CRMCustomerReport";
 import KPITrends from "@/pages/admin/KPITrends";
+import DownloadsCenter from "@/pages/admin/DownloadsCenter";
 import LRCustomerData from "@/pages/admin/legacy_reports/CustomerData";
 import LRTransactionData from "@/pages/admin/legacy_reports/TransactionData";
 import LRRepeatCustomers from "@/pages/admin/legacy_reports/RepeatCustomers";
@@ -227,6 +228,7 @@ function App() {
             <Route path="reports/store-kpi" element={<ProtectedRoute><StoreKPIReport /></ProtectedRoute>} />
             <Route path="reports/crm-customers" element={<ProtectedRoute><CRMCustomerReport /></ProtectedRoute>} />
             <Route path="reports/kpi-trends" element={<ProtectedRoute><KPITrends /></ProtectedRoute>} />
+            <Route path="downloads" element={<ProtectedRoute><DownloadsCenter /></ProtectedRoute>} />
           </Route>
 
           {/* Store ops portal */}

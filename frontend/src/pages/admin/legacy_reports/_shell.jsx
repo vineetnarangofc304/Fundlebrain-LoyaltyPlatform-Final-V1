@@ -3,6 +3,7 @@
    Children pass `endpoint`, `columns`, `defaultParams`, and an optional `filters` block. */
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
+import { requestExport } from "@/lib/exportClient";
 import { PageHeader } from "../_shared";
 import { Download, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
@@ -61,17 +62,14 @@ export function LegacyReportShell({
   const totalPages = paginate ? Math.max(1, Math.ceil(total / pageSize)) : 1;
 
   const exportCsv = async () => {
-    try {
-      const r = await api.get(endpoint, { params: { ...params, export: "csv" }, responseType: "blob" });
-      const url = window.URL.createObjectURL(r.data);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${title.toLowerCase().replace(/\s+/g, "_")}_${new Date().toISOString().slice(0, 10)}.csv`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-    } catch (e) {
-      toast.error("Export failed");
-    }
+    const reportType = "legacy_" + endpoint.split("/").pop().replace(/-/g, "_");
+    await requestExport({
+      report_type: reportType,
+      params: { ...params, export: "csv" },
+      label: title,
+      known_total: total,
+      filename: `${title.toLowerCase().replace(/\s+/g, "_")}_${new Date().toISOString().slice(0, 10)}.csv`,
+    });
   };
 
   return (

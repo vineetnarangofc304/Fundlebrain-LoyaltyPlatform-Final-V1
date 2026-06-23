@@ -2,12 +2,12 @@
    Full filters + sortable columns + server-side pagination + streamed CSV export.
    Spec & recency rules (Active 0-6M / Dormant 6-12M / Lapsed 12M+) per client. */
 import { useState, useEffect, useCallback } from "react";
-import api, { API_URL } from "@/lib/api";
+import api from "@/lib/api";
+import { requestExport } from "@/lib/exportClient";
 import { PageHeader } from "./_shared";
 import { ColumnPicker, useColumns } from "./reportkit";
 import { fmtMoney2, fmtNum } from "@/lib/format";
 import { Download, RefreshCw, Search, ArrowUp, ArrowDown } from "lucide-react";
-import { toast } from "sonner";
 
 const isoDaysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 const today = () => new Date().toISOString().slice(0, 10);
@@ -139,23 +139,13 @@ export default function ShopperBillReport() {
   const exportCsv = async () => {
     setExporting(true);
     try {
-      const token = localStorage.getItem("kazo_token");
-      const usp = new URLSearchParams(cleanParams());
-      const res = await fetch(`${API_URL}/shopper-report/export?${usp.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        credentials: "include",
+      await requestExport({
+        report_type: "shopper_bills",
+        params: cleanParams(),
+        label: "Shopper Bill Report",
+        known_total: total,
+        filename: `shopper_bill_report_${today()}.csv`,
       });
-      if (!res.ok) throw new Error("Export failed");
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `shopper_bill_report_${today()}.csv`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-      toast.success("Export downloaded");
-    } catch (e) {
-      toast.error("Export failed — try a narrower date range");
     } finally {
       setExporting(false);
     }
