@@ -499,3 +499,13 @@ File: `backend/routes/live_monitor_routes.py`, `frontend/.../LiveMonitorPage.jsx
 - items[] schema hints ($size for per-bill item count, $unwind for item analysis) added to system prompt + run_aggregation description + field notes.
 - Tool-loop cap raised 8→10 and graceful: on cap, forces a final synthesis answer (table + export link) instead of "(Reached tool-call limit)".
 - E2E verified with the user's exact failing prompt "list of people who shopped 2+ items in their bill in last 6 months" → stated assumption, found data nuance (1 item-line/bill → used quantity sum), exported 52,740 customers CSV with working download button + metrics table.
+
+## 2026-06-23 — Downloads Center fully wired (centralized async CSV exports)
+- COMPLETED the orphaned Downloads Center: registered `<Route path="downloads" element={<DownloadsCenter/>}/>` in App.js and migrated EVERY server-side report export to the shared `requestExport()` helper (`/app/frontend/src/lib/exportClient.js`).
+- Migrated export buttons → `requestExport()`: Store KPI Report (skpi-export), CRM Customer Report (crm-export), Shopper Bill Report (sbr-export), Live Bill Monitor (lm-export), Drill-down modal (drilldown-csv), and ALL legacy reports via shared `legacy_reports/_shell.jsx`.
+- UX per user spec: small exports (known_total <= 5000) generate inline + download instantly with toast "Download started"; large exports run in a background task → toast "Download started · find it in the Downloads section" + sidebar badge + "Report ready" toast when complete. Files stored in Emergent object storage, auto-expire after 7 days.
+- Per user choice: Customer 360 (cust-export-csv) and KPI Trends (trend-export) intentionally kept as INSTANT client-side downloads (NOT routed through Downloads Center).
+- Backend: extended `exports_routes.py` REGISTRY with 11 legacy report types; added `export=csv` support to 3 legacy endpoints that lacked it (fraud-report, missed-calls, location-wise-customers).
+- Removed dead `API_URL`/`toast` imports from the 4 migrated KPI/report pages.
+- TESTED: backend via curl (instant + async 800,061-row CRM export completed to Ready/107.5MB, downloads return valid CSV); frontend via testing agent iteration_33 → 10/10 scenarios PASS, no bugs.
+- NOTE: fixes live in PREVIEW — user must REDEPLOY to push to production.
