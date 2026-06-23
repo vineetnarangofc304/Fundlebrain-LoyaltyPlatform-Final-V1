@@ -1939,7 +1939,9 @@ those buckets + a specific search). 6. Lifetime Purchase = net+tax, excl discoun
 ---
 ## STATUS UPDATE 2026-06-23
 - ✅ DONE (P0): Centralized async "Downloads Center" — all server-side report CSV exports (Store KPI, CRM Customer, Shopper Bill, Live Monitor, Drill-down, all Legacy reports) now funnel through `requestExport()` → Emergent object storage, 7-day retention, in-app "Download started"/"Report ready" notifications + sidebar badge. Customer 360 & KPI Trends kept as instant client-side downloads per user choice. Verified: testing agent iteration_33 = 10/10 frontend PASS; backend curl-verified (800k-row async export completes).
-- ⏳ BACKLOG (P1): Re-tier old historical customers by lifetime_spend (awaiting user's tier names/thresholds); in-app scheduled object-storage backups; Gap Analysis Phase 2/3 (location-wise DLT SMS config, OTP audit search by OTP string, Reward Brands/GVs).
+- ✅ DONE (P1, 2026-06-23): Re-tier old (pre-POS) customers — "Update Old Data · Re-tier Customers" tool in Loyalty Rules page. Re-derives tier from configured `tier_rules` (config-driven names) by lifetime_spend, ONLY for customers `created_at < cutoff` (default 2026-06-08). Endpoints `/loyalty/retier/{preview,apply,status}`, idempotent bulk update, background job + progress UI. Tested in preview. User must redeploy + run Apply on production.
+- ⏳ BACKLOG (P1): in-app scheduled object-storage backups; Gap Analysis Phase 2/3 (location-wise DLT SMS config, OTP audit search by OTP string, Reward Brands/GVs).
+- ⏳ POSSIBLE: customer schema has `first_visit_account`/`last_visit_account` fields not surfaced in CRM CSV (user settled on First/Last Visit DATE which already exist) — could add account columns if requested.
 - ⏳ BACKLOG (P1, refactor): split large route files `pos_ewards_routes.py` and `historic_routes.py`.
 - 🔎 OPEN (P2): Distinct Items count mismatch (shows 18k vs 22k+ actual) in historic_routes.py.
 - 🚧 BLOCKED (P1): Karix SMS intermittent ConnectTimeout — infra (rotating egress IPs), needs Emergent Support static IP/CIDR.

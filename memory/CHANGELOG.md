@@ -509,3 +509,15 @@ File: `backend/routes/live_monitor_routes.py`, `frontend/.../LiveMonitorPage.jsx
 - Removed dead `API_URL`/`toast` imports from the 4 migrated KPI/report pages.
 - TESTED: backend via curl (instant + async 800,061-row CRM export completed to Ready/107.5MB, downloads return valid CSV); frontend via testing agent iteration_33 → 10/10 scenarios PASS, no bugs.
 - NOTE: fixes live in PREVIEW — user must REDEPLOY to push to production.
+
+## 2026-06-23 (later) — Re-tier old (pre-POS) customers from configured tier ranges
+- NEW FEATURE (P1, was backlogged): "Update Old Data · Re-tier Customers" section added to the Loyalty Rules page (`_retier_section.jsx` + wired into `LoyaltyConfigurator.jsx`).
+- Problem: ~240k pre-POS historical customers carried stale "dummy" tiers (Gold/Platinum despite ~₹3,400 avg billing). New POS customers (created >= 2026-06-08) are correct and must not be touched.
+- Backend (`loyalty_routes.py`): 3 new endpoints —
+  - `POST /loyalty/retier/preview` {cutoff_date} → before→after tier distribution + changed count (single $switch aggregation, read-only).
+  - `POST /loyalty/retier/apply` {cutoff_date} → background job, idempotent bulk `update_many` per tier band (uses ix_cust_created/ix_cust_lifetime_spend/ix_cust_tier), progress tracked in `retier_jobs`.
+  - `GET /loyalty/retier/status` → latest job progress (status/updated/total/per_tier).
+- Logic is fully CONFIG-DRIVEN: tiers + DISPLAY NAMES read live from `loyalty_config.tier_rules` (mirrors `historic_routes._derive_tier` — highest band whose min_lifetime_spend is reached). So on production it uses the brand's custom tier names (Kazo Insider, Kazo Trendsetter, etc.) automatically. Zero/no billing → lowest configured tier.
+- Scope: ONLY `created_at < cutoff` (default 2026-06-08, configurable in UI). POS customers untouched.
+- TESTED in preview (curl + screenshot): preview=239,790 changed (798,459 old custs), apply completed (239,092→silver, 698→gold), re-preview=0 changed (idempotent), POS custs (>=2026-06-08) confirmed untouched, UI renders with progress + before/after tables.
+- NOTE: live in PREVIEW. User must REDEPLOY, then on production open Loyalty Rules → Re-tier Customers → Preview → Apply.

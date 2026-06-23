@@ -1,11 +1,15 @@
 """Loyalty configurator — earn engine, redeem engine, tiers, multipliers, festival boosters."""
+import asyncio
+import uuid
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from database import loyalty_config_col, customers_col
+from database import loyalty_config_col, customers_col, db
 from auth import get_current_user, require_roles, log_audit, MANAGEMENT_ROLES
 from models import LoyaltyConfig, TierRule  # noqa: F401  (kept for downstream imports)
+
+retier_jobs_col = db["retier_jobs"]
 
 router = APIRouter(prefix="/loyalty", tags=["loyalty"])
 
@@ -355,6 +359,148 @@ async def tier_stats(user: dict = Depends(get_current_user)):
         }
         for r in rows
     ]
+
+
+# ============================================================
+# Re-tier old (pre-POS) customers from configured tier ranges
+# ------------------------------------------------------------
+# Old historical customers (imported before the POS integration went live)
+# still carry stale "dummy" tiers that don't reflect their actual billing.
+# These endpoints re-derive each such customer's tier STRICTLY from the
+# CONFIGURED tier_rules (display names included) using their lifetime_spend
+# ("Total Billing"). New POS customers (created on/after the cutoff) are
+# never touched. Idempotent + scale-safe (bulk update_many per tier band).
+# ============================================================
+DEFAULT_RETIER_CUTOFF = "2026-06-08"
+
+
+def _active_sorted_tiers(cfg: dict) -> List[dict]:
+    tiers = [t for t in (cfg.get("tier_rules") or []) if t.get("is_active", True)]
+    return sorted(tiers, key=lambda t: float(t.get("min_lifetime_spend") or 0))
+
+
+def _proposed_tier_switch(sorted_tiers: List[dict]) -> dict:
+    """$switch expr → the configured tier SLUG a customer belongs in, by lifetime_spend
+    (highest band whose min is reached). Mirrors historic_routes._derive_tier."""
+    spend = {"$ifNull": ["$lifetime_spend", 0]}
+    branches = [
+        {"case": {"$gte": [spend, float(t.get("min_lifetime_spend") or 0)]}, "then": t.get("tier")}
+        for t in reversed(sorted_tiers)
+    ]
+    return {"$switch": {"branches": branches, "default": sorted_tiers[0].get("tier")}}
+
+
+@router.post("/retier/preview")
+async def retier_preview(payload: dict, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    cutoff = (payload or {}).get("cutoff_date") or DEFAULT_RETIER_CUTOFF
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "tier_rules": 1}) or {}
+    sorted_tiers = _active_sorted_tiers(cfg)
+    if not sorted_tiers:
+        raise HTTPException(400, "No active tiers are configured")
+    name_map = {t["tier"]: (t.get("name") or t["tier"]) for t in sorted_tiers}
+
+    pipeline = [
+        {"$match": {"created_at": {"$lt": cutoff}}},
+        {"$set": {"__proposed": _proposed_tier_switch(sorted_tiers)}},
+        {"$group": {"_id": {"old": "$tier", "new": "$__proposed"}, "count": {"$sum": 1}}},
+    ]
+    pairs = await customers_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=120000).to_list(5000)
+
+    total = changed = 0
+    cur: Dict[str, int] = {}
+    prop: Dict[str, int] = {}
+    for p in pairs:
+        old = p["_id"].get("old")
+        new = p["_id"].get("new")
+        c = p["count"]
+        total += c
+        cur[old] = cur.get(old, 0) + c
+        prop[new] = prop.get(new, 0) + c
+        if old != new:
+            changed += c
+
+    def fmt(d: Dict[str, int]) -> List[dict]:
+        return [{"tier": k, "name": name_map.get(k, k or "—"), "count": v}
+                for k, v in sorted(d.items(), key=lambda kv: -kv[1])]
+
+    return {
+        "cutoff_date": cutoff,
+        "total_old_customers": total,
+        "changed": changed,
+        "unchanged": total - changed,
+        "current": fmt(cur),
+        "proposed": fmt(prop),
+        "configured_tiers": [
+            {"tier": t["tier"], "name": t.get("name") or t["tier"],
+             "min_lifetime_spend": t.get("min_lifetime_spend") or 0,
+             "max_lifetime_spend": t.get("max_lifetime_spend")}
+            for t in sorted_tiers
+        ],
+    }
+
+
+async def _run_retier(job_id: str, cutoff: str, sorted_tiers: List[dict]) -> None:
+    try:
+        total_updated = 0
+        per_tier: Dict[str, int] = {}
+        for i, t in enumerate(sorted_tiers):
+            slug = t["tier"]
+            lo = float(t.get("min_lifetime_spend") or 0)
+            hi = float(sorted_tiers[i + 1].get("min_lifetime_spend") or 0) if i + 1 < len(sorted_tiers) else None
+            base = {"created_at": {"$lt": cutoff}, "tier": {"$ne": slug}}
+            if i == 0:
+                # Lowest band also captures null / missing / negative spend.
+                spend_clause = {"$lt": hi} if hi is not None else {"$exists": True}
+                flt = {**base, "$or": [
+                    {"lifetime_spend": spend_clause},
+                    {"lifetime_spend": None},
+                    {"lifetime_spend": {"$exists": False}},
+                ]}
+            else:
+                cond: Dict[str, float] = {"$gte": lo}
+                if hi is not None:
+                    cond["$lt"] = hi
+                flt = {**base, "lifetime_spend": cond}
+            res = await customers_col.update_many(flt, {"$set": {"tier": slug, "tier_updated_at": _now_iso()}})
+            total_updated += res.modified_count
+            per_tier[slug] = res.modified_count
+            await retier_jobs_col.update_one({"id": job_id}, {"$set": {
+                "updated": total_updated, "per_tier": per_tier, "current_tier": slug}})
+        await retier_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "done", "updated": total_updated, "per_tier": per_tier,
+            "current_tier": None, "finished_at": _now_iso()}})
+    except Exception as e:  # noqa: BLE001
+        await retier_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "failed", "error": str(e)[:300], "finished_at": _now_iso()}})
+
+
+@router.post("/retier/apply")
+async def retier_apply(payload: dict, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    cutoff = (payload or {}).get("cutoff_date") or DEFAULT_RETIER_CUTOFF
+    if await retier_jobs_col.find_one({"status": "running"}):
+        raise HTTPException(409, "A re-tier job is already running")
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "tier_rules": 1}) or {}
+    sorted_tiers = _active_sorted_tiers(cfg)
+    if not sorted_tiers:
+        raise HTTPException(400, "No active tiers are configured")
+    total = await customers_col.count_documents({"created_at": {"$lt": cutoff}})
+    job_id = str(uuid.uuid4())
+    await retier_jobs_col.insert_one({
+        "id": job_id, "status": "running", "cutoff_date": cutoff,
+        "total": total, "updated": 0, "per_tier": {}, "current_tier": None,
+        "started_by": user.get("name") or user.get("email"),
+        "started_at": _now_iso(), "finished_at": None, "error": None,
+    })
+    asyncio.create_task(_run_retier(job_id, cutoff, sorted_tiers))
+    await log_audit(user, "loyalty_retier", "loyalty", "retier",
+                    {"cutoff_date": cutoff, "total_customers": total})
+    return {"job_id": job_id, "status": "running", "total": total}
+
+
+@router.get("/retier/status")
+async def retier_status(user: dict = Depends(get_current_user)):
+    job = await retier_jobs_col.find_one({}, {"_id": 0}, sort=[("started_at", -1)])
+    return job or {"status": "none"}
 
 
 @router.post("/simulate")

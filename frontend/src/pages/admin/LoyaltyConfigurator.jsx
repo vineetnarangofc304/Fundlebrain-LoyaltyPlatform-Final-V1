@@ -16,6 +16,7 @@ import { PageHeader } from "./_shared";
 import { toast } from "sonner";
 import { fmtNum, fmtMoney2 } from "@/lib/format";
 import { Plus, Trash2, Power, Calculator, Sparkles, Coins, Calendar, Tag, Building2, ShieldCheck, RefreshCcw } from "lucide-react";
+import RetierSection from "./_retier_section";
 
 const TIER_TYPES = [
   { value: "entry", label: "Entry" },
@@ -202,6 +203,9 @@ export default function LoyaltyConfigurator() {
             Mult. = earn multiplier · Welcome / B&apos;day / Anniv. = one-shot bonuses · Coupon % = auto applied on every bill · Ship ≥ ₹ = free-shipping threshold · Expiry (d) = override of global point expiry · Visits = alternative tier-promotion path
           </p>
         </SectionCard>
+
+        {/* Update old data — re-tier pre-POS customers from configured ranges */}
+        <RetierSection />
 
         {/* Slab-wise tier-upgrade bonuses */}
         <SectionCard title="TIER UPGRADE BONUSES (SLAB-WISE)" subtitle="One-time bonus points awarded when a customer crosses UP into each tier (slab)" icon={Sparkles}>
