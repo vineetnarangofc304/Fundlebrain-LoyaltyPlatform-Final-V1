@@ -61,6 +61,7 @@ export default function LiveMonitorPage() {
   });
   const [statsWindow, setStatsWindow] = useState("today"); // default = Today (IST 00:00→23:59); the other relative windows remain in the dropdown
   const [drillRow, setDrillRow] = useState(null);
+  const [page, setPage] = useState(1);
   const lastFetchRef = useRef(null);
 
   const load = () => {
@@ -180,6 +181,9 @@ export default function LiveMonitorPage() {
     return () => clearInterval(t);
   }, [paused, filters, statsWindow]);
 
+  // Reset to first page only when the query (filters / window) changes — never on the 3s auto-refresh.
+  useEffect(() => { setPage(1); }, [filters, statsWindow]);
+
   const clearFilters = () => setFilters({ store_id: "", region: "", has_mobile: "all", payment_mode: "", source: "", min_amount: "", max_amount: "", start_date: "", end_date: "" });
   const activeFilterCount = useMemo(() =>
     Object.values(filters).filter((v) => v !== "" && v !== "all").length, [filters]);
@@ -200,6 +204,11 @@ export default function LiveMonitorPage() {
   const windowEyebrow = (filters.start_date || filters.end_date)
     ? `${filters.start_date || "…"} → ${filters.end_date || "…"}`
     : statsWindow === "today" ? "TODAY (IST)" : `LAST ${statsWindow} MIN`;
+
+  const PAGE_SIZE = 50;
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = rows.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
     <div data-testid="live-monitor-page">
@@ -352,7 +361,7 @@ export default function LiveMonitorPage() {
               <tbody>
                 {rows.length === 0 ? (
                   <tr><td colSpan={15} className="py-10 text-center text-neutral-500 text-sm">Waiting for live bills…</td></tr>
-                ) : rows.map((r) => {
+                ) : pageRows.map((r) => {
                   const rk = ROW_STYLES[rowKind(r)];
                   return (
                   <tr key={r.id} onClick={() => setDrillRow(r)} className={`cursor-pointer ${rk.cls}`}
@@ -423,6 +432,20 @@ export default function LiveMonitorPage() {
               </tbody>
             </table>
           </div>
+          {rows.length > PAGE_SIZE && (
+            <div className="flex items-center justify-between mt-3 text-xs" data-testid="lm-pagination">
+              <span className="text-neutral-500">
+                Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, rows.length)} of {rows.length} bills
+              </span>
+              <div className="flex items-center gap-2">
+                <button className="k-btn k-btn-sm k-btn-outline" disabled={safePage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))} data-testid="lm-prev-page">Prev</button>
+                <span className="font-mono">Page {safePage} / {totalPages}</span>
+                <button className="k-btn k-btn-sm k-btn-outline" disabled={safePage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))} data-testid="lm-next-page">Next</button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
