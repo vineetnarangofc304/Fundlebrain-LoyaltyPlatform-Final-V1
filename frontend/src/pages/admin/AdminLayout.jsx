@@ -5,10 +5,12 @@ import {
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
   Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound,
   Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter, Cake, ClipboardCheck,
-  PanelLeftClose, PanelLeftOpen, Smartphone
+  PanelLeftClose, PanelLeftOpen, Smartphone, DownloadCloud
 } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { BRAND } from "@/brand.config";
+import api from "@/lib/api";
+import { toast } from "sonner";
 import FundleBrainFAB from "./_fundle_brain_fab";
 
 const SECTIONS = [
@@ -103,6 +105,7 @@ const SECTIONS = [
   {
     label: "REPORTS",
     items: [
+      { to: "/admin/downloads", icon: DownloadCloud, label: "Downloads", testid: "nav-downloads", badge: "downloads" },
       { to: "/admin/legacy-reports", icon: FileBarChart, label: "Reports (Legacy)", testid: "nav-legacy-reports" },
       { to: "/admin/reports/shopper-bills", icon: FileBarChart, label: "Shopper Bill Report", testid: "nav-shopper-bills" },
       { to: "/admin/reports/store-kpi", icon: StoreIcon, label: "Store KPI Report", testid: "nav-store-kpi" },
@@ -133,6 +136,35 @@ export default function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Downloads Center: poll for newly-ready exports → toast + sidebar badge.
+  const [downloadsBadge, setDownloadsBadge] = useState(0);
+  const seenReadyRef = useRef(null);
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const r = await api.get("/exports");
+        const exps = r.data.exports || [];
+        if (seenReadyRef.current === null) {
+          seenReadyRef.current = new Set(exps.filter((e) => e.status === "ready").map((e) => e.id));
+          return;
+        }
+        for (const e of exps) {
+          if (e.status === "ready" && !seenReadyRef.current.has(e.id)) {
+            seenReadyRef.current.add(e.id);
+            toast.success(`Report ready: ${e.label}`, { description: "Open the Downloads section to download it." });
+            if (window.location.pathname !== "/admin/downloads") setDownloadsBadge((b) => b + 1);
+          }
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    const iv = setInterval(poll, 15000);
+    const onReq = () => setTimeout(poll, 1500);
+    window.addEventListener("kazo-export-requested", onReq);
+    return () => { clearInterval(iv); window.removeEventListener("kazo-export-requested", onReq); };
+  }, []);
+  useEffect(() => { if (location.pathname === "/admin/downloads") setDownloadsBadge(0); }, [location.pathname]);
 
   // Which section owns the current route? (longest matching item `to` wins)
   const sectionForPath = (pathname) => {
@@ -316,7 +348,10 @@ export default function AdminLayout() {
                     }
                   >
                     <n.icon className="w-3.5 h-3.5" />
-                    <span>{n.label}</span>
+                    <span className="flex-1">{n.label}</span>
+                    {n.badge === "downloads" && downloadsBadge > 0 && (
+                      <span className="ml-auto text-[10px] bg-amber-400 text-black rounded-full px-1.5 py-0.5 font-semibold leading-none" data-testid="downloads-badge">{downloadsBadge}</span>
+                    )}
                   </NavLink>
                 ))}
               </div>

@@ -446,19 +446,8 @@ async def crm_customers_export(
 
 
 # ── KPI Trend (Weekly / Monthly / Daily) ──────────────────────────────────────
-@router.get("/trend")
-async def kpi_trend(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    granularity: str = "month",
-    zone: Optional[str] = None,
-    city: Optional[str] = None,
-    store_class: Optional[str] = None,
-    store_id: Optional[str] = None,
-    user=Depends(get_current_user),
-):
+async def _compute_trend(start_date, end_date, granularity, zone, city, store_class, store_id):
     match = _store_match(start_date, end_date, zone, city, store_class, store_id)
-
     if granularity == "day":
         bucket = {"$substrCP": ["$bill_date", 0, 10]}
     elif granularity == "week":
@@ -485,7 +474,7 @@ async def kpi_trend(
         {"$limit": 500},
     ]
     raw = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(500)
-    points = [{
+    return [{
         "period": g.get("_id") or "—",
         "sales": round(g.get("sales", 0) or 0, 2),
         "discount": round(g.get("discount", 0) or 0, 2),
@@ -495,7 +484,53 @@ async def kpi_trend(
         "repeat": int(g.get("repeat", 0) or 0),
         "customers": len(g.get("customers", []) or []),
     } for g in raw if g.get("_id")]
+
+
+@router.get("/trend")
+async def kpi_trend(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    granularity: str = "month",
+    zone: Optional[str] = None,
+    city: Optional[str] = None,
+    store_class: Optional[str] = None,
+    store_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    points = await _compute_trend(start_date, end_date, granularity, zone, city, store_class, store_id)
     return {"granularity": granularity, "points": points}
+
+
+_TREND_COLS = [("period", "Period"), ("sales", "Sales"), ("discount", "Discount"),
+               ("bills", "Bills"), ("returns", "Returns"), ("new", "New"),
+               ("repeat", "Repeat"), ("customers", "Customers")]
+
+
+@export_router.get("/trend/export")
+async def kpi_trend_export(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    granularity: str = "month",
+    zone: Optional[str] = None,
+    city: Optional[str] = None,
+    store_class: Optional[str] = None,
+    store_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    points = await _compute_trend(start_date, end_date, granularity, zone, city, store_class, store_id)
+
+    def gen():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow([l for _, l in _TREND_COLS])
+        yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+        for p in points:
+            w.writerow([p.get(k, "") for k, _ in _TREND_COLS])
+            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+
+    fname = f"kpi_trend_{granularity}_{datetime.now(IST).strftime('%Y%m%d')}.csv"
+    return StreamingResponse(gen(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 # ── CRM summary (charts: tier / recency / top cities / liability) ─────────────

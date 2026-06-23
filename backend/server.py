@@ -51,6 +51,7 @@ from routes.support_desk_routes import router as support_desk_router
 from routes.legacy_reports_routes import router as legacy_reports_router
 from routes.shopper_report_routes import router as shopper_report_router, export_router as shopper_report_export_router
 from routes.reports_kpi_routes import router as kpi_reports_router, export_router as kpi_reports_export_router
+from routes.exports_routes import router as exports_router
 from routes.demo_routes import router as demo_router
 
 app = FastAPI(title="KAZO Fundle Platform", version="1.0.0")
@@ -110,6 +111,7 @@ api_router.include_router(shopper_report_router)
 api_router.include_router(shopper_report_export_router)
 api_router.include_router(kpi_reports_router)
 api_router.include_router(kpi_reports_export_router)
+api_router.include_router(exports_router)
 api_router.include_router(recon_router)
 api_router.include_router(demo_router)
 
@@ -443,6 +445,14 @@ async def startup():
     from auth import hash_password
     from datetime import datetime, timezone
     import uuid
+
+    # Best-effort init of object storage for the Downloads Center exports.
+    try:
+        from routes.exports_routes import _init_storage
+        await asyncio.to_thread(_init_storage)
+        logger.info("Object storage initialized for exports")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Object storage init deferred: %s", e)
 
     # Seed super admin if not exists
     super_admin = await users_col.find_one({"email": os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@fundle.io").lower()})
