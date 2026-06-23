@@ -373,6 +373,21 @@ async def tier_stats(user: dict = Depends(get_current_user)):
 # ============================================================
 DEFAULT_RETIER_CUTOFF = "2026-06-08"
 
+# Live POS-created customers are managed correctly by the earn engine — they are
+# EXCLUDED from re-tiering. Everything else (historic_upload, transaction_derived,
+# perf_seed, registered_account, auto_from_transactions, null) is "old / pre-POS".
+POS_SOURCES = ["pos_ewards", "pos_auto", "pos_auto_customer_key", "pos_test_seed"]
+
+
+def _old_customer_filter(mode: str, cutoff: str) -> dict:
+    """Identify OLD (pre-POS) customers. Default mode = by SOURCE (reliable, because
+    `created_at` is the import timestamp, NOT the customer's join date — a master-CSV
+    uploaded today gets today's created_at). Optional 'date' mode keeps the created_at
+    cutoff for brands whose created_at really is the join date."""
+    if mode == "date" and cutoff:
+        return {"created_at": {"$lt": cutoff}}
+    return {"source": {"$nin": POS_SOURCES}}
+
 
 def _active_sorted_tiers(cfg: dict) -> List[dict]:
     tiers = [t for t in (cfg.get("tier_rules") or []) if t.get("is_active", True)]
@@ -392,6 +407,7 @@ def _proposed_tier_switch(sorted_tiers: List[dict]) -> dict:
 
 @router.post("/retier/preview")
 async def retier_preview(payload: dict, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    mode = (payload or {}).get("mode") or "source"
     cutoff = (payload or {}).get("cutoff_date") or DEFAULT_RETIER_CUTOFF
     cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "tier_rules": 1}) or {}
     sorted_tiers = _active_sorted_tiers(cfg)
@@ -399,8 +415,15 @@ async def retier_preview(payload: dict, user: dict = Depends(require_roles(*MANA
         raise HTTPException(400, "No active tiers are configured")
     name_map = {t["tier"]: (t.get("name") or t["tier"]) for t in sorted_tiers}
 
+    # Source breakdown so the user can see exactly which customers count as "old".
+    src_rows = await customers_col.aggregate(
+        [{"$group": {"_id": "$source", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}],
+        maxTimeMS=60000).to_list(100)
+    source_breakdown = [{"source": r["_id"] or "—", "count": r["count"],
+                         "is_pos": r["_id"] in POS_SOURCES} for r in src_rows]
+
     pipeline = [
-        {"$match": {"created_at": {"$lt": cutoff}}},
+        {"$match": _old_customer_filter(mode, cutoff)},
         {"$set": {"__proposed": _proposed_tier_switch(sorted_tiers)}},
         {"$group": {"_id": {"old": "$tier", "new": "$__proposed"}, "count": {"$sum": 1}}},
     ]
@@ -424,7 +447,9 @@ async def retier_preview(payload: dict, user: dict = Depends(require_roles(*MANA
                 for k, v in sorted(d.items(), key=lambda kv: -kv[1])]
 
     return {
+        "mode": mode,
         "cutoff_date": cutoff,
+        "source_breakdown": source_breakdown,
         "total_old_customers": total,
         "changed": changed,
         "unchanged": total - changed,
@@ -439,36 +464,58 @@ async def retier_preview(payload: dict, user: dict = Depends(require_roles(*MANA
     }
 
 
-async def _run_retier(job_id: str, cutoff: str, sorted_tiers: List[dict]) -> None:
+RETIER_BATCH = 1000
+
+
+def _derive_slug(spend, bands) -> str:
+    """bands = [(slug, min_spend), ...] sorted ascending. Highest band whose min is reached."""
+    s = spend or 0
+    chosen = bands[0][0]
+    for slug, lo in bands:
+        if s >= lo:
+            chosen = slug
+    return chosen
+
+
+async def _run_retier(job_id: str, old_filter: dict, sorted_tiers: List[dict]) -> None:
+    """Single paginated pass over OLD customers (batches of RETIER_BATCH, ordered by _id).
+    Each batch is a short, bounded query + bulk_write of ONLY the customers whose tier
+    differs — so no individual DB operation runs long enough to hit Atlas socket timeouts."""
     try:
+        from pymongo import UpdateOne
+        bands = [(t["tier"], float(t.get("min_lifetime_spend") or 0)) for t in sorted_tiers]
         total_updated = 0
+        processed = 0
         per_tier: Dict[str, int] = {}
-        for i, t in enumerate(sorted_tiers):
-            slug = t["tier"]
-            lo = float(t.get("min_lifetime_spend") or 0)
-            hi = float(sorted_tiers[i + 1].get("min_lifetime_spend") or 0) if i + 1 < len(sorted_tiers) else None
-            base = {"created_at": {"$lt": cutoff}, "tier": {"$ne": slug}}
-            if i == 0:
-                # Lowest band also captures null / missing / negative spend.
-                spend_clause = {"$lt": hi} if hi is not None else {"$exists": True}
-                flt = {**base, "$or": [
-                    {"lifetime_spend": spend_clause},
-                    {"lifetime_spend": None},
-                    {"lifetime_spend": {"$exists": False}},
-                ]}
-            else:
-                cond: Dict[str, float] = {"$gte": lo}
-                if hi is not None:
-                    cond["$lt"] = hi
-                flt = {**base, "lifetime_spend": cond}
-            res = await customers_col.update_many(flt, {"$set": {"tier": slug, "tier_updated_at": _now_iso()}})
-            total_updated += res.modified_count
-            per_tier[slug] = res.modified_count
+        last_id = None
+        while True:
+            q = dict(old_filter)
+            if last_id is not None:
+                q["_id"] = {"$gt": last_id}
+            docs = await customers_col.find(
+                q, {"_id": 1, "tier": 1, "lifetime_spend": 1}
+            ).sort("_id", 1).limit(RETIER_BATCH).max_time_ms(45000).to_list(RETIER_BATCH)
+            if not docs:
+                break
+            ops = []
+            for d in docs:
+                correct = _derive_slug(d.get("lifetime_spend"), bands)
+                if d.get("tier") != correct:
+                    ops.append(UpdateOne({"_id": d["_id"]},
+                                         {"$set": {"tier": correct, "tier_updated_at": _now_iso()}}))
+                    per_tier[correct] = per_tier.get(correct, 0) + 1
+            if ops:
+                res = await customers_col.bulk_write(ops, ordered=False)
+                total_updated += res.modified_count
+            processed += len(docs)
+            last_id = docs[-1]["_id"]
             await retier_jobs_col.update_one({"id": job_id}, {"$set": {
-                "updated": total_updated, "per_tier": per_tier, "current_tier": slug}})
+                "updated": total_updated, "processed": processed, "per_tier": per_tier}})
+            if len(docs) < RETIER_BATCH:
+                break
         await retier_jobs_col.update_one({"id": job_id}, {"$set": {
-            "status": "done", "updated": total_updated, "per_tier": per_tier,
-            "current_tier": None, "finished_at": _now_iso()}})
+            "status": "done", "updated": total_updated, "processed": processed,
+            "per_tier": per_tier, "current_tier": None, "finished_at": _now_iso()}})
     except Exception as e:  # noqa: BLE001
         await retier_jobs_col.update_one({"id": job_id}, {"$set": {
             "status": "failed", "error": str(e)[:300], "finished_at": _now_iso()}})
@@ -476,6 +523,7 @@ async def _run_retier(job_id: str, cutoff: str, sorted_tiers: List[dict]) -> Non
 
 @router.post("/retier/apply")
 async def retier_apply(payload: dict, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    mode = (payload or {}).get("mode") or "source"
     cutoff = (payload or {}).get("cutoff_date") or DEFAULT_RETIER_CUTOFF
     if await retier_jobs_col.find_one({"status": "running"}):
         raise HTTPException(409, "A re-tier job is already running")
@@ -483,17 +531,21 @@ async def retier_apply(payload: dict, user: dict = Depends(require_roles(*MANAGE
     sorted_tiers = _active_sorted_tiers(cfg)
     if not sorted_tiers:
         raise HTTPException(400, "No active tiers are configured")
-    total = await customers_col.count_documents({"created_at": {"$lt": cutoff}})
+    old_filter = _old_customer_filter(mode, cutoff)
+    try:
+        total = await customers_col.count_documents(old_filter, maxTimeMS=15000)
+    except Exception:  # noqa: BLE001 — huge collection counts can be slow; fall back to estimate
+        total = await customers_col.estimated_document_count()
     job_id = str(uuid.uuid4())
     await retier_jobs_col.insert_one({
-        "id": job_id, "status": "running", "cutoff_date": cutoff,
-        "total": total, "updated": 0, "per_tier": {}, "current_tier": None,
+        "id": job_id, "status": "running", "mode": mode, "cutoff_date": cutoff,
+        "total": total, "updated": 0, "processed": 0, "per_tier": {}, "current_tier": None,
         "started_by": user.get("name") or user.get("email"),
         "started_at": _now_iso(), "finished_at": None, "error": None,
     })
-    asyncio.create_task(_run_retier(job_id, cutoff, sorted_tiers))
+    asyncio.create_task(_run_retier(job_id, old_filter, sorted_tiers))
     await log_audit(user, "loyalty_retier", "loyalty", "retier",
-                    {"cutoff_date": cutoff, "total_customers": total})
+                    {"mode": mode, "cutoff_date": cutoff, "total_customers": total})
     return {"job_id": job_id, "status": "running", "total": total}
 
 

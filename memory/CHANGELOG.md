@@ -521,3 +521,21 @@ File: `backend/routes/live_monitor_routes.py`, `frontend/.../LiveMonitorPage.jsx
 - Scope: ONLY `created_at < cutoff` (default 2026-06-08, configurable in UI). POS customers untouched.
 - TESTED in preview (curl + screenshot): preview=239,790 changed (798,459 old custs), apply completed (239,092→silver, 698→gold), re-preview=0 changed (idempotent), POS custs (>=2026-06-08) confirmed untouched, UI renders with progress + before/after tables.
 - NOTE: live in PREVIEW. User must REDEPLOY, then on production open Loyalty Rules → Re-tier Customers → Preview → Apply.
+
+## 2026-06-23 (fix) — Re-tier matched 0 on production → switched to source-based identification
+- BUG: On production the re-tier matched 0 customers. Root cause: imported customers' `created_at` is the IMPORT timestamp (set via datetime.now() in historic_routes), NOT their join date — so a master-CSV uploaded after the cutoff made every old customer's created_at > cutoff, excluding them all from the `created_at < cutoff` filter.
+- FIX (`loyalty_routes.py` + `_retier_section.jsx`): added a `mode` to /loyalty/retier/{preview,apply}.
+  - mode="source" (NEW DEFAULT, recommended): old = `source $nin [pos_ewards, pos_auto, pos_auto_customer_key, pos_test_seed]`. Reliable regardless of import date; excludes only live POS customers.
+  - mode="date" (kept as fallback): old = created_at < cutoff.
+  - preview now returns a `source_breakdown` (count per source, is_pos flag) so the user can SEE exactly which customers are included/excluded.
+- UI: radio toggle (Historical-not-from-POS vs Created-before-date), date input shown only in date mode, source-breakdown chips (POS sources struck-through), note clarifies "no points awarded — only tier label changes".
+- TESTED in preview: source-mode preview classified sources correctly (pos_ewards/pos_test_seed excluded), caught 5 deliberately-corrupted historic customers + ~487 non-POS customers the date filter had missed, applied (492 updated), re-preview = 0 (idempotent). Frontend compiles + renders.
+- ACTION: user must REDEPLOY, then on production: Loyalty Rules → Re-tier Customers → keep "Historical (recommended)" → Preview (verify source breakdown) → Apply. If the production POS source name differs from "pos_ewards", the breakdown will reveal it and the exclusion list can be adjusted.
+
+## 2026-06-23 (fix 2) — Re-tier Atlas timeout → batched single-pass job
+- BUG (production): "Last run failed: ...mongodb.net:27017: The read operation timed out". The single bulk update_many over hundreds of thousands of Atlas docs exceeded the socket read timeout.
+- FIX (`loyalty_routes._run_retier`): rewrote as a single paginated pass — batches of 1000 ordered by _id (find {_id:$gt:last} + projection, max_time_ms 45s), derive correct tier in Python, bulk_write ONLY the diffs (UpdateOne by _id). No single DB op runs long → no socket timeout. Reports processed/total + updated live. apply count_documents now has maxTimeMS=15000 fallback to estimated_document_count.
+- Frontend (`_retier_section.jsx`): progress bar now uses processed/total ("X scanned · Y re-tiered · Z%"). Rewrote file fully (prior parallel same-file edits had raced/corrupted it).
+- TESTED in preview: scanned all 800,053 old customers, updated exactly the 10 corrupted records, completed fast; UI renders. 
+- ACTION: user must REDEPLOY, then re-run Apply (source mode) on production — it will now complete with a live progress bar.
+- INTERNAL LESSON: never issue multiple parallel search_replace calls on the SAME file (they race and corrupt/revert it). Edit one file sequentially.
