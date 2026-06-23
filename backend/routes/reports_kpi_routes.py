@@ -36,7 +36,7 @@ router = APIRouter(prefix="/kpi-reports", tags=["kpi-reports"],
                    dependencies=[Depends(db_deadline)])
 export_router = APIRouter(prefix="/kpi-reports", tags=["kpi-reports"])
 
-EXPORT_MAX_ROWS = 300_000
+EXPORT_MAX_ROWS = 2_000_000
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -366,6 +366,8 @@ def _crm_filter(q, city, state, tier, card_validity, recency,
 
 
 _CRM_PROJECT = {"_id": 0, "password_hash": 0}
+# Minimal projection (only report columns) — keeps streamed export rows small.
+_CRM_FIELDS = {"_id": 0, **{k: 1 for k, _ in CRM_COLUMNS}}
 
 
 @router.get("/crm-customers")
@@ -429,8 +431,8 @@ async def crm_customers_export(
         w.writerow([l for _, l in CRM_COLUMNS])
         yield buf.getvalue(); buf.seek(0); buf.truncate(0)
         sent = 0
-        with pymongo.timeout(300):
-            cur = customers_col.find(flt, _CRM_PROJECT).sort(sf, direction)
+        with pymongo.timeout(900):
+            cur = customers_col.find(flt, _CRM_FIELDS).sort(sf, direction).allow_disk_use(True)
             async for c in cur:
                 w.writerow([c.get(k, "") for k, _ in CRM_COLUMNS])
                 yield buf.getvalue(); buf.seek(0); buf.truncate(0)

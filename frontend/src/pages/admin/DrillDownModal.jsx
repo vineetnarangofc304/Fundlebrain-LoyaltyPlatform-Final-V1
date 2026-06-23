@@ -59,17 +59,15 @@ export default function DrillDownModal({
   const exportCSV = async () => {
     setDownloading(true);
     try {
-      const res = await api.post(
-        "/dashboard/drilldown/csv",
-        {
+      const res = await api.get("/dashboard/drilldown/csv", {
+        params: {
           collection,
-          filter,
-          sort,
-          columns: columns.map((c) => c.key),
-          page_size: pageSize,
+          filter: JSON.stringify(filter || {}),
+          sort: sort ? JSON.stringify(sort) : undefined,
+          columns: JSON.stringify(columns.map((c) => c.key)),
         },
-        { responseType: "blob" }
-      );
+        responseType: "blob",
+      });
       const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
       const a = document.createElement("a");
       a.href = url;

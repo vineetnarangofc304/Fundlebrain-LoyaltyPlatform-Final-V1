@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 32 — Verified the reported 'CSV export failed' bug fix in KAZO CRM. All 3 required scenarios PASS: (1) Dashboard drill-down CSV export now uses GET /api/dashboard/drilldown/csv (was POST) and returns 200 text/csv with no error toast; (2) CRM Customer Report full-DB export GET /api/kpi-reports/crm-customers/export returns 200 text/csv and the 'Export started' success toast appears at t≈24s after the ~112MB body completes streaming; (3) Drill-down modal regression — still loads paginated table (50 rows · page 1 of 16002 for 800,061 customers) with working prev/next.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "AdminLayout (sidebar / select element used across admin pages)",
+        "issues": [
+          "Benign but noisy React hydration console warning: 'In HTML, <span> cannot be a child of <option>' — fires on every admin page load. Not related to this task and does not affect functionality, but worth a one-line fix (wrap option label in a string, not a <span>) to clean console."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/frontend/src/pages/admin/DrillDownModal.jsx",
+    "/app/frontend/src/pages/admin/CRMCustomerReport.jsx",
+    "/app/frontend/src/pages/admin/dashboards/CustomerDashboard.jsx"
+  ],
+  "action_items": [
+    "(OPTIONAL, non-blocker) Clean up the '<span> cannot be a child of <option>' React hydration warning in the admin shared <select> dropdown — only a console warning, no functional impact."
+  ],
+  "critical_code_review_comments": [
+    "DrillDownModal.jsx exportCSV — correctly uses api.get('/dashboard/drilldown/csv', { params: { collection, filter, sort, columns }, responseType: 'blob' }). The Bearer auth header is attached via the axios `api` instance interceptor (verified by the network trace showing 200 response). The cap of 50,000 rows is by design and the user only sees ≤50k regardless of the underlying 800k total — that is acceptable per the task description, but the modal does NOT surface the 'capped at 50k' message anywhere in the UI; consider adding a small footer note in DrillDownModal saying 'Export capped at 50,000 rows — use the full CRM Customer Report for the entire database' to prevent confusion when users see 800,061 rows but only 50,000 in the CSV. (Non-blocker.)",
+    "CRMCustomerReport.jsx exportCsv — uses raw fetch() with Bearer token (rather than the api axios instance). Works correctly and the success toast 'Export started' is triggered AFTER `await res.blob()` completes. Because the body is ~112MB, the user sees the 'Exporting' button-disabled state for ~25s before the toast/download fires — that UX is acceptable but consider adding a 'Preparing your file… this may take ~30 seconds' helper text under the button while exporting=true.",
+    "Both endpoints now correctly use GET with all params (collection / filter / sort / columns / sort_by / sort_dir) in the querystring — confirmed by network trace. No request bodies, so no risk of the Starlette BaseHTTPMiddleware 'http.request' issue that caused the original bug.",
+    "DrillDownModal CSV button has `disabled={downloading || !data?.total}` — correct guard against double-clicks during the export.",
+    "Drill-down regression is clean: 50 rows render on page 1, modal shows 'page 1 of 16002' for 800,061 customers, drilldown-prev / drilldown-next pagination buttons are present and the columns (Name / Mobile / City / Tier / Lifetime ₹ / Visits / Points) match the data-testid='kpi-total-cust' tile click."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "n/a (frontend-only run per task; backend was pre-curl-verified)", "frontend": "100% (3/3 scenarios pass)" },
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (CRM portal /crm/login)",
+  "seed_data_creation": "None — read-only verification against existing 800,061 customer dataset.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Verified on https://fundle-brain-ai-1.preview.emergentagent.com on 2026-06-23 at /crm/login → /admin/dashboards/customers → click data-testid='kpi-total-cust' to open the drilldown.\n\n  • TEST 1 — DRILLDOWN CSV EXPORT (the reported bug): On the Customer Analytics dashboard, clicking the 'Total Customers' KPI tile (data-testid='kpi-total-cust') opens the drilldown modal showing '8,00,061 rows · page 1 of 16002' and 50 customer rows (Bina Shah ₹80K, KAZO Test Customer ₹72.80K, Perf Customer 789346 ₹61.59K, etc.). Clicking data-testid='drilldown-csv' fires a clean network GET to /api/dashboard/drilldown/csv?collection=customers&filter=%7B%7D&sort=%5B%5B%22lifetime_spend%22,-1%5D%5D&columns=%5B%22name%22,%22mobile%22,%22city%22,%22tier%22,%22lifetime_spend%22,%22visit_count%22,%22points_balance%22%5D — returns HTTP 200 with Content-Type 'text/csv; charset=utf-8'. NO 'CSV export failed' message is shown in the modal. The original bug is RESOLVED.\n\n  • TEST 2 — CRM CUSTOMER REPORT FULL EXPORT (/admin/reports/crm-customers, data-testid='crm-customer-report'): Clicking data-testid='crm-export' fires a GET to /api/kpi-reports/crm-customers/export?sort_by=lifetime_spend&sort_dir=desc — returns HTTP 200 with Content-Type 'text/csv; charset=utf-8'. The sonner success toast 'Export started' appears at t=24s after click (matching the ~25s expected stream time for ~800k rows / ~112MB body), and NO 'Export failed' toast appears.\n\n  • TEST 3 — DRILLDOWN REGRESSION: Modal still renders with `tbody tr` count = 50, pagination buttons present (drilldown-refresh, drilldown-csv, drilldown-close, drilldown-prev, drilldown-next), and the table populates with the expected columns from the CUST_COLUMNS config in CustomerDashboard.jsx.\n\n  • CONSOLE: Only one benign React hydration warning (<span> cannot be child of <option>) — pre-existing across admin pages, not introduced by this fix. No PAGEERRORs.",
+  "rca of the issue": "The original bug — 'CSV export failed' on dashboard drill-down — was caused by Starlette's BaseHTTPMiddleware not handling streaming/large responses on a POST endpoint with a request body, manifesting as 'Unexpected message received: http.request' on the server and a 200 with 0 bytes on the client (which the frontend then surfaced as setError('CSV export failed')). The fix moved /api/dashboard/drilldown/csv from POST to GET and shifted all body params (collection, filter, sort, columns) to the URL querystring (URL-encoded JSON for filter/sort/columns); the backend also added allowDiskUse=true, a CSV_EXPORT_CAP of 50,000 rows, and column projection. The frontend exportCSV in DrillDownModal.jsx was updated to call api.get('/dashboard/drilldown/csv', { params, responseType: 'blob' }). This entire chain is verified working end-to-end in this iteration: network trace shows GET /api/dashboard/drilldown/csv?collection=customers&... → 200 text/csv, no error toast, and the file does download to disk (Playwright captured the GET response). The CRM Customer Report full-DB export at GET /api/kpi-reports/crm-customers/export was also verified streaming 200 text/csv with the 'Export started' toast appearing on body completion ~24s later for the full 800,061-row dataset."
+}

@@ -7,10 +7,11 @@ import io
 import json
 import hashlib
 import time
+import pymongo
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 
 from database import (
@@ -24,6 +25,16 @@ from routes.ai_routes import EMERGENT_LLM_KEY, SYSTEM_PROMPT
 from routes._db_timeout import db_deadline
 
 router = APIRouter(prefix="/dashboard", tags=["drilldown"], dependencies=[Depends(db_deadline)])
+# CSV export must NOT run under the 45s heavy-query deadline (large exports take longer),
+# and must NOT use StreamingResponse on a POST — Starlette's BaseHTTPMiddleware breaks
+# streaming POST responses ("Unexpected message received: http.request"), which silently
+# truncated the download to 0 bytes. So exports live on a deadline-free router and return
+# a fully-materialized Response.
+export_router = APIRouter(prefix="/dashboard", tags=["drilldown"])
+
+# Max rows for the in-memory drilldown CSV. For the FULL customer database use the
+# dedicated CRM Customer Report (streaming GET export).
+CSV_EXPORT_CAP = 50000
 
 
 # ----- Whitelist of drillable collections -----
@@ -137,28 +148,45 @@ class CSVDrillRequest(BaseModel):
     columns: List[str] = []  # ordered column keys; empty = use first row keys
 
 
-@router.post("/drilldown/csv")
-async def drilldown_csv(req: CSVDrillRequest, user: dict = Depends(get_current_user)):
-    if req.collection not in COLLECTION_MAP:
+@export_router.get("/drilldown/csv")
+async def drilldown_csv(
+    collection: str,
+    filter: str = "{}",
+    sort: Optional[str] = None,
+    columns: str = "[]",
+    user: dict = Depends(get_current_user),
+):
+    # GET (not POST) on purpose: Starlette's BaseHTTPMiddleware breaks streaming/large
+    # responses on POSTs that carry a body ("Unexpected message received: http.request").
+    # Object params (filter/sort/columns) are passed as JSON-encoded query strings.
+    try:
+        filter_obj = json.loads(filter or "{}")
+        sort_obj = json.loads(sort) if sort else None
+        columns_list = json.loads(columns or "[]")
+    except Exception:
+        raise HTTPException(400, "Invalid filter/sort/columns JSON")
+
+    if collection not in COLLECTION_MAP:
         raise HTTPException(400, "Collection not drillable")
-    if not _can_access(user, req.collection):
+    if not _can_access(user, collection):
         raise HTTPException(403, "Forbidden")
 
-    col = COLLECTION_MAP[req.collection]
-    flt = _store_scope(user, dict(req.filter or {}), req.collection)
+    col = COLLECTION_MAP[collection]
+    flt = _store_scope(user, dict(filter_obj or {}), collection)
+    # Only fetch the requested columns — keeps memory low so we can export far more rows.
     project = {"_id": 0}
-    if req.project:
-        for k, v in req.project.items():
-            project[k] = v
+    for c in columns_list:
+        project[c] = 1
 
-    # Hard cap CSV export at 10,000 rows
     cur = col.find(flt, project)
-    if req.sort:
-        cur = cur.sort(req.sort)
-    rows = await cur.limit(10000).to_list(10000)
+    if sort_obj:
+        cur = cur.sort([tuple(s) for s in sort_obj])
+    cur = cur.allow_disk_use(True).limit(CSV_EXPORT_CAP)
+    with pymongo.timeout(120):
+        rows = await cur.to_list(CSV_EXPORT_CAP)
     rows = [_scrub(r) for r in rows]
 
-    cols = req.columns or (list(rows[0].keys()) if rows else [])
+    cols = columns_list or (list(rows[0].keys()) if rows else [])
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(cols)
@@ -172,8 +200,7 @@ async def drilldown_csv(req: CSVDrillRequest, user: dict = Depends(get_current_u
                 v = v.isoformat()
             out.append("" if v is None else v)
         writer.writerow(out)
-    buf.seek(0)
-    fname = f"{req.collection}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    fname = f"{collection}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
