@@ -142,6 +142,12 @@ export default function DrillDownModal({
           {error && (
             <div className="text-sm text-red-600 mb-3" data-testid="drilldown-error">{error}</div>
           )}
+          {data && data.total > 50000 && (
+            <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-1.5 mb-3" data-testid="drilldown-cap-note">
+              CSV export is capped at 50,000 rows. To download the entire list, use{" "}
+              <span className="font-medium">Reports → CRM Customer Report</span>.
+            </div>
+          )}
           {loading && !data && (
             <div className="text-sm text-neutral-500" data-testid="drilldown-loading">Loading…</div>
           )}

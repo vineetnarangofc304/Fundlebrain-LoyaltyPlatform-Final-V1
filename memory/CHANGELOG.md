@@ -5,6 +5,25 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-23 — Fix: "CSV export failed" on customer drill-down (iter 32, 3/3 PASS)
+
+⚠️ Redeploy required for production.
+- **Root cause:** `POST /api/dashboard/drilldown/csv` broke under Starlette's `BaseHTTPMiddleware`
+  — a streaming/large response on a POST that carries a body raises
+  `RuntimeError: Unexpected message received: http.request`, sending HTTP 200 then 0 bytes,
+  which the UI surfaced as "CSV export failed". (A plain `Response` on POST hit the same path.)
+- **Fix:** converted the drill-down CSV export to **GET** (`/api/dashboard/drilldown/csv`) with
+  JSON-encoded query params (collection/filter/sort/columns), on a deadline-free `export_router`,
+  with column projection + `allowDiskUse(True)` and a 50,000-row cap. Frontend `DrillDownModal.jsx`
+  now calls `api.get(..., {responseType:'blob'})`. Verified: GET 200 text/csv, 50k rows in ~0.5s.
+- **Full-DB export hardened:** CRM Customer Report export (`GET /api/kpi-reports/crm-customers/export`)
+  now uses `allowDiskUse(True)`, a minimal column projection, and cap raised to 2,000,000 — streamed
+  the full 800k-row base (~112MB) in ~25s. This is the tool for exporting the entire customer database.
+- Added a note in the drill-down modal (when total > 50k) pointing users to the CRM Customer Report
+  for the full list.
+
+---
+
 ## 2026-06-22 — Live Monitor default + 4 reports from client Excel/CSV formats (iter 31, frontend 6/6 PASS)
 
 ⚠️ Redeploy required for production. All verified (testing_agent iteration_31 frontend 100%; backend curl-verified).
