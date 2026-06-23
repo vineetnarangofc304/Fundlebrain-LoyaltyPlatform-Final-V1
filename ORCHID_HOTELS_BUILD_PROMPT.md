@@ -12,7 +12,7 @@
 
 **Step 1 — Pull the master template from the public GitHub repo:**
 ```
-GITHUB REPO (public):  <PASTE_GITHUB_REPO_URL_HERE>
+GITHUB REPO (public):  https://github.com/vineetnarangofc304/Fundlebrain-LoyaltyPlatform-Final-V1
 ```
 Clone/import this repo into the project. It is the complete, production-tested KAZO build:
 React + Tailwind + shadcn frontend, FastAPI + Motor/MongoDB backend, 40 API routers, all dashboards,
