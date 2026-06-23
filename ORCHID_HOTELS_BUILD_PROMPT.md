@@ -1,18 +1,46 @@
 # ORCHID HOTELS — Loyalty / CRM / Analytics Platform — FULL BUILD PROMPT (for a fresh Emergent project)
 
-> **How to use this file:** Open a brand-new Emergent project and paste this entire document
-> as the opening prompt. It is a faithful, complete replica spec of the existing KAZO “Fundle”
-> platform, re-branded and re-architected for **The Orchid Hotels** (eco-luxury hospitality
-> chain). The agent should build it phase-by-phase and test after each phase.
->
-> **The ONLY things that change vs. the original platform:**
+> **How to use this file:** Open a brand-new Emergent project and paste this entire document as the
+> opening prompt. This platform is a reusable **master template** — so the FASTEST, proven path
+> (same as we did for **Red Chief**) is to **CLONE THE PUBLIC GITHUB REPO** below and then apply ONLY
+> the two Orchid deltas. Do NOT rebuild from scratch unless the clone is unavailable. Sections §0–§14
+> are the reference spec of what the cloned codebase already contains (use them to verify after clone).
+
+---
+
+## A. PRIMARY PATH — CLONE FROM GITHUB, THEN APPLY ORCHID DELTAS (do this first)
+
+**Step 1 — Pull the master template from the public GitHub repo:**
+```
+GITHUB REPO (public):  <PASTE_GITHUB_REPO_URL_HERE>
+```
+Clone/import this repo into the project. It is the complete, production-tested KAZO build:
+React + Tailwind + shadcn frontend, FastAPI + Motor/MongoDB backend, 40 API routers, all dashboards,
+reports, loyalty engine, AI brain, comms, support desk, historic ingest, etc. After cloning:
+- Install deps (yarn for frontend, pip for backend), wire `.env` (MONGO_URL, DB_NAME, JWT_SECRET, etc.),
+  start services, confirm login + a couple of dashboards render. (Fresh DB = empty data, that's expected.)
+
+**Step 2 — Apply the Orchid REBRAND** (full checklist in §12; this is exactly the Red Chief rebrand flow):
+edit `frontend/src/brand.config.js` (name/strings/colours), `frontend/src/index.css` (colour fallbacks),
+`frontend/public/index.html` (title/meta), `backend/.env` (BRAND_NAME, admin emails, fresh JWT_SECRET),
+replace the logo asset, and relabel retail→hospitality terms (§0 table). Pull palette + copy + imagery
+from `orchidhotel.com` (or upload via the Public Site CMS after first login).
+
+**Step 3 — Apply the ONE architectural change: swap direct POS → Fundle Data Bridge (§7).**
+The cloned repo ingests via 14 eWards-style POS *push* endpoints. For Orchid, ADD the **Fundle Data
+Bridge** (`data_bridge_routes` + Data Bridge page) that **PULLS** guests + folios from the upstream
+**Fundle** system via an **API key**, with **points/tiers already PRE-COMPUTED** (do NOT recompute
+earning). Keep the legacy POS endpoints as an optional fallback or remove them (decision §15.5).
+
+> **The ONLY things that change vs. the cloned template:**
 > 1. **Brand** → Orchid Hotels (logo, colours, copy from orchidhotel.com; hospitality terminology).
-> 2. **Data ingestion** → instead of POS systems pushing bills directly, all customer + transaction
->    data is **PULLED from an upstream “Fundle” system via a Data Bridge (API key)**, and
->    **loyalty points arrive PRE-COMPUTED** (Fundle does the point math; this platform does NOT
->    recompute earning).
+> 2. **Data ingestion** → Fundle Data Bridge (pull + pre-computed points) instead of direct POS push.
 >
-> Everything else (modules, dashboards, reports, RBAC, AI brain, comms, scale guardrails) is the same.
+> Everything else (modules, dashboards, reports, RBAC, AI brain, comms, scale guardrails) stays as-is.
+
+> **Keeping in sync later (multi-brand):** when the master template improves, push it to GitHub and ask
+> this Orchid project's agent to *"pull the latest from `<repo>` and 3-way merge, preserving Orchid's
+> brand overrides (`brand.config.js`, `index.css`, `index.html`, logo) and the Fundle Data Bridge."*
 
 ---
 
@@ -445,7 +473,11 @@ pre-computed points/tiers → ingest them as authoritative (no recompute), same 
 
 ---
 
-## 13. BUILD PHASES (do in order; TEST after each before moving on)
+## 13. BUILD PHASES — FALLBACK ONLY (use just §A clone + §12 rebrand + §7 bridge in the normal case)
+
+> Only follow these phases if the GitHub clone (§A) is unavailable and you must rebuild from scratch.
+> In the normal Red Chief–style flow you do NOT build phase-by-phase — you clone, rebrand, and add the
+> Fundle Data Bridge. Do this in order; TEST after each before moving on:
 
 1. **Foundation:** env + Mongo connect + `BaseDocument` + startup indexes + JWT auth (3 portals) +
    seed super/brand admin. Test: login per portal, RBAC gate.
