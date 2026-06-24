@@ -117,6 +117,52 @@ api_router.include_router(demo_router)
 
 app.include_router(api_router)
 
+
+# ---------------------------------------------------------------------------
+# Global unhandled-exception handler.
+# Starlette's default 500 returns a PLAIN-TEXT body ("Internal Server Error"),
+# which a JSON client (e.g. the eWards .NET POS) cannot parse → it raises
+# "The data does not represent a valid JSON token." This handler guarantees a
+# JSON body on every unhandled error: for POS routes it returns the eWards
+# envelope (HTTP 200 + {status_code, response}) so the till shows a clean
+# message instead of crashing; for all other routes it returns {detail} JSON.
+# The real traceback is logged to both the server log and the API Monitor.
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    import traceback as _tb
+    tb = _tb.format_exc()
+    path = request.url.path
+    logging.getLogger("kazo-fundle").error("Unhandled error on %s %s: %s\n%s",
+                                            request.method, path, exc, tb)
+    is_pos = path.startswith("/api/pos")
+    if is_pos:
+        # Record in the API Monitor so admins can self-diagnose the real cause.
+        try:
+            from database import api_logs_col
+            await api_logs_col.insert_one({
+                "id": uuid.uuid4().hex,
+                "endpoint": path,
+                "method": request.method,
+                "status_code": 500,
+                "response_time_ms": 0,
+                "error_reason": f"unhandled_exception: {type(exc).__name__}: {exc}",
+                "traceback": tb[-4000:],
+                "source": "pos_ewards",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+        # eWards contract: HTTP 200 with the error surfaced inside the envelope.
+        return JSONResponse(
+            status_code=200,
+            content={"status_code": 500,
+                     "response": {"message": "Internal error while processing the request. "
+                                             "Please retry; if it persists contact Fundle support."}},
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
 # CORS — must allow specific origins (NOT '*') because frontend sends credentials.
 # Combine explicit env list with a permissive regex covering custom + emergent domains.
 _env_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip() and o.strip() != '*']

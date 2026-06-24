@@ -1,0 +1,33 @@
+{
+  "summary": "Verified the production bug fix for the eWards .NET POS popup 'The data does not represent a valid JSON token.' All 5 pytest cases pass against the external REACT_APP_BACKEND_URL. The forced-exception call to /api/pos/posAddPoint now returns HTTP 200 + Content-Type application/json + the eWards envelope {\"status_code\":500,\"response\":{\"message\":...}} instead of the legacy plain-text 'Internal Server Error'. Happy paths for posAddPoint and posCustomerCheck still return HTTP 200 with status_code 200 envelope. payment_mode list-of-strings hardening confirmed (no crash, status_code 200). After a forced exception, api_logs receives a document with error_reason starting 'unhandled_exception' and a non-empty 'traceback' for endpoint /api/pos/posAddPoint, so the API Monitor will surface the real root cause to admins.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration34_pos_json_envelope_test.py",
+    "/app/test_reports/pytest/iteration34_pos_json_envelope.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py global exception handler correctly differentiates /api/pos/* (returns HTTP 200 + eWards envelope) vs other routes (HTTP 500 + {detail}). Good defensive logging with traceback truncated to last 4000 chars.",
+    "api_logs insert is wrapped in try/except so a logging failure cannot mask the original error — good.",
+    "Consider also catching RequestValidationError on /api/pos/* explicitly so Pydantic 422 responses are reshaped into the same eWards envelope (current 422 default is JSON, so .NET POS won't crash, but the envelope shape would be more consistent for the till UI).",
+    "Minor: the 'message' returned to the POS is generic ('Internal error while processing the request...'). For internal staging it might be useful to expose a correlation id (e.g. the api_logs document id) so support can map the popup to the exact log entry without time-based searching."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration34_pos_json_envelope_test.py (new)"
+  ],
+  "success_rate": {"backend": "100% (5/5)", "frontend": "n/a (frontend skipped per request)"},
+  "test_credentials": "POS x-api-key=ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI, merchant_id=KAZO_FUNDLE, customer_key=K00055, mobile=9876500011",
+  "seed_data_creation": "None. Tests create posAddPoint transactions with unique bill numbers prefixed TEST34- to avoid duplicate-bill 400s. No cleanup performed (transactions live in real loyalty ledger; safe to keep for audit).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iteration34_pos_json_envelope_test.py is reusable as a regression suite. It loads REACT_APP_BACKEND_URL from /app/frontend/.env and MONGO_URL/DB_NAME from /app/backend/.env (strips surrounding quotes). The api_logs assertion connects to MongoDB directly (motor) and looks for the most recent doc with endpoint=/api/pos/posAddPoint and error_reason starting 'unhandled_exception'. If the api_logs collection name or schema changes, update _find() accordingly. Curl receipt verified: HTTP=200, CT=application/json, body={status_code:500,response:{message:...}}.",
+  "rca of the issue": "RCA: Starlette's default 500 path returns a text/plain body 'Internal Server Error'. The eWards .NET POS does response.parse_json() on every reply and threw 'The data does not represent a valid JSON token.' Reproduction: POST any /api/pos/* payload that triggers an unhandled exception (e.g. transaction sent as a string instead of an object). Mitigation/fix: @app.exception_handler(Exception) registered in server.py routes /api/pos/* errors to JSONResponse(200, {status_code:500, response:{message}}) and logs full traceback to api_logs. Verified end-to-end via pytest (5/5) and direct curl."
+}

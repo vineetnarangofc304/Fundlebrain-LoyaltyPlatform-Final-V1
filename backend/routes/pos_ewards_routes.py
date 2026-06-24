@@ -1352,7 +1352,13 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     payment_mode = "unknown"
     pm_list = txn.get("payment_mode")
     if isinstance(pm_list, list) and pm_list:
-        payment_mode = (pm_list[0] or {}).get("name") or "unknown"
+        first = pm_list[0]
+        if isinstance(first, dict):
+            payment_mode = first.get("name") or "unknown"
+        elif isinstance(first, str):
+            payment_mode = first or "unknown"
+    elif isinstance(pm_list, str) and pm_list.strip():
+        payment_mode = pm_list.strip()
 
     # --- VALID INDIAN MOBILE GATE (canonical) ---
     # Points/loyalty are granted ONLY to a VALID Indian mobile (10 digits starting 6-9).
