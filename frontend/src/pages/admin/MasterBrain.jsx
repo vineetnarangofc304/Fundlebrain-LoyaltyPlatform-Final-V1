@@ -53,6 +53,7 @@ export default function MasterBrain() {
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef(null);
   const bottomRef = useRef(null);
+  const inputRef = useRef(null);
 
   // undo
   const [undoTarget, setUndoTarget] = useState(null);
@@ -86,6 +87,14 @@ export default function MasterBrain() {
   }, [isMaster]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  // Auto-grow the multiline chat box (and shrink back after sending clears it)
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
 
   const loadLog = async () => {
     try { const r = await api.get("/master-brain/action-log"); setLog(r.data.actions || []); }
@@ -571,13 +580,25 @@ export default function MasterBrain() {
                     ))}
                   </div>
                 )}
-                <div className="flex gap-2 items-center">
+                <div className="flex gap-2 items-end">
                   <input ref={fileRef} type="file" multiple accept=".png,.jpg,.jpeg,.webp,.csv,.xlsx,.xls,.pdf,image/*" onChange={handleUpload} className="hidden" data-testid="mb-file-input" />
-                  <button className="k-btn k-btn-outline" title="Attach a screenshot or report (PNG/JPG · CSV/Excel/PDF)" onClick={() => fileRef.current?.click()} disabled={loading || uploading} data-testid="mb-attach-btn">
+                  <button className="k-btn k-btn-outline shrink-0" title="Attach a screenshot or report (PNG/JPG · CSV/Excel/PDF)" onClick={() => fileRef.current?.click()} disabled={loading || uploading} data-testid="mb-attach-btn">
                     {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}
                   </button>
-                  <input className="k-input flex-1" placeholder="Ask Master Brain to analyse — or take an action…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} disabled={loading} data-testid="mb-input" />
-                  <button className="k-btn kazo-bg-burgundy" onClick={() => send()} disabled={loading || (!input.trim() && attachments.length === 0)} data-testid="mb-send-btn"><Send className="w-4 h-4" /></button>
+                  <textarea
+                    ref={inputRef}
+                    rows={1}
+                    className="k-input flex-1 resize-none leading-snug max-h-40 overflow-y-auto"
+                    placeholder="Ask Master Brain to analyse — or take an action…  (Enter to send · Shift+Enter for a new line)"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+                    }}
+                    disabled={loading}
+                    data-testid="mb-input"
+                  />
+                  <button className="k-btn kazo-bg-burgundy shrink-0" onClick={() => send()} disabled={loading || (!input.trim() && attachments.length === 0)} data-testid="mb-send-btn"><Send className="w-4 h-4" /></button>
                 </div>
               </div>
             </div>

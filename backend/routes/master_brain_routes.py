@@ -335,12 +335,12 @@ async def get_dataset(dataset_id: str, q: str = "", page: int = 1, page_size: in
 @router.get("/suggested-prompts")
 async def suggested_prompts(user: dict = Depends(require_master_admin)):
     return [
-        "How many customers are still on legacy Silver/Gold tiers? Re-tier them onto the configured slabs (no bonus points).",
-        "How many customers have a negative points balance? Fix them to zero.",
-        "Grant 500 bonus points to 9876543210 as a service-recovery gesture.",
-        "Show me the Master Brain action log for the last 7 days.",
-        "Deduct 200 points from 9876543210 (wrong award) and log the reason.",
-        "What is the current slab-wise customer count?",
+        "Audit our loyalty data health and recommend fixes I can execute.",
+        "How many customers are still on legacy Silver/Gold tiers? Re-tier them onto the configured slabs.",
+        "Set every customer with lifetime spend = 0 to the 'kazo insider' slab.",
+        "Draft and recommend a festive SMS win-back campaign for Gold-tier customers.",
+        "Show me my recent campaigns and their delivery status.",
+        "Show the Master Brain action log, then undo my last action.",
     ]
 
 
