@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "./_shared";
-import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History } from "lucide-react";
+import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History, Zap } from "lucide-react";
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
@@ -191,9 +191,15 @@ export default function MasterBrain() {
     }
   };
 
-  const send = async (text) => {
+  const executeSuggestion = (a) => {
+    if (loading || !a) return;
+    setTab("chat");
+    send(`Execute: ${a.label}`, { tool: a.tool, args: a.args || {}, label: a.label });
+  };
+
+  const send = async (text, forceAction = null) => {
     const msg = text || input;
-    if ((!msg.trim() && attachments.length === 0) || loading) return;
+    if ((!msg.trim() && attachments.length === 0 && !forceAction) || loading) return;
     const atts = attachments;
     setLoading(true);
     setMessages((m) => [...m, { role: "user", content: msg, attachments: atts, timestamp: new Date().toISOString() }]);
@@ -202,9 +208,11 @@ export default function MasterBrain() {
     try {
       const r = await api.post("/master-brain/chat", {
         session_id: sessionId, message: msg, attachment_ids: atts.map((a) => a.id),
+        force_action: forceAction || undefined,
       });
       setMessages((m) => [...m, {
         role: "assistant", content: r.data.reply, tool_trace: r.data.tool_trace || [],
+        suggested_actions: r.data.suggested_actions || [],
         timestamp: new Date().toISOString(),
       }]);
       if (!sessionId) {
@@ -520,6 +528,24 @@ export default function MasterBrain() {
                         </div>
                       )}
                       {m.role === "assistant" ? <MarkdownMessage content={m.content} /> : m.content}
+                      {m.role === "assistant" && m.suggested_actions && m.suggested_actions.length > 0 && (
+                        <div className="mt-3 border-t border-black/10 pt-3 space-y-2" data-testid={`mb-suggestions-${i}`}>
+                          <div className="text-[10px] uppercase tracking-widest text-red-600 flex items-center gap-1"><Zap className="w-3 h-3" /> Execute a recommendation</div>
+                          {m.suggested_actions.map((a, k) => (
+                            <div key={k} className="flex items-start justify-between gap-3 bg-red-50/70 border border-red-200 p-2.5">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium leading-tight">{a.label}</div>
+                                {a.description && <div className="text-xs text-neutral-600 mt-0.5">{a.description}</div>}
+                                <div className="text-[10px] font-mono text-neutral-400 mt-0.5">{a.tool}</div>
+                              </div>
+                              <button className="k-btn kazo-bg-burgundy k-btn-sm shrink-0" onClick={() => executeSuggestion(a)} disabled={loading} data-testid={`mb-execute-${i}-${k}`} title="Preview this action, then confirm with a reason">
+                                <Zap className="w-3.5 h-3.5" /> Execute
+                              </button>
+                            </div>
+                          ))}
+                          <div className="text-[10px] text-neutral-400">Each Execute previews first and asks you to confirm + give a reason. Nothing changes until you approve.</div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}

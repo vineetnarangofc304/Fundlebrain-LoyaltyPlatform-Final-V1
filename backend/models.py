@@ -399,6 +399,7 @@ class AIChatRequest(BaseModel):
     message: str
     model: Optional[str] = "gpt-5.2"
     attachment_ids: Optional[List[str]] = None
+    force_action: Optional[Dict[str, Any]] = None  # {tool, args, label} — set when a user clicks "Execute" on a recommendation
 
 
 # ---------- Audit ----------

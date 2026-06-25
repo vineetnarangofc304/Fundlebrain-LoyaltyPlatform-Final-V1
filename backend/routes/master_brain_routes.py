@@ -81,6 +81,22 @@ REPORT & DASHBOARD NAVIGATION — when the user asks "where can I see X" or the 
 - Support: Tickets /admin/tickets · NPS Inbox /admin/nps · Support Desk /admin/support-desk/*
 
 You are Master Brain: as smart as Fundle Brain on reads, plus the authority to execute — always preview, confirm, and log writes.
+
+RECOMMENDED ACTIONS (this is the extra layer over Fundle Brain):
+- ALWAYS end an analytical/diagnostic answer with a short prose "**Recommended actions**" bullet list, exactly like Fundle Brain.
+- THEN, for every recommendation that YOU can actually carry out with your action tools (set_customer_tier, grant_bonus_points, adjust_points, fix_negative_balances, retier_customers, apply_to_uploaded_report, send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI can show a one-click "Execute" button:
+
+```suggested-actions
+[
+  {"label": "Re-tier 22 zero-spend customers to 'kazo insider'", "description": "Sets tier on every customer with lifetime_spend = 0 (no bonus points).", "tool": "set_customer_tier", "args": {"tier": "kazo insider", "max_lifetime_spend": 0}},
+  {"label": "SMS win-back to lapsing Gold customers", "description": "Bulk SMS via Karix to the Gold tier.", "tool": "send_campaign", "args": {"audience_type": "tier", "audience_value": "gold", "message": "We miss you! Enjoy 20% off your next KAZO order."}}
+]
+```
+
+Rules for the suggested-actions block:
+- Emit it ONLY when there is at least one CONCRETE, executable recommendation; otherwise omit the block entirely.
+- Each item needs a human "label", a short "description", the exact "tool" name, and "args" derived from the REAL numbers/filters you just analysed. NEVER put confirm or reason in args — clicking Execute always runs a PREVIEW first and then asks the user to confirm + give a reason (full audit trail preserved).
+- Max 4 items. The block itself is hidden from the user and rendered as buttons, so your prose recommendations must read fine on their own.
 """
 
 MASTER_SYSTEM_PROMPT = SYSTEM_PROMPT + MASTER_ADDENDUM
@@ -162,6 +178,39 @@ async def require_query_viewer(user: dict = Depends(get_current_user)) -> dict:
     if not (user.get("is_master_admin") or user.get("is_master_query_admin")):
         raise HTTPException(403, "Master Admin access required.")
     return user
+
+
+_SUGGEST_RE = re.compile(r"```suggested-actions\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+# Read-only tools are never offered as an "Execute" button.
+_NON_EXECUTABLE = {"master_action_log", "list_campaigns"}
+
+
+def _extract_suggested_actions(reply: str) -> tuple[str, List[Dict[str, Any]]]:
+    """Pull the machine-readable suggested-actions block out of the reply, validate each
+    action maps to a real executable Master Brain tool, and return (clean_reply, actions)."""
+    actions: List[Dict[str, Any]] = []
+    m = _SUGGEST_RE.search(reply or "")
+    if not m:
+        return reply, actions
+    clean = (reply[:m.start()] + reply[m.end():]).strip()
+    try:
+        parsed = json.loads(m.group(1).strip())
+    except Exception:
+        return clean, actions
+    if not isinstance(parsed, list):
+        return clean, actions
+    for a in parsed:
+        if not isinstance(a, dict):
+            continue
+        tool = a.get("tool")
+        if tool in MASTER_TOOL_HANDLERS and tool not in _NON_EXECUTABLE:
+            actions.append({
+                "label": str(a.get("label") or tool)[:160],
+                "description": str(a.get("description") or "")[:240],
+                "tool": tool,
+                "args": a.get("args") if isinstance(a.get("args"), dict) else {},
+            })
+    return clean, actions[:4]
 
 
 async def require_master_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -355,6 +404,15 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
         user_content = text
     history.append({"role": "user", "content": user_content})
 
+    # One-click "Execute" on a recommended action -> force a PREVIEW of that exact tool first.
+    fa = req.force_action or None
+    if fa and fa.get("tool") in MASTER_TOOL_HANDLERS:
+        history.append({"role": "system", "content": (
+            f"The user clicked Execute on a recommended action. Call the tool "
+            f"`{fa.get('tool')}` with these arguments in PREVIEW mode now (confirm=false): "
+            f"{json.dumps(fa.get('args') or {}, default=str)}. Present the preview as a Markdown "
+            f"table, then ask the user to confirm and provide a reason before you apply it.")})
+
     # expose the session to action tools (server-side fallback for uploaded reports)
     user["_mb_session"] = session_id
 
@@ -364,10 +422,13 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"AI error: {str(e)}")
 
+    reply, suggested_actions = _extract_suggested_actions(reply)
+
     now = datetime.now(timezone.utc).isoformat()
     stored_text = req.message + (f"  ·  📎 {', '.join(a['filename'] for a in att_chips)}" if att_chips else "")
     user_msg = {"role": "user", "content": stored_text, "timestamp": now, "attachments": att_chips}
-    bot_msg = {"role": "assistant", "content": reply, "timestamp": now, "tool_trace": trace}
+    bot_msg = {"role": "assistant", "content": reply, "timestamp": now, "tool_trace": trace,
+               "suggested_actions": suggested_actions}
     if existing:
         await ai_chats_col.update_one({"id": session_id},
             {"$push": {"messages": {"$each": [user_msg, bot_msg]}}, "$set": {"updated_at": now}})
@@ -393,7 +454,8 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     except Exception:
         pass
     return {"session_id": session_id, "reply": reply,
-            "tools_used": [t["tool"] for t in trace], "tool_trace": trace}
+            "tools_used": [t["tool"] for t in trace], "tool_trace": trace,
+            "suggested_actions": suggested_actions}
 
 
 @router.get("/query-log")
