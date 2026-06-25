@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 import litellm
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 
 from database import ai_chats_col, audit_logs_col
 from auth import get_current_user, log_audit
@@ -20,6 +20,7 @@ from models import AIChatRequest
 from routes.ai_routes import _build_completion_params, _resolve_model, EMERGENT_LLM_KEY
 from routes.ai_tools import TOOL_SCHEMAS, execute_tool
 from routes.master_brain_tools import MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS
+from routes import mb_attachments as MBA
 
 router = APIRouter(prefix="/master-brain", tags=["master-brain"])
 
@@ -34,7 +35,10 @@ You have EVERYTHING Fundle Brain can do (full live MongoDB READ access + raw-dat
 - fix_negative_balances — reset negative balances to 0 (single or ALL)
 - retier_customers — re-map customers onto the configured slabs (no bonus points), single or bulk
 - master_action_log — read the audit trail of actions taken
+- apply_to_uploaded_report — take a bulk action (grant/adjust points, fix negatives, re-tier) on every customer listed in an UPLOADED report
 (plus the L1 support write tools: deactivate / reactivate / unsubscribe / resubscribe / reverse a coupon or points redemption).
+
+ATTACHMENTS: The user can attach SCREENSHOTS/IMAGES (you can SEE them — read the numbers/text in them) and REPORTS (CSV/Excel/PDF). When a report is attached, its parsed content + an attachment_id appear in a context block; to act on the customers it lists, call apply_to_uploaded_report with that attachment_id (preview first, then confirm + reason). For a screenshot, read it; if the user wants you to act on customers shown in it, extract their mobiles and use the per-customer tools (each still previews + needs a reason).
 
 ACTION PROTOCOL — non-negotiable, this is what makes you safe:
 1. NEVER mutate on the first turn. For ANY action, FIRST call the tool with confirm=false to PREVIEW. The preview returns exactly what will change and how many customers are affected.
@@ -162,6 +166,25 @@ async def suggested_prompts(user: dict = Depends(require_master_admin)):
     ]
 
 
+@router.post("/upload")
+async def upload_attachment(
+    file: UploadFile = File(...),
+    session_id: str = Form(None),
+    user: dict = Depends(require_master_admin),
+):
+    """Upload a screenshot (png/jpg/webp) or report (csv/xlsx/pdf) to attach to a chat turn."""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Empty file")
+    try:
+        summary = await MBA.ingest(raw, file.filename or "upload", user, session_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Could not process file: {e}")
+    return summary
+
+
 @router.post("/chat")
 async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     if not EMERGENT_LLM_KEY:
@@ -175,7 +198,27 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
         for m in (existing.get("messages") or [])[-12:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
                 history.append({"role": m["role"], "content": m["content"]})
-    history.append({"role": "user", "content": req.message})
+
+    # ----- attachments (images -> vision, reports -> context) -----
+    attachments = await MBA.load_for_chat(req.attachment_ids or [], user)
+    text = req.message
+    image_parts = []
+    att_chips = []
+    for att in attachments:
+        att_chips.append({"id": att["id"], "kind": att.get("kind"), "filename": att.get("filename")})
+        if att.get("kind") == "image":
+            image_parts.append({"type": "image_url",
+                                "image_url": {"url": f"data:{att.get('mime')};base64,{att.get('image_base64')}"}})
+        else:
+            block = MBA.build_context_block(att)
+            if block:
+                text += "\n\n" + block
+
+    if image_parts:
+        user_content: Any = [{"type": "text", "text": text}] + image_parts
+    else:
+        user_content = text
+    history.append({"role": "user", "content": user_content})
 
     provider, model = _resolve_model(req.model)
     try:
@@ -184,7 +227,8 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
         raise HTTPException(500, f"AI error: {str(e)}")
 
     now = datetime.now(timezone.utc).isoformat()
-    user_msg = {"role": "user", "content": req.message, "timestamp": now}
+    stored_text = req.message + (f"  ·  📎 {', '.join(a['filename'] for a in att_chips)}" if att_chips else "")
+    user_msg = {"role": "user", "content": stored_text, "timestamp": now, "attachments": att_chips}
     bot_msg = {"role": "assistant", "content": reply, "timestamp": now, "tool_trace": trace}
     if existing:
         await ai_chats_col.update_one({"id": session_id},
@@ -192,10 +236,12 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     else:
         await ai_chats_col.insert_one({
             "id": session_id, "user_id": user["id"], "surface": "master",
-            "title": req.message[:60], "messages": [user_msg, bot_msg],
+            "title": (req.message or att_chips[0]["filename"] if att_chips else req.message)[:60],
+            "messages": [user_msg, bot_msg],
             "created_at": now, "updated_at": now, "model": f"{provider}/{model}"})
 
     await log_audit(user, "master_brain_chat", "master_brain_session", session_id,
-                    {"q": req.message[:200], "tools_used": [t["tool"] for t in trace]})
+                    {"q": req.message[:200], "tools_used": [t["tool"] for t in trace],
+                     "attachments": [a["filename"] for a in att_chips]})
     return {"session_id": session_id, "reply": reply,
             "tools_used": [t["tool"] for t in trace], "tool_trace": trace}

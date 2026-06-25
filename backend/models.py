@@ -396,6 +396,7 @@ class AIChatRequest(BaseModel):
     session_id: Optional[str] = None
     message: str
     model: Optional[str] = "gpt-5.2"
+    attachment_ids: Optional[List[str]] = None
 
 
 # ---------- Audit ----------

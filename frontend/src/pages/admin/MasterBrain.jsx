@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "./_shared";
-import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock } from "lucide-react";
+import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon } from "lucide-react";
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
@@ -40,6 +40,9 @@ export default function MasterBrain() {
   const [loading, setLoading] = useState(false);
   const [suggested, setSuggested] = useState([]);
   const [log, setLog] = useState([]);
+  const [attachments, setAttachments] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
   const bottomRef = useRef(null);
 
   const isMaster = !!user?.is_master_admin;
@@ -63,7 +66,28 @@ export default function MasterBrain() {
     const r = await api.get(`/master-brain/sessions/${id}`);
     setMessages(r.data.messages);
   };
-  const newChat = () => { setSessionId(null); setMessages([]); setInput(""); };
+  const newChat = () => { setSessionId(null); setMessages([]); setInput(""); setAttachments([]); };
+
+  const handleUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setUploading(true);
+    for (const file of files) {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        if (sessionId) fd.append("session_id", sessionId);
+        const r = await api.post("/master-brain/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+        setAttachments((a) => [...a, r.data]);
+      } catch (err) {
+        toast.error(err?.response?.data?.detail || `Couldn't upload ${file.name}`);
+      }
+    }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const removeAttachment = (id) => setAttachments((a) => a.filter((x) => x.id !== id));
   const deleteSession = async (id, e) => {
     e.stopPropagation();
     await api.delete(`/master-brain/sessions/${id}`);
@@ -73,12 +97,16 @@ export default function MasterBrain() {
 
   const send = async (text) => {
     const msg = text || input;
-    if (!msg.trim() || loading) return;
+    if ((!msg.trim() && attachments.length === 0) || loading) return;
+    const atts = attachments;
     setLoading(true);
-    setMessages((m) => [...m, { role: "user", content: msg, timestamp: new Date().toISOString() }]);
+    setMessages((m) => [...m, { role: "user", content: msg, attachments: atts, timestamp: new Date().toISOString() }]);
     setInput("");
+    setAttachments([]);
     try {
-      const r = await api.post("/master-brain/chat", { session_id: sessionId, message: msg });
+      const r = await api.post("/master-brain/chat", {
+        session_id: sessionId, message: msg, attachment_ids: atts.map((a) => a.id),
+      });
       setMessages((m) => [...m, {
         role: "assistant", content: r.data.reply, tool_trace: r.data.tool_trace || [],
         timestamp: new Date().toISOString(),
@@ -203,6 +231,15 @@ export default function MasterBrain() {
                           ))}
                         </div>
                       )}
+                      {m.attachments && m.attachments.length > 0 && (
+                        <div className="mb-2 flex flex-wrap gap-1.5" data-testid={`mb-msg-attach-${i}`}>
+                          {m.attachments.map((a) => (
+                            <span key={a.id} className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] bg-white/15 border border-white/25 rounded">
+                              {a.kind === "image" ? <ImageIcon className="w-2.5 h-2.5" /> : <FileText className="w-2.5 h-2.5" />} {a.filename}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       {m.role === "assistant" ? <MarkdownMessage content={m.content} /> : m.content}
                     </div>
                   </div>
@@ -214,9 +251,29 @@ export default function MasterBrain() {
               </div>
             </div>
             <div className="border-t border-black/10 bg-white p-4">
-              <div className="max-w-3xl mx-auto flex gap-2">
-                <input className="k-input" placeholder="Ask Master Brain to analyse — or take an action…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} disabled={loading} data-testid="mb-input" />
-                <button className="k-btn kazo-bg-burgundy" onClick={() => send()} disabled={loading || !input.trim()} data-testid="mb-send-btn"><Send className="w-4 h-4" /></button>
+              <div className="max-w-3xl mx-auto">
+                {attachments.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-2" data-testid="mb-pending-attachments">
+                    {attachments.map((a) => (
+                      <span key={a.id} className="inline-flex items-center gap-1.5 px-2 py-1 text-xs bg-neutral-100 border border-black/10 rounded" data-testid={`mb-attach-chip-${a.id}`}>
+                        {a.kind === "image" ? <ImageIcon className="w-3 h-3 text-red-600" /> : <FileText className="w-3 h-3 text-red-600" />}
+                        <span className="max-w-[180px] truncate">{a.filename}</span>
+                        {a.kind === "report" && a.mobiles_detected != null && (
+                          <span className="text-neutral-500">· {a.mobiles_detected} mobiles</span>
+                        )}
+                        <X className="w-3 h-3 cursor-pointer text-neutral-400 hover:text-red-600" onClick={() => removeAttachment(a.id)} data-testid={`mb-attach-remove-${a.id}`} />
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex gap-2 items-center">
+                  <input ref={fileRef} type="file" multiple accept=".png,.jpg,.jpeg,.webp,.csv,.xlsx,.xls,.pdf,image/*" onChange={handleUpload} className="hidden" data-testid="mb-file-input" />
+                  <button className="k-btn k-btn-outline" title="Attach a screenshot or report (PNG/JPG · CSV/Excel/PDF)" onClick={() => fileRef.current?.click()} disabled={loading || uploading} data-testid="mb-attach-btn">
+                    {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}
+                  </button>
+                  <input className="k-input flex-1" placeholder="Ask Master Brain to analyse — or take an action…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} disabled={loading} data-testid="mb-input" />
+                  <button className="k-btn kazo-bg-burgundy" onClick={() => send()} disabled={loading || (!input.trim() && attachments.length === 0)} data-testid="mb-send-btn"><Send className="w-4 h-4" /></button>
+                </div>
               </div>
             </div>
           </div>

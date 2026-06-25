@@ -1,0 +1,42 @@
+{
+  "summary": "Frontend E2E testing of Master Brain attachment upload UX (CSV report + PNG vision + preview->confirm->apply->action-log). 7 of 8 flows pass cleanly. One bug found: when the user confirms a bulk apply in a follow-up message (no attachment re-attached), the assistant replies 'Attachment not found (upload the report again)' and no Action Log row is added for the new run — the apply path cannot locate the previously-uploaded attachment by id when the confirm message goes without attachment_ids.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "/api/master-brain/chat (tool: apply_to_uploaded_report)",
+        "issue": "On the second turn (confirmation + reason) the tool call fails with 'Attachment not found (upload the report again)'. The attachment_id from the first turn is not being re-resolved on the apply turn even though session context still references the same upload. Reproduced 100%: upload report.csv -> 'Grant 100 bonus points to everyone in this report' (preview OK, shows 2 mobiles, tool chip apply_to_uploaded_report shown) -> 'Yes, reason: QA bulk test' -> reply: 'I couldn\u2019t apply the bulk grant. Tool response: Attachment not found (upload the report again).' No new Action Log row for upload_grant_points is created for this confirm.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Master Brain bulk apply (preview -> confirm) using CSV attachment",
+        "issue": "Confirm turn does not re-send attachment_ids and the backend tool then can't find the attachment. Frontend send() empties attachments after the first user message, so the confirm POST /api/master-brain/chat has attachment_ids=[]. The model still attempts apply_to_uploaded_report but the tool returns 'Attachment not found'. Either the frontend should keep the last report attachment id sticky across the confirm turn, or the backend should look up the most recent report attachment for the session/user when the model calls apply_to_uploaded_report without an id.",
+        "affected_selectors": ["mb-send-btn", "mb-tool-trace-*"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/test_reports/mb_action_log.png", "/app/test_reports/mb_vision.png"],
+  "action_items": [
+    "Fix apply_to_uploaded_report to locate the most recent report attachment for the current session when attachment_ids[] is empty on the confirm turn, OR have the frontend keep the last report attachment id sticky/visible until the user clears it so the confirmation passes attachment_ids again.",
+    "After fix, re-run: upload CSV with mobile 9990002222 -> preview -> 'Yes, reason: QA bulk test' -> verify (a) reply states matched/changed counts (b) a new Action Log row appears with action=upload_grant_points and reason='QA bulk test'."
+  ],
+  "critical_code_review_comments": [
+    "MasterBrain.jsx send(): after building the user message it clears `attachments` immediately (setAttachments([])). For multi-turn write flows (preview -> confirm), the report attachment is effectively dropped from the next turn's request even though the assistant still needs to act on it. Consider keeping the most recent report attachment id available for the next chat turn until the user explicitly removes it or starts a new chat.",
+    "Backend apply_to_uploaded_report apparently keys on attachment_id only; consider falling back to the latest report attachment_id stored on the session when the tool is invoked without an explicit id (server side). This would make the action robust to UI changes.",
+    "No spinner/disabled state shown on the attach button during file upload was a worry but UI does disable button while uploading - OK."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (frontend-only run)", "frontend": "87% (7/8 flows pass; 1 integration bug on bulk apply confirm turn)"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (used). Scratch customer 9990002222 used in CSV.",
+  "seed_data_creation": "/tmp/mb_test/report.csv (2 rows incl. 9990002222), /tmp/mb_test/screenshot.png (PIL-generated PNG with text 'Customer Mobile: 9990002222' and 'Points Balance: 300'), /tmp/mb_test/bad.txt (for rejection).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All UI plumbing works perfectly: data-testid hooks (mb-attach-btn, mb-file-input, mb-pending-attachments, mb-attach-chip-*, mb-attach-remove-*, mb-input, mb-send-btn, mb-tool-trace-*, mb-tab-log, mb-action-log, mb-msg-attach-*, mb-new-chat, mb-tab-chat). Unsupported type rejection emits a sonner toast and does NOT add a chip. CSV upload shows '<filename> · N mobiles'. Multi-file upload shows multiple chips, remove X works. Preview turn correctly shows the table + asks for confirmation+reason. Vision turn correctly reads PNG text (returned 9990002222 and 300). Only the confirm/apply turn fails as described above. Action Log tab shows the historical row from prior run ('upload_grant_points · bulk test · 50 pts') so the UI is fine, but no NEW row is created in this run because the apply backend call errored.",
+  "rca of the issue": "MasterBrain.jsx setAttachments([]) is called immediately after the first user message is queued, so the follow-up chat call (confirm turn) sends attachment_ids=[]. The LLM still tries apply_to_uploaded_report (tool chip rendered) but with no attachment_id (or a stale one) the backend tool returns 'Attachment not found (upload the report again).' Mitigation options: (1) frontend keeps the last report attachment id sticky across turns inside the same session until user removes it; (2) backend apply_to_uploaded_report falls back to the latest report attachment for the (session_id, user_id) tuple when attachment_id is missing."
+}

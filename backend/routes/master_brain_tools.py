@@ -402,6 +402,108 @@ async def _tool_master_action_log(days: int = 7, limit: int = 30, user=None) -> 
     return {"count": len(rows), "actions": rows}
 
 
+# ============================================================
+# 6) Act on the customers listed in an UPLOADED report (CSV/XLSX/PDF)
+# ============================================================
+async def _tool_apply_to_uploaded_report(attachment_id: str, action: str, points: Optional[int] = None,
+                                         reason: str = "", confirm: bool = False, user=None) -> Dict[str, Any]:
+    err = _require_master(user)
+    if err:
+        return err
+    from database import mb_attachments_col
+    att = await mb_attachments_col.find_one(
+        {"id": attachment_id, "user_id": user.get("id")}, {"_id": 0})
+    if not att:
+        return {"error": "Attachment not found (upload the report again)."}
+    mobiles = att.get("mobiles") or []
+    if not mobiles:
+        return {"error": "No mobile numbers were detected in that file. Make sure it has a phone/mobile column."}
+    action = (action or "").lower()
+    if action not in {"grant_points", "adjust_points", "fix_negative", "retier"}:
+        return {"error": "action must be one of: grant_points, adjust_points, fix_negative, retier"}
+    if action in {"grant_points", "adjust_points"}:
+        try:
+            points = int(points)
+        except Exception:
+            return {"error": f"points (integer) is required for {action}"}
+        if action == "grant_points" and points <= 0:
+            return {"error": "grant_points needs a positive points value"}
+        if action == "adjust_points" and points == 0:
+            return {"error": "adjust_points needs a non-zero points value"}
+
+    plan = {"action": "apply_to_uploaded_report", "file": att.get("filename"),
+            "row_action": action, "points": points, "mobiles_in_file": len(mobiles),
+            "awards_bonus": action == "grant_points",
+            "note": "Re-tier awards NO bonus points." if action == "retier" else None}
+    if not confirm:
+        # sample resolve for the preview
+        sample = []
+        for m in mobiles[:8]:
+            c = await _find_customer(m)
+            sample.append({"mobile": m, "found": bool(c),
+                           "name": (c or {}).get("name"), "balance": (c or {}).get("points_balance")})
+        plan["preview"] = True
+        plan["sample"] = sample
+        plan["confirmation_required"] = ("Confirm with the user + capture a reason, then call again with "
+                                         "confirm=true. Will process every mobile in the file.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    if len(mobiles) > INLINE_CAP:
+        return {"error": f"{len(mobiles)} rows exceeds the inline cap ({INLINE_CAP})."}
+
+    bands = None
+    if action == "retier":
+        from routes.loyalty_routes import _active_sorted_tiers, _derive_slug
+        cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "tier_rules": 1}) or {}
+        st = _active_sorted_tiers(cfg)
+        if not st:
+            return {"error": "No active tiers configured."}
+        bands = [(t["tier"], float(t.get("min_lifetime_spend") or 0)) for t in st]
+
+    matched = 0
+    changed = 0
+    not_found = 0
+    for m in mobiles:
+        cust = await _find_customer(m)
+        if not cust:
+            not_found += 1
+            continue
+        matched += 1
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        if action == "grant_points":
+            await customers_col.update_one({"id": cid}, {"$inc": {"points_balance": points,
+                                                                  "lifetime_points_earned": points}})
+            await _ledger(cust.get("mobile"), points, "bonus", reason, user)
+            changed += 1
+        elif action == "adjust_points":
+            await customers_col.update_one({"id": cid}, {"$inc": {"points_balance": points}})
+            await _ledger(cust.get("mobile"), points, "adjust", reason, user)
+            changed += 1
+        elif action == "fix_negative":
+            if cur < 0:
+                await customers_col.update_one({"id": cid}, {"$set": {"points_balance": 0}})
+                await _ledger(cust.get("mobile"), -cur, "adjust", f"Negative reset — {reason}", user)
+                changed += 1
+        elif action == "retier":
+            from routes.loyalty_routes import _derive_slug
+            correct = _derive_slug(cust.get("lifetime_spend"), bands)
+            if cust.get("tier") != correct:
+                await customers_col.update_one({"id": cid},
+                                               {"$set": {"tier": correct, "tier_updated_at": _now_iso()}})
+                changed += 1
+    audit_id = await _log_master(user, f"upload_{action}", "customers", att["id"], reason,
+                                 {"file": att.get("filename"), "mobiles_in_file": len(mobiles),
+                                  "matched": matched, "changed": changed, "not_found": not_found,
+                                  "points": points})
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "matched_customers": matched, "changed": changed, "not_found": not_found,
+            "message": f"Processed '{att.get('filename')}': {changed} customers updated "
+                       f"({matched} matched, {not_found} not found)."}
+
+
 MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "grant_bonus_points",
@@ -457,6 +559,22 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "days": {"type": "integer", "default": 7, "description": "0 = all time"},
             "limit": {"type": "integer", "default": 30},
         }}}},
+    {"type": "function", "function": {
+        "name": "apply_to_uploaded_report",
+        "description": "MUTATION (Master Admin). Take a bulk action on EVERY customer listed in an UPLOADED report "
+                       "(CSV/XLSX/PDF) the user attached. Use the attachment_id from the attached-report context. "
+                       "action: 'grant_points' (needs points>0), 'adjust_points' (needs non-zero points, +/-), "
+                       "'fix_negative' (resets negative balances to 0), 'retier' (re-map onto configured slabs, NO "
+                       "bonus points). ALWAYS confirm=false first to preview (file, row count, sample), then after "
+                       "the user approves + gives a reason, confirm=true + reason. Audit-logged; points changes write "
+                       "ledger rows.",
+        "parameters": {"type": "object", "properties": {
+            "attachment_id": {"type": "string", "description": "id of the uploaded report (from the context block)"},
+            "action": {"type": "string", "enum": ["grant_points", "adjust_points", "fix_negative", "retier"]},
+            "points": {"type": "integer", "description": "points for grant_points/adjust_points"},
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }, "required": ["attachment_id", "action"]}}},
 ]
 
 MASTER_TOOL_HANDLERS = {
@@ -465,4 +583,5 @@ MASTER_TOOL_HANDLERS = {
     "fix_negative_balances": _tool_fix_negative_balances,
     "retier_customers": _tool_retier_customers,
     "master_action_log": _tool_master_action_log,
+    "apply_to_uploaded_report": _tool_apply_to_uploaded_report,
 }
