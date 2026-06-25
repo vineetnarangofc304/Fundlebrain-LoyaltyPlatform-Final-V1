@@ -3,7 +3,7 @@ import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
 import { toast } from "sonner";
 import { fmtDate } from "@/lib/format";
-import { Plus, UserPlus, KeyRound, Power, ShieldAlert } from "lucide-react";
+import { Plus, UserPlus, KeyRound, Power, ShieldAlert, Eye } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 
 const ROLES = [
@@ -57,6 +57,16 @@ export default function UserManagement() {
     }
   };
 
+  const toggleQueryAdmin = async (u) => {
+    try {
+      await api.patch(`/users/${u.id}`, { is_master_query_admin: !u.is_master_query_admin });
+      toast.success(`Master Query Admin ${u.is_master_query_admin ? "revoked" : "granted"} for ${u.email}`);
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    }
+  };
+
   const resetPw = async () => {
     try {
       await api.post(`/users/${pwModal}/reset-password`, null, { params: { new_password: newPw } });
@@ -89,12 +99,18 @@ export default function UserManagement() {
                     {u.is_master_admin
                       ? <span className="pill" style={{ background: "#FEE2E2", color: "#991B1B" }} data-testid={`master-badge-${u.id}`}>Master</span>
                       : <span className="text-xs text-neutral-400">—</span>}
+                    {u.is_master_query_admin && <span className="pill ml-1" style={{ background: "#E0E7FF", color: "#3730A3" }} data-testid={`query-badge-${u.id}`}>Query</span>}
                   </td>
                   <td>
                     <div className="flex gap-1">
                       {me?.role === "super_admin" && (
                         <button className="k-btn k-btn-ghost k-btn-sm" title={u.is_master_admin ? "Revoke Master Admin" : "Grant Master Admin"} onClick={() => toggleMaster(u)} data-testid={`master-toggle-${u.id}`}>
                           <ShieldAlert className={`w-3.5 h-3.5 ${u.is_master_admin ? "text-red-600" : ""}`} />
+                        </button>
+                      )}
+                      {me?.role === "super_admin" && (
+                        <button className="k-btn k-btn-ghost k-btn-sm" title={u.is_master_query_admin ? "Revoke Master Query Admin (sees ALL Master Brain queries)" : "Grant Master Query Admin (sees ALL Master Brain queries)"} onClick={() => toggleQueryAdmin(u)} data-testid={`query-toggle-${u.id}`}>
+                          <Eye className={`w-3.5 h-3.5 ${u.is_master_query_admin ? "text-indigo-600" : ""}`} />
                         </button>
                       )}
                       <button className="k-btn k-btn-ghost k-btn-sm" title="Reset password" onClick={() => setPwModal(u.id)} data-testid={`reset-${u.id}`}><KeyRound className="w-3.5 h-3.5" /></button>
@@ -126,6 +142,13 @@ export default function UserManagement() {
                   <input type="checkbox" checked={!!form.is_master_admin} onChange={(e) => setForm({ ...form, is_master_admin: e.target.checked })} />
                   <ShieldAlert className={`w-4 h-4 ${form.is_master_admin ? "text-red-600" : "text-neutral-400"}`} />
                   Grant <b>Master Admin</b> (can take live actions via Master Brain)
+                </label>
+              )}
+              {me?.role === "super_admin" && (
+                <label className="flex items-center gap-2 text-sm cursor-pointer select-none" data-testid="new-user-query-admin">
+                  <input type="checkbox" checked={!!form.is_master_query_admin} onChange={(e) => setForm({ ...form, is_master_query_admin: e.target.checked })} />
+                  <Eye className={`w-4 h-4 ${form.is_master_query_admin ? "text-indigo-600" : "text-neutral-400"}`} />
+                  Grant <b>Master Query Admin</b> (can see the Master Brain query log of ALL users)
                 </label>
               )}
               <div className="flex justify-end gap-2 mt-2">

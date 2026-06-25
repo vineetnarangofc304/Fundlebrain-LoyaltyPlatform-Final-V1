@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "./_shared";
-import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft } from "lucide-react";
+import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History } from "lucide-react";
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
@@ -68,7 +68,16 @@ export default function MasterBrain() {
   const [dsQuery, setDsQuery] = useState("");
   const [dsPage, setDsPage] = useState(1);
 
+  // query log
+  const [queryLog, setQueryLog] = useState([]);
+  const [qlUsers, setQlUsers] = useState([]);
+  const [qlIsGlobal, setQlIsGlobal] = useState(false);
+  const [qlUser, setQlUser] = useState("");
+  const [qlSearch, setQlSearch] = useState("");
+
   const isMaster = !!user?.is_master_admin;
+  const isQueryAdmin = !!user?.is_master_query_admin;
+  const canAccess = isMaster || isQueryAdmin;
 
   useEffect(() => {
     if (!isMaster) return;
@@ -90,9 +99,20 @@ export default function MasterBrain() {
     try { const r = await api.get("/master-brain/datasets"); setDatasets(r.data.datasets || []); }
     catch { /* ignore */ }
   };
+  const loadQueryLog = async () => {
+    try {
+      const r = await api.get("/master-brain/query-log", { params: { user_email: qlUser, q: qlSearch, days: 30 } });
+      setQueryLog(r.data.queries || []);
+      setQlIsGlobal(!!r.data.is_global);
+      setQlUsers(r.data.users || []);
+    } catch { /* ignore */ }
+  };
   useEffect(() => { if (tab === "log" && isMaster) loadLog(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "campaigns" && isMaster) loadCampaigns(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "datasets" && isMaster) loadDatasets(); }, [tab, isMaster]);
+  useEffect(() => { if (tab === "querylog" && canAccess) loadQueryLog(); }, [tab, canAccess]);
+  // A query-only overseer (no write rights) lands straight on the Query Log.
+  useEffect(() => { if (!isMaster && isQueryAdmin) setTab("querylog"); }, [isMaster, isQueryAdmin]);
 
   // auto-refresh campaigns while any is in-flight
   useEffect(() => {
@@ -201,7 +221,7 @@ export default function MasterBrain() {
     }
   };
 
-  if (!isMaster) {
+  if (!canAccess) {
     return (
       <div data-testid="master-brain-denied" className="p-10">
         <PageHeader title="Master Brain" subtitle="MASTER ADMIN ONLY" />
@@ -232,10 +252,11 @@ export default function MasterBrain() {
         subtitle="ACTION-ENABLED · LIVE DATABASE · FULLY AUDITED"
         actions={
           <div className="flex gap-2 flex-wrap">
-            <TabBtn id="chat">Chat</TabBtn>
-            <TabBtn id="log" icon={ScrollText}>Action Log</TabBtn>
-            <TabBtn id="campaigns" icon={Megaphone}>Campaigns</TabBtn>
-            <TabBtn id="datasets" icon={Database}>Datasets</TabBtn>
+            {isMaster && <TabBtn id="chat">Chat</TabBtn>}
+            {isMaster && <TabBtn id="log" icon={ScrollText}>Action Log</TabBtn>}
+            {isMaster && <TabBtn id="campaigns" icon={Megaphone}>Campaigns</TabBtn>}
+            {isMaster && <TabBtn id="datasets" icon={Database}>Datasets</TabBtn>}
+            <TabBtn id="querylog" icon={History}>Query Log</TabBtn>
             {tab === "chat" && <button className="k-btn k-btn-outline k-btn-sm" onClick={newChat} data-testid="mb-new-chat">New chat</button>}
           </div>
         }
@@ -387,6 +408,55 @@ export default function MasterBrain() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ---------------- QUERY LOG ---------------- */}
+      {tab === "querylog" && (
+        <div className="p-4" data-testid="mb-querylog">
+          <div className="flex justify-between items-center mb-2 gap-2 flex-wrap">
+            <p className="text-xs text-neutral-600" data-testid="mb-ql-scope">
+              {qlIsGlobal
+                ? "Overseer view — Master Brain queries from ALL users (last 30 days)."
+                : "Your Master Brain query history (last 30 days). You only see your own queries."}
+            </p>
+            <div className="flex items-center gap-2 flex-wrap">
+              {qlIsGlobal && (
+                <select className="k-input h-9 text-sm" value={qlUser} onChange={(e) => { setQlUser(e.target.value); }} data-testid="mb-ql-user-filter">
+                  <option value="">All users</option>
+                  {qlUsers.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              )}
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-2 top-1/2 -translate-y-1/2" />
+                <input className="k-input pl-7 h-9 text-sm" placeholder="Search queries…" value={qlSearch}
+                  onChange={(e) => setQlSearch(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && loadQueryLog()} data-testid="mb-ql-search" />
+              </div>
+              <button className="k-btn k-btn-outline k-btn-sm" onClick={loadQueryLog} data-testid="mb-ql-refresh"><RefreshCw className="w-4 h-4" /> Refresh</button>
+            </div>
+          </div>
+          <div className="bg-white border border-black/10 overflow-x-auto">
+            <table className="data-table">
+              <thead><tr><th>When (IST)</th>{qlIsGlobal && <th>User</th>}<th>Query</th><th>Tools used</th></tr></thead>
+              <tbody>
+                {queryLog.length === 0 && <tr><td colSpan={qlIsGlobal ? 4 : 3} className="text-center text-neutral-500 py-8">No queries yet.</td></tr>}
+                {queryLog.map((row) => (
+                  <tr key={row.id} data-testid={`mb-ql-${row.id}`}>
+                    <td className="text-xs whitespace-nowrap">{fmtTime(row.created_at)}</td>
+                    {qlIsGlobal && <td className="text-xs">{row.user_name || row.user_email}</td>}
+                    <td className="text-xs max-w-[460px]">{row.query}{row.attachments?.length ? <span className="text-neutral-400"> · 📎 {row.attachments.length}</span> : null}</td>
+                    <td className="text-xs">
+                      {(row.tools_used || []).length === 0 ? <span className="text-neutral-400">—</span> :
+                        (row.tools_used || []).slice(0, 6).map((t, i) => (
+                          <span key={i} className="inline-block px-1.5 py-0.5 mr-1 mb-1 text-[10px] font-mono bg-neutral-100 border border-black/10">{t}</span>
+                        ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

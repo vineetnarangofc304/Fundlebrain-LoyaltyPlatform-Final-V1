@@ -578,6 +578,32 @@ async def startup():
         await users_col.insert_one(doc)
         logger.info(f"Seeded demo user {email}")
 
+    # Seed / ensure Master Brain accounts (idempotent; also backfills the flags on existing rows)
+    #  - masteradmin@fundle.io  -> is_master_admin (acts via Master Brain)
+    #  - vineetnarangofc@fundle.io -> is_master_admin + is_master_query_admin
+    #       (the OVERSEER: can see the Master Brain query log of ALL users)
+    mb_accounts = [
+        ("masteradmin@fundle.io", "Master Admin", "crm_manager", "Master@2026",
+         {"is_master_admin": True}),
+        ("vineetnarangofc@fundle.io", "Vineet Narang", "crm_manager", "Vineet@2026",
+         {"is_master_admin": True, "is_master_query_admin": True}),
+    ]
+    for email, name, role, pwd, flags in mb_accounts:
+        existing_mb = await users_col.find_one({"email": email})
+        if not existing_mb:
+            await users_col.insert_one({
+                "id": uuid.uuid4().hex, "email": email, "name": name, "role": role,
+                "password_hash": hash_password(pwd), "is_active": True,
+                "created_at": datetime.now(timezone.utc).isoformat(), **flags,
+            })
+            logger.info(f"Seeded Master Brain account {email}")
+        else:
+            # backfill the flags if missing (never downgrade an explicitly-set value)
+            patch = {k: v for k, v in flags.items() if not existing_mb.get(k)}
+            if patch:
+                await users_col.update_one({"email": email}, {"$set": patch})
+                logger.info(f"Backfilled flags for {email}: {patch}")
+
     # Seed loyalty config
     cfg = await loyalty_config_col.find_one({"id": "default"})
     if not cfg:

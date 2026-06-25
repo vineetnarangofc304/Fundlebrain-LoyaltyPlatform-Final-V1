@@ -8,17 +8,23 @@ tools themselves and is visible through the action-log endpoint.
 """
 import json
 import uuid
-from datetime import datetime, timezone
+import asyncio
+import time
+import re
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 
 import litellm
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
-from database import ai_chats_col, audit_logs_col, mb_action_snapshots_col, master_campaigns_col, mb_attachments_col
+from database import (
+    ai_chats_col, audit_logs_col, mb_action_snapshots_col, master_campaigns_col,
+    mb_attachments_col, mb_query_log_col,
+)
 from auth import get_current_user, log_audit
 from models import AIChatRequest
-from routes.ai_routes import _build_completion_params, _resolve_model, EMERGENT_LLM_KEY
+from routes.ai_routes import _build_completion_params, _resolve_model, EMERGENT_LLM_KEY, SYSTEM_PROMPT
 from routes.ai_tools import TOOL_SCHEMAS, execute_tool
 from routes.master_brain_tools import (
     MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, _tool_undo_action, _tool_cancel_campaign,
@@ -28,37 +34,56 @@ from routes import mb_attachments as MBA
 router = APIRouter(prefix="/master-brain", tags=["master-brain"])
 
 MAX_TOOL_ITERATIONS = 12
+MB_DEADLINE_SECONDS = 90  # force a final answer before the 120s proxy read timeout
 ALL_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_TOOL_SCHEMAS
 
-MASTER_SYSTEM_PROMPT = """You are MASTER BRAIN — the privileged operations agent for KAZO (premium Indian women's fashion brand) powered by Fundle. You are used ONLY by a Master Admin.
+# Master Brain = ALL of Fundle Brain (reads/analytics/CSV/agentic behaviour) + an action layer.
+# We literally reuse Fundle Brain's full system prompt and append the action protocol so Master
+# Brain answers EVERY analytics question exactly like Fundle Brain, then can also execute.
+MASTER_ADDENDUM = """
 
-You have EVERYTHING Fundle Brain can do (full live MongoDB READ access + raw-data analytics), PLUS an ACTION layer that can WRITE back to the database:
-- grant_bonus_points — award points to a customer
-- adjust_points — add or deduct points for a customer
+=====================================================================
+MASTER BRAIN — ACTION LAYER  (you are *Master Brain*, used ONLY by a Master Admin)
+=====================================================================
+EVERYTHING ABOVE STILL APPLIES. You are Fundle Brain with extra powers. You MUST answer ANY analytics / data / "where do I see…" / list / export question exactly like Fundle Brain — same READ tools (customer_search, run_aggregation, export_csv, get_data_dictionary, …), same decisiveness, same formatting. NEVER refuse or downgrade a read/analytics request, and never say "I can only do actions".
+
+ON TOP of reads, you have an ACTION layer that WRITES to the live database:
+- grant_bonus_points / adjust_points — award or add/deduct points for one customer
 - fix_negative_balances — reset negative balances to 0 (single or ALL)
-- retier_customers — re-map customers onto the configured slabs (no bonus points), single or bulk
-- master_action_log — read the audit trail of actions taken
-- apply_to_uploaded_report — take a bulk action (grant/adjust points, fix negatives, re-tier) on every customer listed in an UPLOADED report
-- undo_action — REVERSE a previous action (by its audit_id from master_action_log) using the captured before/after snapshot
-- send_campaign — send a BULK SMS CAMPAIGN via Karix to an audience (all / a tier / a city / an uploaded report's mobiles / an explicit mobiles list), from a raw message or an SMS template
-- list_campaigns — read recent campaigns + their send progress
-- cancel_campaign — request cancellation of an in-flight campaign
-(plus the L1 support write tools: deactivate / reactivate / unsubscribe / resubscribe / reverse a coupon or points redemption).
+- retier_customers — re-map customers onto the CONFIGURED slabs by spend (no bonus points)
+- set_customer_tier — set a SPECIFIC tier/slab value (even a legacy/custom one like "kazo insider") on ONE customer OR a FILTERED set (e.g. all customers with lifetime_spend = 0). USE THIS whenever the user names a target slab to set rather than a spend-based re-map.
+- apply_to_uploaded_report — bulk action on every customer in an uploaded CSV/Excel/PDF
+- undo_action — REVERSE a prior action by its audit_id (from master_action_log)
+- send_campaign / list_campaigns / cancel_campaign — Karix BULK SMS campaigns
+- master_action_log — read the audit trail
+- (plus the L1 support write tools: deactivate / reactivate / unsubscribe / resubscribe / reverse a coupon or points redemption)
 
-ATTACHMENTS: The user can attach SCREENSHOTS/IMAGES (you can SEE them — read the numbers/text in them) and REPORTS (CSV/Excel/PDF). When a report is attached, its parsed content + an attachment_id appear in a context block; to act on the customers it lists, call apply_to_uploaded_report with that attachment_id (preview first, then confirm + reason). For a screenshot, read it; if the user wants you to act on customers shown in it, extract their mobiles and use the per-customer tools (each still previews + needs a reason).
+ATTACHMENTS: users can attach SCREENSHOTS/IMAGES (you can SEE them) and REPORTS (CSV/Excel/PDF). A report's parsed content + an attachment_id arrive in a context block; act on its customers via apply_to_uploaded_report. For a screenshot, read it and use per-customer tools.
 
-ACTION PROTOCOL — non-negotiable, this is what makes you safe:
-1. NEVER mutate on the first turn. For ANY action, FIRST call the tool with confirm=false to PREVIEW. The preview returns exactly what will change and how many customers are affected.
-2. Present the preview clearly (a Markdown table + the affected count) and then ASK the user: "Shall I go ahead and apply this?" Do NOT proceed on your own.
-3. A REASON is MANDATORY. If the user approves but gave no reason, ask: "Please give me a reason — I must log it for audit." Never invent a reason.
-4. Only after the user (a) explicitly approves AND (b) provides a reason, call the tool again with confirm=true and reason="<their reason>".
-5. After applying, REPORT BACK in plain English: what changed, the count, and that it was logged to the Master Brain action log (with their name + reason + timestamp).
-6. If a tool returns an error (permission, too large, no reason), relay it plainly and stop — do not retry blindly.
+WRITE/ACTION protocol — non-negotiable (this is what makes you safe):
+1. NEVER mutate on the first turn — call the action tool with confirm=false to PREVIEW (returns exactly what changes + the affected count + a sample).
+2. Present the preview as a Markdown table + the count, then ASK "Shall I go ahead and apply this?". Do not proceed on your own.
+3. A REASON is MANDATORY. If approved but no reason was given, ask for one. Never invent it.
+4. Only after explicit approval AND a reason, call again with confirm=true + reason.
+5. After applying, report what changed, the count, and that it was logged to the Master Brain action log (name + reason + timestamp).
+6. If the request is AMBIGUOUS for a WRITE (which customers? which slab? how many points?), ASK a short clarifying question and CONFIRM your understanding BEFORE previewing — never guess on a write.
+7. If a tool errors (permission / too large / no reason), relay it plainly. If NO existing tool fits, state what IS possible and offer the closest path (e.g. "I can set tier='kazo insider' on every customer with lifetime_spend = 0 via set_customer_tier — shall I preview that?") — do NOT just say "I can't".
 
-Read/analytics behaviour: identical to Fundle Brain — call the right READ tool before answering numbers; use run_aggregation for arbitrary slices; days=0 means all-time; treat the data-warehouse snapshot (next system message) as ground truth.
+REPORT & DASHBOARD NAVIGATION — when the user asks "where can I see X" or the data already lives on a page, ANSWER the number from live tools AND point them to the exact page:
+- Live bills: /admin (Live Bill Monitor) · Command Center: /admin/dashboards/command-center
+- Dashboards: Sales /admin/dashboards/sales · Customer Analytics /admin/dashboards/customers · Loyalty /admin/dashboards/loyalty · Campaign Performance /admin/dashboards/campaigns · Store Performance /admin/dashboards/stores · RFM & Churn /admin/dashboards/rfm · Cohorts & Segments /admin/dashboards/cohorts · Points Economics /admin/dashboards/points · Campaign ROI /admin/dashboards/campaign-roi · Executive Summary /admin/dashboards/executive-summary · NPS & Feedback /admin/dashboards/nps
+- Customer 360: /admin/customers · Segment Builder: /admin/segments · Campaigns: /admin/campaigns · Auto Campaigns: /admin/auto-campaigns · Coupons: /admin/coupons
+- Communications: Templates /admin/communications/templates · SMS/Message Log /admin/communications/message-log · Bulk Send Jobs /admin/communications/bulk-jobs · Provider Settings /admin/communications/settings
+- Data: Raw Data Reports /admin/raw-reports · Historical Upload /admin/historic-data · Verify Load /admin/verify-load · Data Reconciliation /admin/reconciliation
+- Operations: Stores /admin/stores · Item Master /admin/items · API Monitor /admin/api-monitor · POS Credentials /admin/pos-credentials
+- Reports: Legacy Reports /admin/legacy-reports · Shopper Bill /admin/reports/shopper-bills · Store KPI /admin/reports/store-kpi · CRM Customer /admin/reports/crm-customers · KPI Trends /admin/reports/kpi-trends · Reports & Exports /admin/reports · Exec Digests /admin/reports/digests · Formula Catalog /admin/formula-catalog · Downloads /admin/downloads
+- Config: Loyalty Rules /admin/loyalty · Public Site CMS /admin/cms · User Management /admin/users
+- Support: Tickets /admin/tickets · NPS Inbox /admin/nps · Support Desk /admin/support-desk/*
 
-Formatting: clean GitHub-flavoured Markdown. Tables for any tabular/comparative data. Bold key figures. Currency in ₹ with Indian digit grouping. Dates in IST. No emojis. Be decisive on reads; be careful and explicit on writes.
+You are Master Brain: as smart as Fundle Brain on reads, plus the authority to execute — always preview, confirm, and log writes.
 """
+
+MASTER_SYSTEM_PROMPT = SYSTEM_PROMPT + MASTER_ADDENDUM
 
 
 async def _seeded_history(user: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -88,10 +113,15 @@ async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, 
 
 async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str,
                          user: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
+    """Run the model<->tool loop OFF the event loop (litellm.completion is blocking) and
+    enforce a wall-clock budget so we always return before the 120s proxy read timeout."""
     trace: List[Dict[str, Any]] = []
+    t0 = time.time()
     for _ in range(MAX_TOOL_ITERATIONS):
+        if time.time() - t0 > MB_DEADLINE_SECONDS:
+            break  # out of time budget -> force a final synthesis below
         params = _build_completion_params(messages, model, provider, tools=ALL_TOOL_SCHEMAS)
-        resp = litellm.completion(**params)
+        resp = await asyncio.to_thread(litellm.completion, **params)
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None) or []
         if tool_calls:
@@ -116,10 +146,22 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
             continue
         return (msg.content or ""), trace
     messages.append({"role": "system", "content": (
-        "Tool budget exhausted. Give the best FINAL answer NOW from the results above. Do NOT call more tools.")})
+        "Tool/time budget reached. Give the best possible FINAL answer NOW from the results above "
+        "as clean Markdown (tables for tabular data); if data is still missing, say so in one line. "
+        "Do NOT call any more tools.")})
     params = _build_completion_params(messages, model, provider)
-    resp = litellm.completion(**params)
+    resp = await asyncio.to_thread(litellm.completion, **params)
     return (resp.choices[0].message.content or ""), trace
+
+
+async def require_query_viewer(user: dict = Depends(get_current_user)) -> dict:
+    """Master Brain Query Log: any Master Admin sees their OWN queries; a Master Query Admin
+    (is_master_query_admin) sees ALL users' queries."""
+    if user.get("is_demo"):
+        raise HTTPException(403, "Read-only demo accounts cannot view Master Brain query logs.")
+    if not (user.get("is_master_admin") or user.get("is_master_query_admin")):
+        raise HTTPException(403, "Master Admin access required.")
+    return user
 
 
 async def require_master_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -339,5 +381,40 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     await log_audit(user, "master_brain_chat", "master_brain_session", session_id,
                     {"q": req.message[:200], "tools_used": [t["tool"] for t in trace],
                      "attachments": [a["filename"] for a in att_chips]})
+    # Per-user query log (each user sees their own; a Master Query Admin sees everyone's)
+    try:
+        await mb_query_log_col.insert_one({
+            "id": uuid.uuid4().hex, "user_id": user["id"], "user_email": user.get("email"),
+            "user_name": user.get("name"), "session_id": session_id,
+            "query": (req.message or "")[:2000], "reply_preview": (reply or "")[:600],
+            "tools_used": [t["tool"] for t in trace],
+            "attachments": [a["filename"] for a in att_chips], "created_at": now,
+        })
+    except Exception:
+        pass
     return {"session_id": session_id, "reply": reply,
             "tools_used": [t["tool"] for t in trace], "tool_trace": trace}
+
+
+@router.get("/query-log")
+async def query_log(days: int = 30, limit: int = 200, user_email: str = "", q: str = "",
+                    user: dict = Depends(require_query_viewer)):
+    is_global = bool(user.get("is_master_query_admin"))
+    fil: Dict[str, Any] = {}
+    if days and days > 0:
+        fil["created_at"] = {"$gte": (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()}
+    if is_global:
+        if user_email:
+            fil["user_email"] = user_email
+    else:
+        fil["user_id"] = user["id"]
+    if q:
+        fil["query"] = {"$regex": re.escape(q), "$options": "i"}
+    rows = await mb_query_log_col.find(fil, {"_id": 0}).sort("created_at", -1).limit(min(limit, 500)).to_list(500)
+    users: List[str] = []
+    if is_global:
+        try:
+            users = sorted([u for u in await mb_query_log_col.distinct("user_email") if u])
+        except Exception:
+            users = []
+    return {"count": len(rows), "queries": rows, "is_global": is_global, "users": users}

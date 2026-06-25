@@ -837,6 +837,118 @@ async def _tool_cancel_campaign(campaign_id: str, reason: str = "", confirm: boo
             "message": "Cancellation requested — the campaign will stop after the current batch."}
 
 
+async def _tool_set_customer_tier(tier: str, mobile: Optional[str] = None,
+                                  max_lifetime_spend: Optional[float] = None,
+                                  min_lifetime_spend: Optional[float] = None,
+                                  current_tier: Optional[str] = None,
+                                  reason: str = "", confirm: bool = False, user=None) -> Dict[str, Any]:
+    """Set a SPECIFIC tier/slab value (even a legacy/custom one) on one customer or a filtered set."""
+    err = _require_master(user)
+    if err:
+        return err
+    tier = (tier or "").strip()
+    if not tier:
+        return {"error": "tier (the slab/value to set) is required, e.g. 'kazo insider'."}
+    from routes.loyalty_routes import _active_sorted_tiers
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "tier_rules": 1}) or {}
+    configured = [t["tier"] for t in _active_sorted_tiers(cfg)]
+    note = None if tier in configured else (f"'{tier}' is not one of the configured slabs ({configured}); "
+                                            f"setting it as an explicit value as requested.")
+
+    if mobile:
+        cust = await _find_customer(mobile)
+        if not cust:
+            return {"found": False, "mobile": mobile, "error": "No customer found."}
+        plan = {"action": "set_customer_tier", "scope": "single", "mobile": cust.get("mobile"),
+                "current_tier": cust.get("tier"), "new_tier": tier, "awards_bonus": False, "note": note}
+        if cust.get("tier") == tier:
+            plan["message"] = "Already on that tier — nothing to change."
+            return plan
+        if not confirm:
+            plan["preview"] = True
+            return plan
+        rerr = _need_reason(reason)
+        if rerr:
+            return rerr
+        await customers_col.update_one({"id": cust["id"]},
+                                       {"$set": {"tier": tier, "tier_updated_at": _now_iso()}})
+        audit_id = await _log_master(user, "set_customer_tier", "customer", cust.get("id"), reason,
+                                     {"mobile": cust.get("mobile"), "from": cust.get("tier"), "to": tier})
+        await _record_snapshot(audit_id, "set_customer_tier", [{
+            "cust_id": cust["id"], "mobile": cust.get("mobile"),
+            "tier_before": cust.get("tier"), "tier_after": tier}])
+        return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+                "message": f"Set {cust.get('mobile')} to tier '{tier}' (no bonus points)."}
+
+    # ---- bulk by filter ----
+    fil: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
+    spend: Dict[str, Any] = {}
+    if max_lifetime_spend is not None:
+        spend["$lte"] = float(max_lifetime_spend)
+    if min_lifetime_spend is not None:
+        spend["$gte"] = float(min_lifetime_spend)
+    if spend:
+        fil["lifetime_spend"] = spend
+    if current_tier:
+        fil["tier"] = current_tier
+    if not spend and not current_tier:
+        return {"error": "For a bulk tier set, give at least one filter (max_lifetime_spend, "
+                         "min_lifetime_spend or current_tier) — refusing to retier ALL customers without a filter. "
+                         "Or pass a single mobile."}
+    base = {**fil, "tier": {"$ne": tier}}
+    count = await customers_col.count_documents(base)
+    sample_docs = await customers_col.find(base, {"_id": 0, "mobile": 1, "tier": 1, "lifetime_spend": 1}) \
+        .limit(20).to_list(20)
+    sample = [{"mobile": d.get("mobile"), "from": d.get("tier"), "to": tier,
+               "lifetime_spend": d.get("lifetime_spend")} for d in sample_docs]
+    plan = {"action": "set_customer_tier", "scope": "bulk", "new_tier": tier,
+            "filter_desc": {"max_lifetime_spend": max_lifetime_spend,
+                            "min_lifetime_spend": min_lifetime_spend, "current_tier": current_tier},
+            "customers_matched": count, "sample": sample, "awards_bonus": False, "note": note}
+    if count == 0:
+        plan["message"] = "No customers match that filter (or they're already on the target tier)."
+        return plan
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = (f"This sets tier='{tier}' on {count} customers (NO bonus points). "
+                                         f"Confirm with the user + a reason, then confirm=true.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    if count > INLINE_CAP:
+        return {"error": f"{count} customers exceeds the inline cap ({INLINE_CAP})."}
+    changes: List[Dict[str, Any]] = []
+    updated = 0
+    last_id = None
+    while True:
+        q = dict(base)
+        if last_id is not None:
+            q["_id"] = {"$gt": last_id}
+        docs = await customers_col.find(q, {"_id": 1, "id": 1, "mobile": 1, "tier": 1}) \
+            .sort("_id", 1).limit(BATCH).to_list(BATCH)
+        if not docs:
+            break
+        ops = []
+        for d in docs:
+            ops.append(UpdateOne({"_id": d["_id"]}, {"$set": {"tier": tier, "tier_updated_at": _now_iso()}}))
+            changes.append({"cust_id": d.get("id"), "mobile": d.get("mobile"),
+                            "tier_before": d.get("tier"), "tier_after": tier})
+        if ops:
+            res = await customers_col.bulk_write(ops, ordered=False)
+            updated += res.modified_count
+        last_id = docs[-1]["_id"]
+        if len(docs) < BATCH:
+            break
+    audit_id = await _log_master(user, "set_customer_tier_bulk", "customers", "bulk", reason,
+                                 {"new_tier": tier, "matched": count, "updated": updated,
+                                  "filter": plan["filter_desc"]})
+    await _record_snapshot(audit_id, "set_customer_tier_bulk", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "customers_updated": updated,
+            "message": f"Set {updated} customers to tier '{tier}' (no bonus points). Logged to the action log."}
+
+
 MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "grant_bonus_points",
@@ -909,6 +1021,25 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "confirm": {"type": "boolean", "default": False},
         }, "required": ["attachment_id", "action"]}}},
     {"type": "function", "function": {
+        "name": "set_customer_tier",
+        "description": "MUTATION (Master Admin). Set a SPECIFIC tier/slab value on a customer or a FILTERED set "
+                       "of customers — including an arbitrary/legacy slab the spend-bands wouldn't assign (e.g. set "
+                       "'kazo insider' on every customer whose lifetime purchase is 0). Use THIS (not retier_customers) "
+                       "whenever the user names the exact target slab. Pass a single `mobile`, OR a filter: "
+                       "`max_lifetime_spend` (lifetime_spend <= X, e.g. 0), `min_lifetime_spend` (>= X) and/or "
+                       "`current_tier` (only customers currently on that tier). A bulk call REQUIRES at least one "
+                       "filter (never retiers everyone). NO bonus points. confirm=false previews count + sample "
+                       "old->new; confirm=true + reason applies. Audit-logged and UNDOABLE.",
+        "parameters": {"type": "object", "properties": {
+            "tier": {"type": "string", "description": "The exact tier/slab value to set, e.g. 'kazo insider'"},
+            "mobile": {"type": "string", "description": "Optional — a single customer"},
+            "max_lifetime_spend": {"type": "number", "description": "Filter: lifetime_spend <= this (e.g. 0)"},
+            "min_lifetime_spend": {"type": "number", "description": "Filter: lifetime_spend >= this"},
+            "current_tier": {"type": "string", "description": "Filter: only customers currently on this tier"},
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }, "required": ["tier"]}}},
+    {"type": "function", "function": {
         "name": "undo_action",
         "description": "MUTATION (Master Admin). REVERSE a previous Master Brain action by its audit log id "
                        "(grant/adjust points, fix negatives, re-tier — single, bulk or uploaded-report). Uses the "
@@ -964,6 +1095,7 @@ MASTER_TOOL_HANDLERS = {
     "adjust_points": _tool_adjust_points,
     "fix_negative_balances": _tool_fix_negative_balances,
     "retier_customers": _tool_retier_customers,
+    "set_customer_tier": _tool_set_customer_tier,
     "master_action_log": _tool_master_action_log,
     "apply_to_uploaded_report": _tool_apply_to_uploaded_report,
     "undo_action": _tool_undo_action,

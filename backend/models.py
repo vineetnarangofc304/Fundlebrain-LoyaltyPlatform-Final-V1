@@ -44,6 +44,7 @@ class UserBase(BaseModel):
     region: Optional[str] = None
     is_active: bool = True
     is_master_admin: bool = False
+    is_master_query_admin: bool = False
 
 
 class UserCreate(UserBase):
@@ -58,6 +59,7 @@ class UserUpdate(BaseModel):
     region: Optional[str] = None
     is_active: Optional[bool] = None
     is_master_admin: Optional[bool] = None
+    is_master_query_admin: Optional[bool] = None
 
 
 class User(UserBase):

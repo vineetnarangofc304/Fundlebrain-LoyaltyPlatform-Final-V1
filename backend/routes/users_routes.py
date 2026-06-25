@@ -51,6 +51,8 @@ async def create_user(payload: UserCreate, request: Request, user: dict = Depend
     # Only a super admin may mint a Master Admin.
     if doc.get("is_master_admin") and user["role"] != "super_admin":
         doc["is_master_admin"] = False
+    if doc.get("is_master_query_admin") and user["role"] != "super_admin":
+        doc["is_master_query_admin"] = False
     doc["password_hash"] = hash_password(doc.pop("password"))
     doc["id"] = __import__("uuid").uuid4().hex
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
@@ -76,6 +78,8 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(re
     # Only a super admin may grant/revoke Master Admin rights.
     if "is_master_admin" in updates and user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only a super admin can change Master Admin rights")
+    if "is_master_query_admin" in updates and user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only a super admin can change Master Query Admin rights")
     if updates:
         await users_col.update_one({"id": user_id}, {"$set": updates})
         await log_audit(user, "update_user", "user", user_id, updates)
