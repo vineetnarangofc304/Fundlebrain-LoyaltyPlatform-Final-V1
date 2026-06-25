@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { ShieldCheck, AlertTriangle, CheckCircle2, RefreshCw, Coins, Users } from "lucide-react";
 import { PageHeader, SectionHeading, KPICard } from "./_shared";
 import CsvReconSection from "./recon/CsvReconSection";
+import LoadedFilesSection from "./recon/LoadedFilesSection";
 
 const fmtMoney2 = (v) => v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 const fmtNum = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN");
@@ -25,7 +26,7 @@ export default function ReconciliationPage() {
     }
   };
 
-  useEffect(() => { fetchReport(); }, []);
+  useEffect(() => { /* heavy integrity report is loaded on demand to keep the page responsive */ }, []);
 
   const runAction = async (key, url, label) => {
     setRunning((s) => ({ ...s, [key]: true }));
@@ -57,10 +58,25 @@ export default function ReconciliationPage() {
         }
       />
       <div className="p-4 md:p-8 space-y-6">
+        {/* All files loaded — fast, always visible (answers "what did we load and did it land") */}
+        <LoadedFilesSection />
+
         {/* CSV ↔ DB row-level reconciliation (re-upload a source CSV) */}
         <CsvReconSection />
 
-        {!report && <div className="text-neutral-500">Running first reconciliation…</div>}
+        {/* Heavy DB-wide integrity report — loaded on demand so the page never hangs */}
+        {!report && !loading && (
+          <div className="chart-card p-5 flex items-center justify-between gap-3" data-accent="slate" data-testid="run-integrity-prompt">
+            <div>
+              <SectionHeading eyebrow="FULL INTEGRITY REPORT" title="DB-wide reconciliation (heavy)" accent="slate" />
+              <p className="text-xs text-neutral-500 mt-1">Scans the whole database (sums, ledger coverage, orphans, duplicates). Can take up to a minute at full scale, so it runs only when you ask.</p>
+            </div>
+            <button onClick={fetchReport} className="k-btn kazo-bg-burgundy text-white shrink-0" data-testid="run-integrity-btn">
+              <ShieldCheck className="w-4 h-4" /> Run full report
+            </button>
+          </div>
+        )}
+        {!report && loading && <div className="text-neutral-500" data-testid="integrity-running">Running full integrity report… this can take up to a minute.</div>}
 
         {report && (
           <>
