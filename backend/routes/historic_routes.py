@@ -58,6 +58,18 @@ SKIPPED_PERSIST_CAP = 1_000_000  # safety cap on skipped-rows write per job
 ALLOWED_DATASETS = {"customers", "transactions", "stores", "items", "points_ledger", "sku_transactions"}
 DUPLICATE_MODES = {"upsert", "skip", "fail"}
 
+# Loyalty go-live: only bills on/after this date earn loyalty points (POS data
+# started flowing on 8 Jun 2025). Editable via PUT /historic-data/points-cutoff.
+DEFAULT_POINTS_CUTOFF = "2025-06-08"
+
+
+async def _get_points_cutoff() -> str:
+    try:
+        cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "points_cutoff_date": 1})
+        return ((cfg or {}).get("points_cutoff_date") or DEFAULT_POINTS_CUTOFF)
+    except Exception:
+        return DEFAULT_POINTS_CUTOFF
+
 
 # ---------------- Date parsing ----------------
 _DATE_PATTERNS = [
@@ -1075,6 +1087,9 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = N
             "total_rows": total_rows,
             "row_count_estimated": total_rows,
             "stores_auto_created": len(store_links) if dataset == "transactions" else 0,
+            # Retain uploaded chunks for completed real jobs so the file can be
+            # re-checked / healed in place later (Data Reconciliation → Check & Heal).
+            "chunks_retained": (not dry_run),
         }
         await historic_jobs_col.update_one({"id": job_id}, {"$set": final})
         logger.info(f"Historic ingest job {job_id} done: {final}")
@@ -1124,6 +1139,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = N
                 # Recompute R1/R2/R3 aggregates for THIS job's mobiles (much cheaper than full backfill)
                 affected = mobiles_in_job
                 if affected:
+                    cutoff = await _get_points_cutoff()
                     pipe = [
                         {"$match": {"customer_mobile": {"$in": affected}}},
                         {"$sort": {"bill_date": 1}},
@@ -1134,11 +1150,13 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = N
                             "last_visit_at": {"$last": "$bill_date"},
                             "uniq_bills": {"$addToSet": {"s": "$store_id", "b": "$bill_number", "d": "$bill_date"}},
                             "spend": {"$sum": "$net_amount"},
-                            "earn":  {"$sum": "$points_earned"},
+                            # Loyalty points are earned ONLY on bills on/after the go-live cutoff.
+                            "earn":  {"$sum": {"$cond": [{"$gte": ["$bill_date", cutoff]}, "$points_earned", 0]}},
                         }},
                     ]
                     cust_ops = []
                     async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
+                        spend_val = round(float(r.get("spend") or 0), 2)
                         cust_ops.append(UpdateOne(
                             {"mobile": r["_id"]},
                             {"$set": {
@@ -1146,8 +1164,9 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = N
                                 "last_visit_at": r["last_visit_at"],
                                 "home_store_id": r.get("first_store_id"),
                                 "visit_count": len(r.get("uniq_bills", [])),
-                                "lifetime_spend": round(float(r.get("spend") or 0), 2),
+                                "lifetime_spend": spend_val,
                                 "lifetime_points_earned": round(float(r.get("earn") or 0), 2),
+                                "tier": _derive_tier(spend_val),
                             }},
                             upsert=False,
                         ))
@@ -2049,13 +2068,14 @@ async def process_pending_ingests():
         except Exception:
             pass
 
-    # Step 4: cleanup chunks if ingest completed cleanly
+    # Step 4: retain chunks for completed jobs so the file can be re-checked / healed
+    # in place later (Data Reconciliation → Check & Heal). Failed jobs still get cleaned.
     refreshed = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0, "status": 1, "total_rows": 1, "inserted": 1, "updated": 1, "skipped": 1})
     if refreshed and refreshed.get("status") in {"completed", "previewed"}:
-        deleted = await historic_chunks_col.delete_many({"job_id": job_id})
+        await historic_jobs_col.update_one({"id": job_id}, {"$set": {"chunks_retained": True}})
         # Reconciliation: count rows in DB vs CSV total_rows
         await _reconcile_job(job_id, job["dataset"])
-        logger.info(f"Ingest job {job_id} done — cleaned up {deleted.deleted_count} chunk docs")
+        logger.info(f"Ingest job {job_id} done — chunks RETAINED for future heal")
 
 
 async def _reconcile_job(job_id: str, dataset: str):
@@ -2746,6 +2766,149 @@ async def backfill_points_ledger(
     report["completed_at"] = datetime.now(timezone.utc).isoformat()
     logger.info(f"Points-ledger backfill complete: {report}")
     return report
+
+
+# ============================================================
+# Points cutoff config + per-file Check & Heal + global recompute
+# ============================================================
+recompute_jobs_col = db["recompute_jobs"]
+
+
+class CutoffIn(BaseModel):
+    cutoff: str  # ISO date YYYY-MM-DD
+
+
+@router.get("/points-cutoff")
+async def get_points_cutoff(user: dict = Depends(get_current_user)):
+    return {"cutoff": await _get_points_cutoff(), "default": DEFAULT_POINTS_CUTOFF}
+
+
+@router.put("/points-cutoff")
+async def set_points_cutoff(body: CutoffIn,
+                            user: dict = Depends(require_roles("super_admin", "brand_admin"))):
+    val = (body.cutoff or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+        raise HTTPException(400, "cutoff must be an ISO date, e.g. 2025-06-08")
+    await loyalty_config_col.update_one({"id": "default"},
+                                        {"$set": {"points_cutoff_date": val}}, upsert=True)
+    await audit_logs_col.insert_one({
+        "id": uuid.uuid4().hex, "action": "set_points_cutoff", "entity": "loyalty_config",
+        "entity_id": "default", "user_email": user.get("email"), "user_name": user.get("name"),
+        "metadata": {"cutoff": val}, "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"ok": True, "cutoff": val}
+
+
+@router.post("/jobs/{job_id}/heal")
+async def heal_job(job_id: str,
+                   user: dict = Depends(require_roles("super_admin", "brand_admin"))):
+    """Re-check & heal a loaded file: re-ingest it idempotently from its retained chunks
+    (inserts any missing rows, updates changed ones), then the post-pass recomputes each
+    customer's spend, tier and cutoff-aware points. Reuses the full ingest pipeline."""
+    job = await historic_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(404, "File/job not found")
+    if job.get("status") in {"running", "pending_ingest", "ingesting", "uploading"}:
+        return {"queued": False, "status": job.get("status"),
+                "message": "This file is already being processed — try again once it finishes."}
+    chunk_cnt = await historic_chunks_col.count_documents({"job_id": job_id})
+    if chunk_cnt == 0:
+        raise HTTPException(400, "This file was loaded before file-retention was enabled, so its rows "
+                                 "can't be re-read in place. Re-upload the same file via the CSV "
+                                 "reconciliation tool below to heal it, or run 'Recompute points & tiers'.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # clear this job's prior skipped rows so the re-run's diagnostics are fresh
+    try:
+        await historic_skipped_col.delete_many({"job_id": job_id})
+    except Exception:
+        pass
+    await historic_jobs_col.update_one({"id": job_id}, {
+        "$set": {"status": "pending_ingest", "heal_requested_at": now_iso,
+                 "heal_requested_by": user.get("email"), "heartbeat": now_iso,
+                 "claimed_at": None, "error": None, "stale_recovered_at": None},
+        "$inc": {"heal_count": 1},
+    })
+    await audit_logs_col.insert_one({
+        "id": uuid.uuid4().hex, "action": "historic_file_heal", "entity": "historic_ingest_job",
+        "entity_id": job_id, "user_email": user.get("email"), "user_name": user.get("name"),
+        "metadata": {"filename": job.get("filename"), "dataset": job.get("dataset")},
+        "timestamp": now_iso,
+    })
+    logger.info(f"Heal queued for job {job_id} by {user.get('email')}")
+    return {"queued": True, "job_id": job_id,
+            "message": "Re-check queued. The file will be re-ingested idempotently — missing rows "
+                       "inserted and each customer's spend, tier and cutoff-aware points recomputed. "
+                       "Refresh in a moment to see updated counts."}
+
+
+async def _run_recompute(job_id: str, cutoff: str) -> None:
+    from pymongo import UpdateOne
+    processed = 0
+    try:
+        pipe = [
+            {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
+            {"$group": {
+                "_id": "$customer_mobile",
+                "spend": {"$sum": "$net_amount"},
+                "earn": {"$sum": {"$cond": [{"$gte": ["$bill_date", cutoff]}, "$points_earned", 0]}},
+                "redeem": {"$sum": "$points_redeemed"},
+            }},
+        ]
+        ops: List[Any] = []
+        async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
+            spend = round(float(r.get("spend") or 0), 2)
+            earn = round(float(r.get("earn") or 0), 2)
+            redeem = round(float(r.get("redeem") or 0), 2)
+            ops.append(UpdateOne({"mobile": r["_id"]}, {"$set": {
+                "lifetime_spend": spend, "lifetime_points_earned": earn,
+                "lifetime_points_redeemed": redeem, "tier": _derive_tier(spend),
+            }}))
+            if len(ops) >= 1000:
+                await customers_col.bulk_write(ops, ordered=False)
+                processed += len(ops)
+                ops.clear()
+                await recompute_jobs_col.update_one({"id": job_id},
+                    {"$set": {"processed": processed, "heartbeat": datetime.now(timezone.utc).isoformat()}})
+        if ops:
+            await customers_col.bulk_write(ops, ordered=False)
+            processed += len(ops)
+        await recompute_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "completed", "processed": processed,
+            "completed_at": datetime.now(timezone.utc).isoformat()}})
+        logger.info(f"Recompute {job_id} complete — {processed} customers")
+    except Exception as e:  # noqa: BLE001
+        await recompute_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "failed", "error": str(e), "processed": processed,
+            "completed_at": datetime.now(timezone.utc).isoformat()}})
+        logger.exception(f"Recompute {job_id} failed")
+
+
+@router.post("/recompute-points-tiers")
+async def recompute_points_tiers(user: dict = Depends(require_roles("super_admin", "brand_admin"))):
+    """Recompute lifetime spend, tier and cutoff-aware points for EVERY customer from their
+    bills. Runs in the background; poll /recompute-status. Does NOT touch manual point
+    adjustments / opening balances (points_balance is preserved)."""
+    running = await recompute_jobs_col.find_one({"status": {"$in": ["queued", "running"]}}, {"_id": 0, "id": 1})
+    if running:
+        return {"queued": False, "job_id": running["id"], "message": "A recompute is already running."}
+    cutoff = await _get_points_cutoff()
+    jid = uuid.uuid4().hex
+    await recompute_jobs_col.insert_one({
+        "id": jid, "status": "running", "cutoff": cutoff, "processed": 0,
+        "started_by": user.get("email"), "started_at": datetime.now(timezone.utc).isoformat()})
+    await audit_logs_col.insert_one({
+        "id": uuid.uuid4().hex, "action": "recompute_points_tiers", "entity": "customers",
+        "entity_id": "all", "user_email": user.get("email"), "user_name": user.get("name"),
+        "metadata": {"cutoff": cutoff}, "timestamp": datetime.now(timezone.utc).isoformat()})
+    asyncio.create_task(_run_recompute(jid, cutoff))
+    return {"queued": True, "job_id": jid, "cutoff": cutoff,
+            "message": f"Recompute started for all customers (points earned only on bills on/after {cutoff})."}
+
+
+@router.get("/recompute-status")
+async def recompute_status(user: dict = Depends(get_current_user)):
+    row = await recompute_jobs_col.find_one({}, {"_id": 0}, sort=[("started_at", -1)])
+    return row or {"status": "none"}
 
 
 # ============================================================
