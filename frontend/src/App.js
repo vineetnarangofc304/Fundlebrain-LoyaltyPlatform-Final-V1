@@ -37,6 +37,7 @@ import LoyaltyConfigurator from "@/pages/admin/LoyaltyConfigurator";
 import CouponEngine from "@/pages/admin/CouponEngine";
 import CampaignManager from "@/pages/admin/CampaignManager";
 import FundleBrain from "@/pages/admin/FundleBrain";
+import MasterBrain from "@/pages/admin/MasterBrain";
 import APIMonitor from "@/pages/admin/APIMonitor";
 import UserManagement from "@/pages/admin/UserManagement";
 import StoresPage from "@/pages/admin/Stores";
@@ -183,6 +184,7 @@ function App() {
             <Route path="auto-campaigns" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><AutoCampaignsPage /></ProtectedRoute>} />
             <Route path="raw-reports" element={<RawReportsPage />} />
             <Route path="ai" element={<FundleBrain />} />
+            <Route path="master-brain" element={<MasterBrain />} />
             <Route path="api-monitor" element={<APIMonitor />} />
             <Route path="users" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><UserManagement /></ProtectedRoute>} />
             <Route path="stores" element={<StoresPage />} />

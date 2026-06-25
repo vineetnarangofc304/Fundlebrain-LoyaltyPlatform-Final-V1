@@ -5,7 +5,7 @@ import {
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
   Settings, Package, Layers, FileText, Image as ImageIcon, ChevronRight, Database, Upload, Radio, KeyRound,
   Menu as MenuIcon, X as CloseIcon, ShieldCheck, Filter, Cake, ClipboardCheck,
-  PanelLeftClose, PanelLeftOpen, Smartphone, DownloadCloud
+  PanelLeftClose, PanelLeftOpen, Smartphone, DownloadCloud, ShieldAlert
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { BRAND } from "@/brand.config";
@@ -322,6 +322,36 @@ export default function AdminLayout() {
               </div>
             </div>
           </NavLink>
+
+          {/* Master Brain hero — only for Master Admins. Red treatment signals
+              that this surface can take LIVE actions on the database. */}
+          {user?.is_master_admin && (
+            <NavLink
+              to="/admin/master-brain"
+              data-testid="nav-master-brain"
+              className={({ isActive }) =>
+                `mx-3 mb-3 flex items-center gap-3 px-4 py-3 rounded-sm relative overflow-hidden transition-all group ${
+                  isActive ? "ring-2 ring-red-300/70" : "hover:ring-2 hover:ring-red-300/40"
+                }`
+              }
+              style={{ background: "linear-gradient(135deg, #7F1D1D 0%, #5B0E0E 60%, #2A0606 100%)" }}
+            >
+              <div className="absolute inset-0 opacity-20 pointer-events-none"
+                   style={{ background: "radial-gradient(circle at 80% 0%, #FCA5A5 0%, transparent 50%)" }} />
+              <div className="relative w-9 h-9 rounded-full bg-gradient-to-br from-red-300/30 to-red-100/10 border border-red-200/40 flex items-center justify-center shrink-0">
+                <ShieldAlert className="w-4 h-4 text-red-200" />
+              </div>
+              <div className="relative flex-1 min-w-0">
+                <div className="font-display text-[15px] tracking-tight text-white flex items-center gap-1.5">
+                  Master Brain
+                  <Sparkles className="w-3 h-3 text-red-200" />
+                </div>
+                <div className="text-[10px] uppercase tracking-[0.2em] text-red-200/80 mt-0.5">
+                  ACT · WRITE · AUDITED
+                </div>
+              </div>
+            </NavLink>
+          )}
 
           {SECTIONS.map((section) => {
             if (section.adminOnly && !hasRole(user, "super_admin", "brand_admin")) return null;

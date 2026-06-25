@@ -53,6 +53,7 @@ from routes.shopper_report_routes import router as shopper_report_router, export
 from routes.reports_kpi_routes import router as kpi_reports_router, export_router as kpi_reports_export_router
 from routes.exports_routes import router as exports_router
 from routes.demo_routes import router as demo_router
+from routes.master_brain_routes import router as master_brain_router
 
 app = FastAPI(title="KAZO Fundle Platform", version="1.0.0")
 api_router = APIRouter(prefix="/api")
@@ -114,6 +115,7 @@ api_router.include_router(kpi_reports_export_router)
 api_router.include_router(exports_router)
 api_router.include_router(recon_router)
 api_router.include_router(demo_router)
+api_router.include_router(master_brain_router)
 
 app.include_router(api_router)
 

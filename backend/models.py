@@ -43,6 +43,7 @@ class UserBase(BaseModel):
     store_id: Optional[str] = None
     region: Optional[str] = None
     is_active: bool = True
+    is_master_admin: bool = False
 
 
 class UserCreate(UserBase):
@@ -56,6 +57,7 @@ class UserUpdate(BaseModel):
     store_id: Optional[str] = None
     region: Optional[str] = None
     is_active: Optional[bool] = None
+    is_master_admin: Optional[bool] = None
 
 
 class User(UserBase):

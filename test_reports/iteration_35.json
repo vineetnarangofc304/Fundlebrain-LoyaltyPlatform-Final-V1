@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 35 — Master Brain end-to-end test. Found and FIXED a P0 frontend crash (AdminLayout ReferenceError 'section is not defined'). After fix, all 9 acceptance scenarios validated: RBAC nav visibility, RBAC negative (super_admin denied UI + 403 API), master-brain-denied panel, Master Brain page + Action Log tab, the full PREVIEW -> ask-for-reason -> APPLY action protocol on scratch customer 9990002222, and the audit log row with user_name + reason + before/after. Backend 11/11 RBAC + API gating tests pass.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "AdminLayout",
+        "issue": "FIXED (was P0). Inserting the Master Brain hero NavLink had removed the `{SECTIONS.map((section) => {` opener, so the entire admin sidebar threw `ReferenceError: section is not defined`, crashed the layout, and the red 'Master Brain' nav item was never rendered for master admins. Visiting /admin/master-brain also showed a runtime-error overlay (NOT the access-denied panel) for super_admin. Restored the map() wrapper -> sidebar renders, nav-master-brain shows for master only, denied panel shows for super_admin.",
+        "selector": "[data-testid=\"nav-master-brain\"]",
+        "priority": "CRITICAL"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Master Brain -> Action Log tab refresh",
+        "issue": "Minor: the Action Log table does not auto-refetch after a write action is applied in the chat; user must switch tabs (or hit it after a delay) to see the new row. API returns the row correctly (verified via /api/master-brain/action-log).",
+        "affected_selectors": ["[data-testid=\"mb-action-log\"]", "[data-testid=\"mb-tab-log\"]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration35_master_brain_test.py",
+    "/app/test_reports/pytest/iteration35.xml"
+  ],
+  "action_items": [
+    "(Optional) When Master Brain applies a write tool successfully, auto-refresh the Action Log query (react-query invalidate) so the row appears without the user clicking the tab a second time.",
+    "Add a regression test (snapshot or render) for AdminLayout so a re-insertion of a hero NavLink can't silently drop the SECTIONS.map() wrapper again."
+  ],
+  "critical_code_review_comments": [
+    "AdminLayout.jsx: the SECTIONS.map() opener was deleted when the Master Brain hero was inserted between the Fundle Brain hero and the section loop — a regression-test or eslint rule (no-undef on `section`) would have caught this immediately.",
+    "master_brain_routes.py looks clean — three-step protocol enforced server-side via tool schema + _need_reason gate, and audit row is written inside the tool itself (not relying on the LLM to log).",
+    "master_brain_tools.py: bulk operations correctly capped at INLINE_CAP=20000 and batched at 1000; points changes always write a ledger row — good."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/admin/AdminLayout.jsx (fixed SECTIONS.map opener)",
+    "/app/backend/tests/iteration35_master_brain_test.py (new)"
+  ],
+  "success_rate": { "backend": "100% (11/11, 1 skipped non-critical)", "frontend": "100% after fix (4/4 scenarios)" },
+  "test_credentials": "masteradmin@fundle.io / Master@2026 ; superadmin@fundle.io / Fundle@2026 ; scratch customer mobile 9990002222",
+  "seed_data_creation": "None. Existing seeded scratch customer 9990002222 used; its balance is now 300 (was 0) after the QA grant.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "AdminLayout SECTIONS.map() fix is in. Master Brain write-flow on 9990002222 has already been exercised once; balance is now 300 with one audit row (reason 'QA test goodwill'). For future runs use a different reason string or the adjust_points tool to deduct, so the action log accumulates distinct entries.",
+  "rca of the issue": "Root cause: when the Master Brain hero NavLink was added to AdminLayout.jsx between the Fundle Brain NavLink and the existing `SECTIONS.map((section) => { ... })` block, the opening `{SECTIONS.map((section) => {` line was accidentally removed. JSX still compiled because the body of the map was syntactically valid JS (an `if` + JSX `return`), but at runtime React encountered the bare identifier `section` and threw `ReferenceError: section is not defined`, which crashed the entire AdminLayout (and therefore the sidebar + the master-brain-denied panel). Reproduction: log into /crm/login as anyone, navigate to /admin — full-page Uncaught runtime error overlay. Fix: re-added `{SECTIONS.map((section) => {` immediately before `if (section.adminOnly ...)`. Verified by re-running the Playwright suite; nav-master-brain now renders only for is_master_admin users, master-brain-denied renders for super_admin, and the full preview/reason/apply chat flow works end-to-end with the audit row written correctly."
+}
