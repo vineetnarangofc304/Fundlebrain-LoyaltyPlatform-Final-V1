@@ -32,6 +32,16 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 35 (Jun 2026) — 🧠 MASTER BRAIN (action-enabled AI for Master Admins)
+User: evolve Fundle Brain into a "Master Brain" that can ACT on the database (not just report), for a new Master Admin role, with mandatory confirmation + reason + full audit trail. Two acceptance examples: re-tier ~75 legacy Silver/Gold customers (no bonus points) and fix ~404 negative-balance customers.
+- **New right `is_master_admin`** (UserBase/UserUpdate) — granted by super_admin only (API-enforced in `users_routes`). Independent of role; super_admin is deliberately NOT a master admin (their Fundle Brain stays read-only). Seeded test master admin: `masteradmin@fundle.io / Master@2026` (role crm_manager).
+- **Backend `routes/master_brain_routes.py`** (`/api/master-brain`): reuses the Fundle Brain LiteLLM engine + all read tools, layered with action tools; `require_master_admin` gate (403 otherwise). Endpoints: chat, sessions CRUD (surface="master"), action-log, suggested-prompts. System prompt enforces preview → confirm → mandatory reason → apply → report.
+- **Backend `routes/master_brain_tools.py`** — action tools: `grant_bonus_points`, `adjust_points` (+/-), `fix_negative_balances` (single + bulk→0), `retier_customers` (single + bulk, scope legacy/all, NO bonus points), `master_action_log` (read). Two-step protocol (confirm=false previews, confirm=true+reason applies); every points change writes a `points_ledger` row; every action audit-logged (`master_brain.*` with user_name/email + reason + before→after). Bulk batched (1000) capped at 20000 inline.
+- **Frontend `pages/admin/MasterBrain.jsx`** (`/admin/master-brain`): chat + Action Log tab (When IST / Who / Action / Reason / Details), red "live actions" theme, gated by `is_master_admin` (else access-denied). Hero nav in AdminLayout shown only to master admins. User Management: Master column + grant/revoke toggle + new-user checkbox (super_admin only).
+- **Verified:** self-test 14/14 (tool logic) + testing_agent iteration_35.json (9/9 e2e + 11/11 backend RBAC/API). Fixed a P0 introduced during build (AdminLayout `SECTIONS.map` opener dropped). ⚠️ The two real examples (75 re-tier, 404 negatives) live on PRODUCTION — **redeploy**, then run them through Master Brain.
+- Deferred to v2 (larger list from user): coupons issue/deactivate, comms/campaign actions, OTP management, tier override, merge duplicates, maker-checker approvals.
+
+
 ### Iteration 34b (Jun 2026) — 🔴 PROD FIX: POS shows "The data does not represent a valid JSON token" on every bill
 User (LIVE): the eWards .NET POS popped "The data does not represent a valid JSON token." on every bill.
 - **Root cause:** any UNHANDLED exception in a `/api/pos/*` handler made Starlette return its default 500 — a **plain-text** body `Internal Server Error` (content-type text/plain). The .NET POS JSON-parses every reply → throws "not a valid JSON token". (Happy path returns valid JSON in preview; the crash is a server-side exception on prod data/payload — e.g. payment_mode sent as strings, or a Mongo/Atlas timeout on the write.)
