@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "./_shared";
-import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon } from "lucide-react";
+import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
@@ -22,12 +22,21 @@ const detailFrom = (m) => {
   if (m.mobile) bits.push(m.mobile);
   if (m.from || m.to) bits.push(`${m.from || "?"} → ${m.to || "?"}`);
   if (m.delta !== undefined) bits.push(`Δ ${m.delta > 0 ? "+" : ""}${m.delta}`);
-  if (m.points !== undefined) bits.push(`${m.points} pts`);
+  if (m.points !== undefined && m.delta === undefined) bits.push(`${m.points} pts`);
   if (m.balance_before !== undefined) bits.push(`${m.balance_before} → ${m.balance_after}`);
   if (m.customers_affected !== undefined) bits.push(`${m.customers_affected} customers`);
+  if (m.matched !== undefined) bits.push(`${m.matched} matched`);
+  if (m.changed !== undefined) bits.push(`${m.changed} changed`);
   if (m.updated !== undefined) bits.push(`${m.updated} updated`);
   if (m.points_restored !== undefined) bits.push(`${m.points_restored} restored`);
+  if (m.recipients !== undefined) bits.push(`${m.recipients} recipients`);
+  if (m.changes_reversed !== undefined) bits.push(`${m.changes_reversed} reversed`);
   return bits.length ? bits.join(" · ") : JSON.stringify(m).slice(0, 80);
+};
+
+const STATUS_PILL = {
+  queued: "pill-warning", running: "pill-info", completed: "pill-success",
+  cancelled: "pill-neutral", failed: "pill-danger",
 };
 
 export default function MasterBrain() {
@@ -45,6 +54,20 @@ export default function MasterBrain() {
   const fileRef = useRef(null);
   const bottomRef = useRef(null);
 
+  // undo
+  const [undoTarget, setUndoTarget] = useState(null);
+  const [undoReason, setUndoReason] = useState("");
+  const [undoing, setUndoing] = useState(false);
+
+  // campaigns
+  const [campaigns, setCampaigns] = useState([]);
+
+  // datasets
+  const [datasets, setDatasets] = useState([]);
+  const [dsView, setDsView] = useState(null); // selected dataset detail
+  const [dsQuery, setDsQuery] = useState("");
+  const [dsPage, setDsPage] = useState(1);
+
   const isMaster = !!user?.is_master_admin;
 
   useEffect(() => {
@@ -59,7 +82,33 @@ export default function MasterBrain() {
     try { const r = await api.get("/master-brain/action-log"); setLog(r.data.actions || []); }
     catch { /* ignore */ }
   };
+  const loadCampaigns = async () => {
+    try { const r = await api.get("/master-brain/campaigns"); setCampaigns(r.data.campaigns || []); }
+    catch { /* ignore */ }
+  };
+  const loadDatasets = async () => {
+    try { const r = await api.get("/master-brain/datasets"); setDatasets(r.data.datasets || []); }
+    catch { /* ignore */ }
+  };
   useEffect(() => { if (tab === "log" && isMaster) loadLog(); }, [tab, isMaster]);
+  useEffect(() => { if (tab === "campaigns" && isMaster) loadCampaigns(); }, [tab, isMaster]);
+  useEffect(() => { if (tab === "datasets" && isMaster) loadDatasets(); }, [tab, isMaster]);
+
+  // auto-refresh campaigns while any is in-flight
+  useEffect(() => {
+    if (tab !== "campaigns") return;
+    const anyLive = campaigns.some((c) => ["queued", "running"].includes(c.status));
+    if (!anyLive) return;
+    const t = setInterval(loadCampaigns, 4000);
+    return () => clearInterval(t);
+  }, [tab, campaigns]);
+
+  const openDataset = async (id, q = "", page = 1) => {
+    try {
+      const r = await api.get(`/master-brain/datasets/${id}`, { params: { q, page, page_size: 50 } });
+      setDsView(r.data); setDsQuery(q); setDsPage(page);
+    } catch { toast.error("Couldn't open dataset"); }
+  };
 
   const openSession = async (id) => {
     setSessionId(id);
@@ -95,6 +144,33 @@ export default function MasterBrain() {
     if (sessionId === id) newChat();
   };
 
+  const confirmUndo = async () => {
+    if (!undoTarget) return;
+    if (!undoReason.trim()) { toast.error("A reason is required to undo."); return; }
+    setUndoing(true);
+    try {
+      const r = await api.post(`/master-brain/undo/${undoTarget.id}`, { reason: undoReason });
+      toast.success(r.data?.message || "Action undone");
+      setUndoTarget(null); setUndoReason("");
+      loadLog();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Undo failed");
+    } finally { setUndoing(false); }
+  };
+
+  const cancelCampaign = async (c) => {
+    const reason = window.prompt(`Cancel campaign to ${c.recipients_total} recipients? Enter a reason (required):`, "");
+    if (reason === null) return;
+    if (!reason.trim()) { toast.error("A reason is required to cancel."); return; }
+    try {
+      const r = await api.post(`/master-brain/campaigns/${c.id}/cancel`, { reason });
+      toast.success(r.data?.message || "Cancellation requested");
+      loadCampaigns();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Cancel failed");
+    }
+  };
+
   const send = async (text) => {
     const msg = text || input;
     if ((!msg.trim() && attachments.length === 0) || loading) return;
@@ -116,7 +192,6 @@ export default function MasterBrain() {
         const sr = await api.get("/master-brain/sessions");
         setSessions(sr.data);
       }
-      // a write tool may have run → refresh log if open
       if (tab === "log") loadLog();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Master Brain error");
@@ -143,47 +218,180 @@ export default function MasterBrain() {
     );
   }
 
+  const TabBtn = ({ id, icon: Icon, children }) => (
+    <button className={`k-btn k-btn-sm ${tab === id ? "kazo-bg-burgundy" : "k-btn-outline"}`}
+      onClick={() => setTab(id)} data-testid={`mb-tab-${id}`}>
+      {Icon && <Icon className="w-4 h-4" />} {children}
+    </button>
+  );
+
   return (
     <div data-testid="master-brain-page">
       <PageHeader
         title="Master Brain"
         subtitle="ACTION-ENABLED · LIVE DATABASE · FULLY AUDITED"
         actions={
-          <div className="flex gap-2">
-            <button className={`k-btn k-btn-sm ${tab === "chat" ? "kazo-bg-burgundy" : "k-btn-outline"}`} onClick={() => setTab("chat")} data-testid="mb-tab-chat">Chat</button>
-            <button className={`k-btn k-btn-sm ${tab === "log" ? "kazo-bg-burgundy" : "k-btn-outline"}`} onClick={() => setTab("log")} data-testid="mb-tab-log"><ScrollText className="w-4 h-4" /> Action Log</button>
+          <div className="flex gap-2 flex-wrap">
+            <TabBtn id="chat">Chat</TabBtn>
+            <TabBtn id="log" icon={ScrollText}>Action Log</TabBtn>
+            <TabBtn id="campaigns" icon={Megaphone}>Campaigns</TabBtn>
+            <TabBtn id="datasets" icon={Database}>Datasets</TabBtn>
             {tab === "chat" && <button className="k-btn k-btn-outline k-btn-sm" onClick={newChat} data-testid="mb-new-chat">New chat</button>}
           </div>
         }
       />
 
-      {/* Live-action warning banner */}
       <div className="mx-3 mb-2 px-4 py-2 text-[12px] flex items-center gap-2 border-l-4 border-red-500 bg-red-50 text-red-800" data-testid="mb-warning">
         <ShieldAlert className="w-4 h-4 shrink-0" />
         <span>Actions here are <b>live</b>. Master Brain always previews first and requires your confirmation + a reason; every change is logged with your name &amp; timestamp.</span>
       </div>
 
-      {tab === "log" ? (
+      {/* ---------------- ACTION LOG ---------------- */}
+      {tab === "log" && (
         <div className="p-4" data-testid="mb-action-log">
+          <div className="flex justify-end mb-2">
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={loadLog} data-testid="mb-log-refresh"><RefreshCw className="w-4 h-4" /> Refresh</button>
+          </div>
           <div className="bg-white border border-black/10 overflow-x-auto">
             <table className="data-table">
-              <thead><tr><th>When (IST)</th><th>Who</th><th>Action</th><th>Reason</th><th>Details</th></tr></thead>
+              <thead><tr><th>When (IST)</th><th>Who</th><th>Action</th><th>Reason</th><th>Details</th><th>Undo</th></tr></thead>
               <tbody>
-                {log.length === 0 && <tr><td colSpan={5} className="text-center text-neutral-500 py-8">No actions logged yet.</td></tr>}
+                {log.length === 0 && <tr><td colSpan={6} className="text-center text-neutral-500 py-8">No actions logged yet.</td></tr>}
                 {log.map((a) => (
-                  <tr key={a.id} data-testid={`mb-log-${a.id}`}>
+                  <tr key={a.id} data-testid={`mb-log-${a.id}`} className={a.undone ? "opacity-60" : ""}>
                     <td className="text-xs whitespace-nowrap">{fmtTime(a.timestamp)}</td>
                     <td className="text-xs">{a.user_name || a.user_email || "—"}</td>
                     <td><span className="pill pill-neutral">{(a.action || "").replace("master_brain.", "")}</span></td>
                     <td className="text-xs max-w-[280px]">{a.reason || "—"}</td>
                     <td className="text-xs font-mono">{detailFrom(a.metadata)}</td>
+                    <td className="text-xs whitespace-nowrap">
+                      {a.undone ? (
+                        <span className="pill pill-neutral" data-testid={`mb-undone-${a.id}`}>Undone</span>
+                      ) : a.undoable ? (
+                        <button className="k-btn k-btn-outline k-btn-sm" onClick={() => { setUndoTarget(a); setUndoReason(""); }} data-testid={`mb-undo-btn-${a.id}`}>
+                          <Undo2 className="w-3.5 h-3.5" /> Undo
+                        </button>
+                      ) : <span className="text-neutral-400">—</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </div>
-      ) : (
+      )}
+
+      {/* ---------------- CAMPAIGNS ---------------- */}
+      {tab === "campaigns" && (
+        <div className="p-4" data-testid="mb-campaigns">
+          <div className="flex justify-between items-center mb-2">
+            <p className="text-xs text-neutral-600">Bulk SMS campaigns sent via Karix. Create one by asking Master Brain in <b>Chat</b> (e.g. "Send an SMS to all Gold customers…").</p>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={loadCampaigns} data-testid="mb-campaigns-refresh"><RefreshCw className="w-4 h-4" /> Refresh</button>
+          </div>
+          <div className="bg-white border border-black/10 overflow-x-auto">
+            <table className="data-table">
+              <thead><tr><th>When (IST)</th><th>Message / Template</th><th>Audience</th><th>Status</th><th>Sent / Failed / Total</th><th>By</th><th></th></tr></thead>
+              <tbody>
+                {campaigns.length === 0 && <tr><td colSpan={7} className="text-center text-neutral-500 py-8">No campaigns yet.</td></tr>}
+                {campaigns.map((c) => (
+                  <tr key={c.id} data-testid={`mb-campaign-${c.id}`}>
+                    <td className="text-xs whitespace-nowrap">{fmtTime(c.created_at)}</td>
+                    <td className="text-xs max-w-[280px] truncate">{c.template_name || c.message || "—"}</td>
+                    <td className="text-xs">{c.audience_label || c.audience_type}</td>
+                    <td><span className={`pill ${STATUS_PILL[c.status] || "pill-neutral"}`} data-testid={`mb-campaign-status-${c.id}`}>{c.status}{c.cancel_requested && c.status === "running" ? " (cancelling)" : ""}</span></td>
+                    <td className="text-xs font-mono">{c.sent || 0} / {c.failed || 0} / {c.recipients_total || 0}</td>
+                    <td className="text-xs">{c.created_by_name || c.created_by || "—"}</td>
+                    <td className="text-xs">
+                      {["queued", "running"].includes(c.status) && !c.cancel_requested && (
+                        <button className="k-btn k-btn-outline k-btn-sm" onClick={() => cancelCampaign(c)} data-testid={`mb-campaign-cancel-${c.id}`}>Cancel</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- DATASETS ---------------- */}
+      {tab === "datasets" && (
+        <div className="p-4" data-testid="mb-datasets">
+          {!dsView ? (
+            <>
+              <div className="flex justify-between items-center mb-2">
+                <p className="text-xs text-neutral-600">Every report (CSV/Excel/PDF) you upload in Chat is saved here as a searchable dataset.</p>
+                <button className="k-btn k-btn-outline k-btn-sm" onClick={loadDatasets} data-testid="mb-datasets-refresh"><RefreshCw className="w-4 h-4" /> Refresh</button>
+              </div>
+              <div className="bg-white border border-black/10 overflow-x-auto">
+                <table className="data-table">
+                  <thead><tr><th>Uploaded (IST)</th><th>File</th><th>Type</th><th>Rows</th><th>Mobiles</th><th>Columns</th></tr></thead>
+                  <tbody>
+                    {datasets.length === 0 && <tr><td colSpan={6} className="text-center text-neutral-500 py-8">No datasets yet. Upload a report in Chat.</td></tr>}
+                    {datasets.map((d) => (
+                      <tr key={d.id} className="cursor-pointer hover:bg-neutral-50" onClick={() => openDataset(d.id)} data-testid={`mb-dataset-${d.id}`}>
+                        <td className="text-xs whitespace-nowrap">{fmtTime(d.created_at)}</td>
+                        <td className="text-xs font-medium flex items-center gap-1.5"><FileText className="w-3.5 h-3.5 text-red-600" /> {d.filename}</td>
+                        <td className="text-xs uppercase">{d.report_type}</td>
+                        <td className="text-xs">{d.row_count ?? "—"}</td>
+                        <td className="text-xs">{(d.mobiles || []).length}</td>
+                        <td className="text-xs max-w-[260px] truncate">{(d.columns || []).join(", ") || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <div data-testid="mb-dataset-view">
+              <div className="flex items-center gap-3 mb-3 flex-wrap">
+                <button className="k-btn k-btn-outline k-btn-sm" onClick={() => setDsView(null)} data-testid="mb-dataset-back"><ArrowLeft className="w-4 h-4" /> Back</button>
+                <div className="font-display text-lg flex items-center gap-2"><FileText className="w-4 h-4 text-red-600" /> {dsView.filename}</div>
+                <span className="text-xs text-neutral-500">{dsView.row_count} rows{dsView.rows_truncated ? ` (first ${dsView.rows_stored} stored)` : ""} · {dsView.mobiles_detected} mobiles</span>
+                <div className="ml-auto flex items-center gap-2">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-2 top-1/2 -translate-y-1/2" />
+                    <input className="k-input pl-7 h-9 text-sm" placeholder="Search rows…" value={dsQuery}
+                      onChange={(e) => setDsQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && openDataset(dsView.id, dsQuery, 1)}
+                      data-testid="mb-dataset-search" />
+                  </div>
+                  <button className="k-btn k-btn-outline k-btn-sm" onClick={() => openDataset(dsView.id, dsQuery, 1)} data-testid="mb-dataset-search-btn">Search</button>
+                </div>
+              </div>
+              {dsView.report_type === "pdf" ? (
+                <pre className="bg-white border border-black/10 p-4 text-xs whitespace-pre-wrap max-h-[60vh] overflow-auto" data-testid="mb-dataset-pdf-text">{dsView.extracted_text || "No text extracted."}</pre>
+              ) : (
+                <>
+                  <div className="bg-white border border-black/10 overflow-x-auto max-h-[60vh]">
+                    <table className="data-table">
+                      <thead><tr>{(dsView.columns || []).map((c) => <th key={c}>{c}</th>)}</tr></thead>
+                      <tbody>
+                        {(dsView.rows || []).length === 0 && <tr><td colSpan={(dsView.columns || []).length || 1} className="text-center text-neutral-500 py-8">No matching rows.</td></tr>}
+                        {(dsView.rows || []).map((r, i) => (
+                          <tr key={i} data-testid={`mb-dataset-row-${i}`}>
+                            {(dsView.columns || []).map((c) => <td key={c} className="text-xs">{r[c]}</td>)}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 text-xs">
+                    <span>{dsView.total_matched} matched · page {dsView.page}</span>
+                    <div className="flex gap-2">
+                      <button className="k-btn k-btn-outline k-btn-sm" disabled={dsView.page <= 1} onClick={() => openDataset(dsView.id, dsQuery, dsView.page - 1)} data-testid="mb-dataset-prev"><ChevronLeft className="w-4 h-4" /></button>
+                      <button className="k-btn k-btn-outline k-btn-sm" disabled={dsView.page * dsView.page_size >= dsView.total_matched} onClick={() => openDataset(dsView.id, dsQuery, dsView.page + 1)} data-testid="mb-dataset-next"><ChevronRight className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------------- CHAT ---------------- */}
+      {tab === "chat" && (
         <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-0 h-[calc(100vh-160px)]">
           <aside className="border-r border-black/10 bg-white p-3 overflow-y-auto">
             <div className="text-[11px] uppercase tracking-widest text-neutral-500 mb-3 px-2">HISTORY</div>
@@ -205,8 +413,9 @@ export default function MasterBrain() {
                   <ShieldAlert className="w-12 h-12 text-red-600 mb-4" />
                   <h2 className="editorial-headline text-4xl mb-2">Master Brain</h2>
                   <p className="text-neutral-600 mb-8 max-w-md">Everything Fundle Brain does — plus the authority to
-                  <b> act</b>: grant/adjust points, fix negative balances, and re-tier customers. I always show you a
-                  preview and ask <b>"Shall I go ahead?"</b> before changing anything, and I log every action.</p>
+                  <b> act</b>: grant/adjust points, fix negative balances, re-tier customers, send bulk SMS campaigns
+                  and <b>undo</b> any action. I always show you a preview and ask <b>"Shall I go ahead?"</b> before
+                  changing anything, and I log every action.</p>
                   <div className="text-xs uppercase tracking-widest text-neutral-500 mb-3">TRY</div>
                   <div className="grid gap-2">
                     {suggested.map((s, i) => (
@@ -275,6 +484,28 @@ export default function MasterBrain() {
                   <button className="k-btn kazo-bg-burgundy" onClick={() => send()} disabled={loading || (!input.trim() && attachments.length === 0)} data-testid="mb-send-btn"><Send className="w-4 h-4" /></button>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- UNDO MODAL ---------------- */}
+      {undoTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" data-testid="mb-undo-modal">
+          <div className="bg-white border border-black/10 max-w-md w-full p-6">
+            <div className="flex items-center gap-2 mb-2 text-red-700"><Undo2 className="w-5 h-5" /><span className="font-display text-lg">Undo action</span></div>
+            <p className="text-sm text-neutral-600 mb-1">You're about to reverse:</p>
+            <div className="text-sm bg-neutral-50 border border-black/10 p-3 mb-3">
+              <div><b>{(undoTarget.action || "").replace("master_brain.", "")}</b> — {detailFrom(undoTarget.metadata)}</div>
+              {undoTarget.reason && <div className="text-xs text-neutral-500 mt-1">Original reason: {undoTarget.reason}</div>}
+            </div>
+            <label className="text-xs uppercase tracking-widest text-neutral-500">Reason for undo (required)</label>
+            <textarea className="k-input w-full mt-1 mb-4" rows={3} value={undoReason} onChange={(e) => setUndoReason(e.target.value)} placeholder="e.g. Reverted — awarded to the wrong customer." data-testid="mb-undo-reason" />
+            <div className="flex justify-end gap-2">
+              <button className="k-btn k-btn-outline" onClick={() => { setUndoTarget(null); setUndoReason(""); }} data-testid="mb-undo-cancel">Cancel</button>
+              <button className="k-btn kazo-bg-burgundy" onClick={confirmUndo} disabled={undoing || !undoReason.trim()} data-testid="mb-undo-confirm">
+                {undoing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Undo2 className="w-4 h-4" />} Confirm undo
+              </button>
             </div>
           </div>
         </div>

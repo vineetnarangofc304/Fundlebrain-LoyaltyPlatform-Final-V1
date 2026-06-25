@@ -13,13 +13,16 @@ from typing import Optional, Dict, Any, List
 
 import litellm
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
 
-from database import ai_chats_col, audit_logs_col
+from database import ai_chats_col, audit_logs_col, mb_action_snapshots_col, master_campaigns_col, mb_attachments_col
 from auth import get_current_user, log_audit
 from models import AIChatRequest
 from routes.ai_routes import _build_completion_params, _resolve_model, EMERGENT_LLM_KEY
 from routes.ai_tools import TOOL_SCHEMAS, execute_tool
-from routes.master_brain_tools import MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS
+from routes.master_brain_tools import (
+    MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, _tool_undo_action, _tool_cancel_campaign,
+)
 from routes import mb_attachments as MBA
 
 router = APIRouter(prefix="/master-brain", tags=["master-brain"])
@@ -36,6 +39,10 @@ You have EVERYTHING Fundle Brain can do (full live MongoDB READ access + raw-dat
 - retier_customers — re-map customers onto the configured slabs (no bonus points), single or bulk
 - master_action_log — read the audit trail of actions taken
 - apply_to_uploaded_report — take a bulk action (grant/adjust points, fix negatives, re-tier) on every customer listed in an UPLOADED report
+- undo_action — REVERSE a previous action (by its audit_id from master_action_log) using the captured before/after snapshot
+- send_campaign — send a BULK SMS CAMPAIGN via Karix to an audience (all / a tier / a city / an uploaded report's mobiles / an explicit mobiles list), from a raw message or an SMS template
+- list_campaigns — read recent campaigns + their send progress
+- cancel_campaign — request cancellation of an in-flight campaign
 (plus the L1 support write tools: deactivate / reactivate / unsubscribe / resubscribe / reverse a coupon or points redemption).
 
 ATTACHMENTS: The user can attach SCREENSHOTS/IMAGES (you can SEE them — read the numbers/text in them) and REPORTS (CSV/Excel/PDF). When a report is attached, its parsed content + an attachment_id appear in a context block; to act on the customers it lists, call apply_to_uploaded_report with that attachment_id (preview first, then confirm + reason). For a screenshot, read it; if the user wants you to act on customers shown in it, extract their mobiles and use the per-customer tools (each still previews + needs a reason).
@@ -151,7 +158,87 @@ async def action_log(days: int = 30, limit: int = 100, user: dict = Depends(requ
         from datetime import timedelta
         fil["timestamp"] = {"$gte": (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()}
     rows = await audit_logs_col.find(fil, {"_id": 0}).sort("timestamp", -1).limit(min(limit, 300)).to_list(300)
+    # Mark which rows can still be undone (a reversible snapshot exists and it's not already undone)
+    ids = [r.get("id") for r in rows if r.get("id")]
+    snap_ids = set()
+    if ids:
+        snaps = await mb_action_snapshots_col.find(
+            {"audit_id": {"$in": ids}, "undone": {"$ne": True}}, {"_id": 0, "audit_id": 1}).to_list(len(ids))
+        snap_ids = {s["audit_id"] for s in snaps}
+    for r in rows:
+        r["undone"] = bool(r.get("undone"))
+        r["undoable"] = (r.get("id") in snap_ids) and not r["undone"]
     return {"count": len(rows), "actions": rows}
+
+
+class UndoIn(BaseModel):
+    reason: str = ""
+
+
+@router.post("/undo/{audit_id}")
+async def undo_action(audit_id: str, body: UndoIn, user: dict = Depends(require_master_admin)):
+    res = await _tool_undo_action(audit_id, reason=body.reason, confirm=True, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@router.get("/campaigns")
+async def list_campaigns(limit: int = 50, user: dict = Depends(require_master_admin)):
+    rows = await master_campaigns_col.find({}, {"_id": 0, "audience_spec": 0}) \
+        .sort("created_at", -1).limit(min(limit, 100)).to_list(100)
+    return {"count": len(rows), "campaigns": rows}
+
+
+class CancelCampaignIn(BaseModel):
+    reason: str = ""
+
+
+@router.post("/campaigns/{campaign_id}/cancel")
+async def cancel_campaign(campaign_id: str, body: CancelCampaignIn, user: dict = Depends(require_master_admin)):
+    res = await _tool_cancel_campaign(campaign_id, reason=body.reason, confirm=True, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@router.get("/datasets")
+async def list_datasets(user: dict = Depends(require_master_admin)):
+    rows = await mb_attachments_col.find(
+        {"user_id": user["id"], "kind": "report"},
+        {"_id": 0, "rows": 0, "preview": 0, "extracted_text": 0}
+    ).sort("created_at", -1).limit(100).to_list(100)
+    return {"count": len(rows), "datasets": rows}
+
+
+@router.get("/datasets/{dataset_id}")
+async def get_dataset(dataset_id: str, q: str = "", page: int = 1, page_size: int = 50,
+                      user: dict = Depends(require_master_admin)):
+    att = await mb_attachments_col.find_one(
+        {"id": dataset_id, "user_id": user["id"], "kind": "report"}, {"_id": 0})
+    if not att:
+        raise HTTPException(404, "Dataset not found")
+    columns = att.get("columns") or []
+    all_rows = att.get("rows") or att.get("preview") or []
+    needle = (q or "").strip().lower()
+    if needle:
+        rows = [r for r in all_rows if any(needle in str(v).lower() for v in r.values())]
+    else:
+        rows = all_rows
+    total = len(rows)
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
+    start = (page - 1) * page_size
+    page_rows = rows[start:start + page_size]
+    return {
+        "id": att["id"], "filename": att.get("filename"), "report_type": att.get("report_type"),
+        "columns": columns, "row_count": att.get("row_count"),
+        "rows_stored": len(all_rows), "rows_truncated": att.get("rows_truncated", False),
+        "mobiles_detected": len(att.get("mobiles") or []),
+        "extracted_text": att.get("extracted_text") if att.get("report_type") == "pdf" else None,
+        "total_matched": total, "page": page, "page_size": page_size, "rows": page_rows,
+        "created_at": att.get("created_at"),
+    }
 
 
 @router.get("/suggested-prompts")

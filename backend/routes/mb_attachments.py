@@ -17,6 +17,7 @@ from database import mb_attachments_col
 IMAGE_EXT = {"png", "jpg", "jpeg", "webp"}
 MAX_IMAGE_BYTES = 8_000_000
 MAX_REPORT_BYTES = 6_000_000
+DATASET_ROW_CAP = 20000  # full rows persisted per report so it becomes a searchable dataset
 MOBILE_HEADER_HINTS = ("mobile", "phone", "msisdn", "contact", "whatsapp", "number")
 _MOBILE_RE = re.compile(r"(?<!\d)(\d{10})(?!\d)")
 
@@ -151,8 +152,11 @@ async def ingest(raw: bytes, filename: str, user: Dict[str, Any],
         headers, rows = parsed["columns"], parsed["rows"]
         mobiles = _detect_mobiles(headers, rows)
         preview = [dict(zip(headers, [str(c) for c in r])) for r in rows[:30]]
+        full_rows = [dict(zip(headers, [str(c) for c in r])) for r in rows[:DATASET_ROW_CAP]]
         doc.update({"kind": "report", "report_type": ext, "columns": headers,
-                    "row_count": len(rows), "preview": preview, "mobiles": mobiles})
+                    "row_count": len(rows), "preview": preview,
+                    "rows": full_rows, "rows_truncated": len(rows) > DATASET_ROW_CAP,
+                    "mobiles": mobiles})
         summary = {"id": doc["id"], "kind": "report", "filename": filename,
                    "columns": headers, "row_count": len(rows),
                    "mobiles_detected": len(mobiles)}

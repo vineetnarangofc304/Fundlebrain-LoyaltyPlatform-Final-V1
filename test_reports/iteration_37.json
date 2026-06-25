@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 37 — Master Brain V2 (Undo + Campaigns + Datasets) end-to-end verification. Backend pytest 17/17 PASS (RBAC for super_admin 403 vs master_admin 200 on all /master-brain/* endpoints; action-log returns undoable/undone fields; full grant -> undo -> double-undo -> 400 'already undone' flow; empty-reason undo rejected; campaigns/datasets shape; dataset search shrinks total_matched; unknown dataset id -> 404). Frontend UI flows for the three new V2 tabs (Action Log + Undo modal, Campaigns, Datasets) all PASS: dataset drill-in + search + back works (2 rows -> 1 row after q=999); campaigns tab renders correctly (0 campaigns, matches GET /campaigns count=0); action-log shows Undone badges for previously-undone rows. Created a fresh grant via /master-brain/chat (preview -> confirm + reason) and exercised the Undo button -> modal -> reason gate -> confirm -> toast 'Undid grant_bonus_points - 1 change(s) rolled back, and logged as an undo'; row now shows Undone badge. NO bugs found.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration37_master_brain_v2_test.py",
+    "/app/test_reports/pytest/iteration37.xml",
+    "/app/test_reports/mb_v2_final.png",
+    "/app/test_reports/mb_v2_undo_done.png"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "master_brain_routes.action_log enriches each row with undoable+undone derived from mb_action_snapshots_col — clean and resilient.",
+    "POST /undo/{audit_id} correctly proxies _tool_undo_action with confirm=True, surfaces tool error as HTTP 400. Double-undo path returns 'already undone' as required.",
+    "/datasets/{id} server-side search uses simple case-insensitive substring across all row values — fine for the 20k-row cap; if datasets get larger consider indexing or limiting q to specific columns.",
+    "list_campaigns endpoint doesn't filter by user — that's deliberate (Master Admins see all). Document this in the UI tooltip eventually.",
+    "Confirm-button gate on the undo modal (disabled until reason.trim()) is correctly enforced both in UI and again in the underlying tool — defence in depth, good.",
+    "The chat-side preview->confirm flow is LLM-driven; we verified with two-turn prompts that the model honours the protocol on grant_bonus_points. The system prompt is explicit and the tool only mutates when confirm=true + non-empty reason."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration37_master_brain_v2_test.py (new)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "100% (3/3 V2 tabs verified + Undo end-to-end)"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 ; superadmin@fundle.io / Fundle@2026 ; scratch customer 9990002222",
+  "seed_data_creation": "Created a fresh grant_bonus_points (25 pts) on 9990002222 via /master-brain/chat to exercise the Undo button; immediately undone via UI. Net balance impact on 9990002222 = 0 (grant + undo).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All Master Brain V2 capabilities are working end-to-end. Backend test file /app/backend/tests/iteration37_master_brain_v2_test.py is the regression suite for V2 (RBAC, undo, campaigns, datasets). The campaigns Karix send + cancel paths were not exercised via the live SMS gateway in this iteration (per request: do NOT send broad campaigns; the single-mobile preview/confirm safety guardrail is already proven via the direct-tool self-test in /tmp/mb_v2_selftest.py). If a future change touches the LLM system prompt or tool schemas, re-run iteration37 + spot-check the chat preview->confirm path with two turns.",
+  "rca of the issue": "N/A — no defects found in this iteration."
+}
