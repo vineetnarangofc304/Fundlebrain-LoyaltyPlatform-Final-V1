@@ -200,6 +200,7 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
                 history.append({"role": m["role"], "content": m["content"]})
 
     # ----- attachments (images -> vision, reports -> context) -----
+    await MBA.bind_session(req.attachment_ids or [], user, session_id)
     attachments = await MBA.load_for_chat(req.attachment_ids or [], user)
     text = req.message
     image_parts = []
@@ -214,11 +215,19 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
             if block:
                 text += "\n\n" + block
 
+    # Keep the most recent report referenceable across turns (preview -> confirm)
+    latest = await MBA.latest_session_report(session_id, user)
+    if latest and latest["id"] not in (req.attachment_ids or []):
+        text += "\n\n" + MBA.light_report_context(latest)
+
     if image_parts:
         user_content: Any = [{"type": "text", "text": text}] + image_parts
     else:
         user_content = text
     history.append({"role": "user", "content": user_content})
+
+    # expose the session to action tools (server-side fallback for uploaded reports)
+    user["_mb_session"] = session_id
 
     provider, model = _resolve_model(req.model)
     try:

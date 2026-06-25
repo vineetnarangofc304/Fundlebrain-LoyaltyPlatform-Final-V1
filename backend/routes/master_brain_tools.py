@@ -411,10 +411,19 @@ async def _tool_apply_to_uploaded_report(attachment_id: str, action: str, points
     if err:
         return err
     from database import mb_attachments_col
-    att = await mb_attachments_col.find_one(
-        {"id": attachment_id, "user_id": user.get("id")}, {"_id": 0})
+    att = None
+    if attachment_id:
+        att = await mb_attachments_col.find_one(
+            {"id": attachment_id, "user_id": user.get("id")}, {"_id": 0})
     if not att:
-        return {"error": "Attachment not found (upload the report again)."}
+        # Fallback: the most recent report uploaded in this chat session (handles the
+        # preview -> confirm turn where the UI no longer re-sends the attachment id).
+        q: Dict[str, Any] = {"user_id": user.get("id"), "kind": "report"}
+        if user.get("_mb_session"):
+            q["session_id"] = user["_mb_session"]
+        att = await mb_attachments_col.find_one(q, {"_id": 0}, sort=[("created_at", -1)])
+    if not att:
+        return {"error": "No uploaded report found for this conversation. Please attach the report again."}
     mobiles = att.get("mobiles") or []
     if not mobiles:
         return {"error": "No mobile numbers were detected in that file. Make sure it has a phone/mobile column."}

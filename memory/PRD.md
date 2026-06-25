@@ -32,6 +32,15 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 36 (Jun 2026) — 📎 Master Brain attachments (screenshots + reports, analyze & act)
+User: "no way to add any attachment in Master Brain chat — need to upload screenshots and reports." Choices: images (PNG/JPG/WEBP) + reports (CSV/Excel/PDF); both ANALYZE and ACT; Master Brain only.
+- **Backend `routes/mb_attachments.py`** — parses images (PIL → vision base64), CSV (csv), Excel (openpyxl), PDF (pypdf); auto-detects the mobile/phone column (header hint or value heuristic) → stores `mobiles[]`; saves to `mb_attachments` collection. `POST /api/master-brain/upload` (multipart) returns a compact summary (kind, filename, columns, row_count, mobiles_detected).
+- **`/api/master-brain/chat`** now accepts `attachment_ids[]`: images injected as vision content (model reads screenshots), reports injected as context; binds attachments to the session.
+- **New tool `apply_to_uploaded_report`** (master_brain_tools): bulk grant_points / adjust_points / fix_negative / retier on every customer in an uploaded report, with the standard preview → confirm → mandatory-reason → audited-apply (batched). Re-tier awards no bonus points.
+- **Frontend `MasterBrain.jsx`** — paperclip attach button + hidden multi-file input (images + csv/xlsx/pdf), pending chips (with mobiles count + remove), attachment chips in message bubbles, sends `attachment_ids`.
+- **Verified:** API self-tests — report upload+preview, vision (read screenshot mobile/balance/tier), bulk apply (matched/changed/not_found + audit + empty-reason block). testing_agent iteration_36 (7/8) found a HIGH bug: confirm turn lost the attachment_id (frontend clears attachments). **Fixed** by binding attachments to the session, re-injecting the report's id as light context each turn, and a server-side fallback to the session's latest report — reproduced the exact two-turn preview→confirm flow now passing (apply + action-log row). ⚠️ Redeploy for production.
+
+
 ### Iteration 35 (Jun 2026) — 🧠 MASTER BRAIN (action-enabled AI for Master Admins)
 User: evolve Fundle Brain into a "Master Brain" that can ACT on the database (not just report), for a new Master Admin role, with mandatory confirmation + reason + full audit trail. Two acceptance examples: re-tier ~75 legacy Silver/Gold customers (no bonus points) and fix ~404 negative-balance customers.
 - **New right `is_master_admin`** (UserBase/UserUpdate) — granted by super_admin only (API-enforced in `users_routes`). Independent of role; super_admin is deliberately NOT a master admin (their Fundle Brain stays read-only). Seeded test master admin: `masteradmin@fundle.io / Master@2026` (role crm_manager).

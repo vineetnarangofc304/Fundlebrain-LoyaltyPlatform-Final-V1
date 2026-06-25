@@ -184,6 +184,30 @@ async def load_for_chat(attachment_ids: List[str], user: Dict[str, Any]) -> List
     ).to_list(20)
 
 
+async def bind_session(attachment_ids: List[str], user: Dict[str, Any], session_id: str) -> None:
+    """Bind freshly-used attachments to the chat session so later turns can find them."""
+    if attachment_ids and session_id:
+        await mb_attachments_col.update_many(
+            {"id": {"$in": attachment_ids}, "user_id": user.get("id")},
+            {"$set": {"session_id": session_id}})
+
+
+async def latest_session_report(session_id: Optional[str], user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not session_id:
+        return None
+    return await mb_attachments_col.find_one(
+        {"session_id": session_id, "user_id": user.get("id"), "kind": "report"},
+        {"_id": 0}, sort=[("created_at", -1)])
+
+
+def light_report_context(att: Dict[str, Any]) -> str:
+    """A small reminder (just the id + shape) so the attachment stays referenceable
+    across turns (e.g. preview -> confirm) without resending the whole preview."""
+    return (f"[An uploaded report is still active for this conversation: '{att.get('filename')}' "
+            f"(attachment_id={att['id']}), {len(att.get('mobiles') or [])} mobiles detected. "
+            f"To take a bulk action on it, call apply_to_uploaded_report with attachment_id='{att['id']}'.]")
+
+
 def build_context_block(att: Dict[str, Any]) -> str:
     """Text context injected for a REPORT attachment (images go in as vision)."""
     import json as _json
