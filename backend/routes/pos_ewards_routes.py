@@ -1537,8 +1537,12 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     if is_new_customer and not cust.get("welcome_bonus_given"):
         welcome_bonus_points = int(_parse_float(cfg.get("welcome_bonus", 0)) or 0)
 
+    # Redemption is applied EXCLUSIVELY by the OTP redeem flow (posRedeemPointOtpCheck;
+    # or posRedeemPointRequest in non-OTP mode). The bill's redemption.redeemed_points is
+    # recorded on the txn for reporting/recon parity ONLY — it must NEVER be deducted here
+    # or the customer gets a DOUBLE point reduction (once at redeem, once on the bill).
     new_balance = (int(cust.get("points_balance") or 0) + points_earned
-                   + upgrade_bonus_points + welcome_bonus_points - points_redeemed)
+                   + upgrade_bonus_points + welcome_bonus_points)
     cust_set = {
         "points_balance": new_balance,
         "lifetime_spend": new_lifetime_spend,
@@ -1552,8 +1556,8 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         {"id": cust["id"]},
         {"$set": cust_set,
          "$inc": {
+            # redemption is NOT incremented here — the redeem flow already did it.
             "lifetime_points_earned": points_earned + upgrade_bonus_points + welcome_bonus_points,
-            "lifetime_points_redeemed": points_redeemed,
         }},
     )
 
@@ -1599,20 +1603,10 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "expires_at": earn_expiry,
             "created_at": _now_iso(),
         })
-    if points_redeemed > 0:
-        # If a separate redeem call already happened, this is a no-op redemption from
-        # the transaction itself (kept for ledger completeness).
-        await points_ledger_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "customer_id": cust["id"],
-            "customer_mobile": mobile,
-            "type": "redeem",
-            "points": -points_redeemed,
-            "reference_type": "transaction",
-            "reference_id": txn_id,
-            "note": f"Bill {bill_number}",
-            "created_at": _now_iso(),
-        })
+    # NOTE: NO redeem ledger entry is written here. Redemption is fully handled by the
+    # OTP redeem flow (posRedeemPointOtpCheck), which already deducted the balance and
+    # wrote the single authoritative 'redeem' ledger row keyed to this bill_number.
+    # Writing one here too caused the customer's points to be reduced TWICE.
 
     # Coupon redemption record
     if coupon_code:
