@@ -603,7 +603,7 @@ async def _tool_undo_action(audit_id: str, reason: str = "", confirm: bool = Fal
     if doc.get("undone"):
         return {"error": "This action has already been undone."}
     act = (doc.get("action") or "").replace("master_brain.", "")
-    if act in {"master_action_log", "undo", "send_campaign", "cancel_campaign"}:
+    if act in {"master_action_log", "undo", "send_campaign", "cancel_campaign", "fix_double_redemptions"}:
         return {"error": f"'{act}' is not an undoable data change."}
     snap = await mb_action_snapshots_col.find_one({"audit_id": audit_id}, {"_id": 0})
     if not snap or not snap.get("changes"):
@@ -949,6 +949,129 @@ async def _tool_set_customer_tier(tier: str, mobile: Optional[str] = None,
             "message": f"Set {updated} customers to tier '{tier}' (no bonus points). Logged to the action log."}
 
 
+# ============================================================
+# 11) FIX past DOUBLE redemptions (the posAddPoint double-deduct bug)
+# ============================================================
+_DUP_REDEEM_Q = {"type": "redeem", "reference_type": "transaction",
+                 "note": {"$regex": "^Bill "}, "voided": {"$ne": True}}
+_LEGIT_REDEEM_NOTES = ["POS OTP redemption", "POS non-OTP redemption"]
+
+
+async def _scan_double_redemptions(mobile: Optional[str] = None, cap: int = INLINE_CAP + 1) -> List[Dict[str, Any]]:
+    """Return CONFIRMED duplicate-redemption ledger rows.
+
+    A row qualifies only if (a) it carries the bug signature (type=redeem,
+    reference_type=transaction, note='Bill <no>' — the row the old posAddPoint
+    wrote) AND (b) a *legitimate* redeem row (POS OTP / non-OTP) exists for the
+    SAME bill — proving the redemption was already counted once, so the bill's
+    deduction was a true DOUBLE. This conservative join avoids ever crediting a
+    bill that was only deducted once."""
+    q = dict(_DUP_REDEEM_Q)
+    if mobile:
+        strs, ints = _mobile_candidates(mobile)
+        q["customer_mobile"] = {"$in": strs + ints}
+    rows = await points_ledger_col.find(
+        q, {"_id": 0, "id": 1, "points": 1, "note": 1, "customer_id": 1, "customer_mobile": 1}
+    ).limit(cap).to_list(cap)
+    if not rows:
+        return []
+    bills: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        bn = (r.get("note") or "")[5:].strip()  # text after "Bill "
+        if bn:
+            bills.setdefault(bn, []).append(r)
+    legit: set = set()
+    bill_list = list(bills.keys())
+    for i in range(0, len(bill_list), 1000):
+        batch = bill_list[i:i + 1000]
+        async for lr in points_ledger_col.find(
+                {"type": "redeem", "reference_id": {"$in": batch},
+                 "note": {"$in": _LEGIT_REDEEM_NOTES}},
+                {"_id": 0, "reference_id": 1}):
+            legit.add(lr.get("reference_id"))
+    confirmed: List[Dict[str, Any]] = []
+    for bn, rs in bills.items():
+        if bn in legit:
+            for r in rs:
+                r["_bill"] = bn
+                confirmed.append(r)
+    return confirmed
+
+
+async def _tool_fix_double_redemptions(mobile: Optional[str] = None, reason: str = "",
+                                       confirm: bool = False, user=None) -> Dict[str, Any]:
+    err = _require_master(user)
+    if err:
+        return err
+    confirmed = await _scan_double_redemptions(mobile)
+    over_cap = len(confirmed) > INLINE_CAP
+    rows = confirmed[:INLINE_CAP]
+    total_points = sum(abs(int(r.get("points") or 0)) for r in rows)
+    cust_keys = {(r.get("customer_id") or r.get("customer_mobile")) for r in rows}
+    sample = [{"mobile": r.get("customer_mobile"), "bill": r.get("_bill"),
+               "points_to_restore": abs(int(r.get("points") or 0))} for r in rows[:10]]
+    plan = {"action": "fix_double_redemptions", "scope": "single" if mobile else "bulk",
+            "duplicate_rows_found": len(rows), "customers_affected": len(cust_keys),
+            "points_to_restore": total_points, "sample": sample,
+            "note": "Each row reversed has a confirmed prior OTP/non-OTP redemption for the same "
+                    "bill, so the bill's extra deduction is safely credited back."}
+    if not rows:
+        plan["message"] = ("No double-redemption deductions found"
+                           + (f" for {mobile}." if mobile else ".") + " Nothing to fix.")
+        return plan
+    if over_cap:
+        plan["warning"] = (f"More than {INLINE_CAP} duplicate rows exist — this run fixes the first "
+                           f"{INLINE_CAP}. Re-run to clear the rest.")
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("This CREDITS BACK the wrongly double-deducted points to each "
+                                         "customer and VOIDS the duplicate ledger rows. Confirm with the user "
+                                         "+ a business reason, then call again with confirm=true.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    # aggregate the credit per customer
+    by_cust: Dict[Any, Dict[str, Any]] = {}
+    for r in rows:
+        key = r.get("customer_id") or r.get("customer_mobile")
+        agg = by_cust.setdefault(key, {"cust_id": r.get("customer_id"),
+                                       "mobile": r.get("customer_mobile"), "pts": 0})
+        agg["pts"] += abs(int(r.get("points") or 0))
+    cust_ops = []
+    for agg in by_cust.values():
+        if agg["cust_id"]:
+            cq: Dict[str, Any] = {"id": agg["cust_id"]}
+        else:
+            strs, ints = _mobile_candidates(agg["mobile"])
+            cq = {"mobile": {"$in": strs + ints}}
+        cust_ops.append(UpdateOne(cq, {"$inc": {"points_balance": agg["pts"],
+                                                 "lifetime_points_redeemed": -agg["pts"]}}))
+    for i in range(0, len(cust_ops), BATCH):
+        await customers_col.bulk_write(cust_ops[i:i + BATCH], ordered=False)
+    # void the duplicate ledger rows (preserve original points for the audit trail;
+    # points=0 so ledger sums no longer count the phantom redemption)
+    row_ids = [r.get("id") for r in rows]
+    vreason = f"Duplicate redemption auto-corrected by Master Brain — {reason}"
+    for i in range(0, len(row_ids), BATCH):
+        await points_ledger_col.update_many(
+            {"id": {"$in": row_ids[i:i + BATCH]}},
+            [{"$set": {"voided": True, "voided_at": _now_iso(), "voided_by": user.get("email"),
+                       "voided_reason": vreason,
+                       "original_points": {"$ifNull": ["$original_points", "$points"]},
+                       "points": 0}}])
+    audit_id = await _log_master(user, "fix_double_redemptions", "customers", mobile or "bulk", reason,
+                                 {"duplicate_rows_fixed": len(rows), "customers_affected": len(by_cust),
+                                  "points_restored": total_points})
+    # NOTE: intentionally NO undo snapshot — this is a corrective repair; re-running is
+    # idempotent (voided rows are skipped) and a partial auto-undo would re-break balances.
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "duplicate_rows_fixed": len(rows), "points_restored": total_points,
+            "customers_affected": len(by_cust),
+            "message": f"Restored {total_points} points to {len(by_cust)} customer(s) and voided "
+                       f"{len(rows)} duplicate redemption ledger row(s). Logged to the action log."}
+
+
 MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "grant_bonus_points",
@@ -1088,6 +1211,23 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "reason": {"type": "string"},
             "confirm": {"type": "boolean", "default": False},
         }, "required": ["campaign_id"]}}},
+    {"type": "function", "function": {
+        "name": "fix_double_redemptions",
+        "description": "MUTATION (Master Admin). REPAIR customers whose points were DOUBLE-DEDUCTED by the old "
+                       "redemption bug — where the bill (posAddPoint) deducted the redeemed points a SECOND time "
+                       "after the OTP redemption had already deducted them. Finds the duplicate 'redeem' ledger "
+                       "rows that have a confirmed prior OTP/non-OTP redemption for the SAME bill, CREDITS BACK the "
+                       "wrongly-deducted points to each customer, corrects lifetime_points_redeemed, and voids the "
+                       "duplicate ledger rows. Pass a single `mobile` to fix one customer (good for a test), or omit "
+                       "it to fix ALL affected customers. ALWAYS call confirm=false first to PREVIEW (rows found, "
+                       "customers affected, points to restore, sample); then after the user approves + gives a "
+                       "reason, call again confirm=true + reason. Idempotent — already-fixed rows are skipped. "
+                       "Audit-logged.",
+        "parameters": {"type": "object", "properties": {
+            "mobile": {"type": "string", "description": "Optional — fix one customer; omit to fix ALL affected"},
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }}}},
 ]
 
 MASTER_TOOL_HANDLERS = {
@@ -1102,4 +1242,5 @@ MASTER_TOOL_HANDLERS = {
     "send_campaign": _tool_send_campaign,
     "list_campaigns": _tool_list_campaigns,
     "cancel_campaign": _tool_cancel_campaign,
+    "fix_double_redemptions": _tool_fix_double_redemptions,
 }

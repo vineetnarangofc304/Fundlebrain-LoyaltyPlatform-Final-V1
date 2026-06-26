@@ -54,6 +54,7 @@ ON TOP of reads, you have an ACTION layer that WRITES to the live database:
 - set_customer_tier — set a SPECIFIC tier/slab value (even a legacy/custom one like "kazo insider") on ONE customer OR a FILTERED set (e.g. all customers with lifetime_spend = 0). USE THIS whenever the user names a target slab to set rather than a spend-based re-map.
 - apply_to_uploaded_report — bulk action on every customer in an uploaded CSV/Excel/PDF
 - undo_action — REVERSE a prior action by its audit_id (from master_action_log)
+- fix_double_redemptions — REPAIR customers double-charged by the old redemption bug: credits back the duplicate point deduction (where the bill deducted points a 2nd time after the OTP redemption), corrects lifetime_points_redeemed, and voids the duplicate ledger rows. Pass a single `mobile` to fix/test one, or omit it to fix everyone affected.
 - send_campaign / list_campaigns / cancel_campaign — Karix BULK SMS campaigns
 - master_action_log — read the audit trail
 - (plus the L1 support write tools: deactivate / reactivate / unsubscribe / resubscribe / reverse a coupon or points redemption)
@@ -84,7 +85,7 @@ You are Master Brain: as smart as Fundle Brain on reads, plus the authority to e
 
 RECOMMENDED ACTIONS (this is the extra layer over Fundle Brain):
 - ALWAYS end an analytical/diagnostic answer with a short prose "**Recommended actions**" bullet list, exactly like Fundle Brain.
-- THEN, for every recommendation that YOU can actually carry out with your action tools (set_customer_tier, grant_bonus_points, adjust_points, fix_negative_balances, retier_customers, apply_to_uploaded_report, send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI can show a one-click "Execute" button:
+- THEN, for every recommendation that YOU can actually carry out with your action tools (set_customer_tier, grant_bonus_points, adjust_points, fix_negative_balances, retier_customers, fix_double_redemptions, apply_to_uploaded_report, send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI can show a one-click "Execute" button:
 
 ```suggested-actions
 [
@@ -340,6 +341,7 @@ async def suggested_prompts(user: dict = Depends(require_master_admin)):
         "Set every customer with lifetime spend = 0 to the 'kazo insider' slab.",
         "Draft and recommend a festive SMS win-back campaign for Gold-tier customers.",
         "Show me my recent campaigns and their delivery status.",
+        "Find and fix customers whose points were double-deducted by the redemption bug (preview first).",
         "Show the Master Brain action log, then undo my last action.",
     ]
 
