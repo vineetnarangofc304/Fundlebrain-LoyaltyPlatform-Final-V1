@@ -76,7 +76,7 @@ function ReconReport({ job }) {
         {"mobile_mismatches" in rep && (
           <KPICard label="Mobile mismatches" value={fmtNum(rep.mobile_mismatches)} accent={rep.mobile_mismatches ? "burgundy" : "teal"} testid="recon-kpi-mobile-mm" />
         )}
-        <KPICard label="Extra in DB (not in CSV)" value={fmtNum(rep.extra_in_db)} accent="slate" testid="recon-kpi-extra" />
+        <KPICard label="Extra in DB (not in CSV)" value={rep.extra_in_db == null ? "Not scanned" : fmtNum(rep.extra_in_db)} accent="slate" testid="recon-kpi-extra" />
         {rep.csv?.net_sum != null && (
           <KPICard label="CSV net ₹ sum" value={`₹${fmtNum(rep.csv.net_sum)}`} accent="indigo" testid="recon-kpi-csv-sum" />
         )}
@@ -94,10 +94,12 @@ function ReconReport({ job }) {
 
 export default function CsvReconSection() {
   const [dataset, setDataset] = useState("transactions");
+  const [deepScan, setDeepScan] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [jobs, setJobs] = useState([]);
   const [activeJob, setActiveJob] = useState(null);
+  const [cancelling, setCancelling] = useState({});
   const fileRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -128,6 +130,21 @@ export default function CsvReconSection() {
     }, 2500);
   };
 
+  const cancelJob = async (jobId) => {
+    setCancelling((s) => ({ ...s, [jobId]: true }));
+    try {
+      await api.post(`/recon/jobs/${jobId}/cancel`);
+      toast.success("Recon job cancelled");
+      clearInterval(pollRef.current);
+      if (activeJob?.id === jobId) setActiveJob((j) => (j ? { ...j, status: "failed", error: "Cancelled" } : j));
+      await loadJobs();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Cancel failed");
+    } finally {
+      setCancelling((s) => ({ ...s, [jobId]: false }));
+    }
+  };
+
   const upload = async (file) => {
     if (!file) return;
     setUploading(true);
@@ -136,6 +153,7 @@ export default function CsvReconSection() {
       const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_BYTES));
       const init = await api.post("/recon/init", {
         dataset, filename: file.name, total_chunks: totalChunks, total_bytes: file.size,
+        deep_scan: deepScan,
       });
       const jobId = init.data.id;
       for (let i = 0; i < totalChunks; i++) {
@@ -180,12 +198,26 @@ export default function CsvReconSection() {
         <button className="k-btn k-btn-outline" onClick={loadJobs} data-testid="recon-jobs-refresh">
           <RefreshCw className="w-3.5 h-3.5" /> Refresh
         </button>
+        <label className="flex items-center gap-1.5 text-xs text-neutral-600 cursor-pointer select-none" data-testid="recon-deepscan-label">
+          <input type="checkbox" checked={deepScan} onChange={(e) => setDeepScan(e.target.checked)}
+            className="accent-current" data-testid="recon-deepscan-checkbox" />
+          Deep DB-side scan (also find rows in DB not in the CSV — slower)
+        </label>
       </div>
 
       {activeJob?.status === "running" && (
-        <div className="mt-4 flex items-center gap-2 text-sm text-indigo-700" data-testid="recon-running">
-          <RefreshCw className="w-4 h-4 animate-spin" />
-          Comparing… {fmtNum(activeJob.processed || 0)} rows processed
+        <div className="mt-4 flex items-center gap-3 text-sm text-indigo-700" data-testid="recon-running">
+          <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
+          <span>
+            {activeJob.phase === "parsing" ? "Parsing the CSV…"
+              : activeJob.phase === "deep-scan" ? "Deep DB-side scan…"
+              : "Comparing…"} {fmtNum(activeJob.processed || 0)} rows processed
+          </span>
+          <button className="k-btn k-btn-outline k-btn-sm ml-auto text-rose-700 border-rose-200"
+            disabled={!!cancelling[activeJob.id]}
+            onClick={() => cancelJob(activeJob.id)} data-testid="recon-cancel-active">
+            {cancelling[activeJob.id] ? "Cancelling…" : "Cancel"}
+          </button>
         </div>
       )}
       {activeJob?.status === "failed" && (
@@ -224,14 +256,24 @@ export default function CsvReconSection() {
                     <td className="px-2 py-1 text-right">{fmtNum(j.report?.missing_in_db)}</td>
                     <td className="px-2 py-1 text-neutral-500">{j.queued_at ? new Date(j.queued_at).toLocaleString() : "—"}</td>
                     <td className="px-2 py-1 text-right">
-                      <button className="text-indigo-700 hover:underline flex items-center gap-1"
-                        onClick={async () => {
-                          const r = await api.get(`/recon/jobs/${j.id}`);
-                          setActiveJob(r.data);
-                        }}
-                        data-testid={`recon-view-${j.id}`}>
-                        <FileSearch className="w-3 h-3" /> View
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        {(j.status === "running" || j.status === "uploading") && (
+                          <button className="text-rose-700 hover:underline"
+                            disabled={!!cancelling[j.id]}
+                            onClick={() => cancelJob(j.id)}
+                            data-testid={`recon-cancel-${j.id}`}>
+                            {cancelling[j.id] ? "Cancelling…" : "Cancel"}
+                          </button>
+                        )}
+                        <button className="text-indigo-700 hover:underline flex items-center gap-1"
+                          onClick={async () => {
+                            const r = await api.get(`/recon/jobs/${j.id}`);
+                            setActiveJob(r.data);
+                          }}
+                          data-testid={`recon-view-${j.id}`}>
+                          <FileSearch className="w-3 h-3" /> View
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
