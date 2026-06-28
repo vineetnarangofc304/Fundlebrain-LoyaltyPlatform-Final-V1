@@ -20,7 +20,7 @@ from database import (
 from auth import get_current_user, require_roles, log_audit
 
 # Same DB connection as pos_ewards_routes uses
-from routes.pos_ewards_routes import pos_otp_col
+from routes.pos_ewards_routes import pos_otp_col, _mobile_key
 
 router = APIRouter(prefix="/support-desk", tags=["support-desk"])
 
@@ -58,7 +58,7 @@ async def search_redeem_points_otp(
     fil: Dict[str, Any] = {"purpose": "redeem_points"}
     norm = _norm_mobile(mobile)
     if norm:
-        fil["mobile"] = norm
+        fil["$or"] = [{"mobile_key": _mobile_key(norm)}, {"mobile": norm}]
     if otp_id:
         fil["otp_id"] = otp_id
     if bill_number:
@@ -87,7 +87,7 @@ async def search_redeem_coupon_otp(
     fil: Dict[str, Any] = {"purpose": "redeem_coupon"}
     norm = _norm_mobile(mobile)
     if norm:
-        fil["mobile"] = norm
+        fil["$or"] = [{"mobile_key": _mobile_key(norm)}, {"mobile": norm}]
     if otp_id:
         fil["otp_id"] = otp_id
     if coupon_code:

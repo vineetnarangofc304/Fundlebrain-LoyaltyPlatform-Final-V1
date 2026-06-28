@@ -1153,23 +1153,49 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         return resp
 
     session = None
+    snapshot: Dict[str, Any] = {}
+    orig_bill = ""
     test_bypass = ALLOW_TEST_OTP and otp == TEST_OTP
     if otp and not test_bypass:
-        # Match the OTP session for this mobile+otp REGARDLESS of verified state, so a
-        # legitimate POS retry / double-submit (network retry, cashier re-tap, slow
-        # response) is handled idempotently instead of failing as "Invalid OTP" — the
-        # 2nd call would otherwise miss a now-verified session. Only a genuinely-unknown
-        # OTP value is treated as Invalid.
         mob_key = _mobile_key(mobile)
-        # VALIDATE AGAINST THE LAST OTP: take the most recently-issued redeem OTP for this
-        # mobile and require the submitted value to match it. Once a newer OTP is issued,
-        # older ones are no longer accepted. The `points` field on this call is ignored
-        # (see below) — the redemption amount comes from the OTP, not this request.
-        session = await pos_otp_col.find_one({
-            "purpose": "redeem_points",
-            "$or": [{"mobile_key": mob_key}, {"mobile": mobile}],
-        }, {"_id": 0}, sort=[("created_at", -1)])
-        if not session or session.get("otp") != otp:
+        now = _now_iso()
+        mobile_match = {"purpose": "redeem_points", "otp": otp,
+                        "$or": [{"mobile_key": mob_key}, {"mobile": mobile}]}
+        # ACCEPT ANY STILL-VALID OTP for this mobile — NOT just the most-recent one. A resend,
+        # a duplicate redeem request, or an OTP a cashier reads off the Support Desk screen
+        # must NOT be rejected as "Invalid OTP". Security is preserved by: the single-use
+        # atomic claim below, the 10-min expiry, the mobile match, the bill-number tamper
+        # defense, AND a per-bill idempotency guard (further down) that blocks any second
+        # deduction for the same bill no matter how many OTPs exist.
+        session = await pos_otp_col.find_one(
+            {**mobile_match, "redeemed": {"$ne": True}, "expires_at": {"$gte": now}},
+            {"_id": 0}, sort=[("created_at", -1)])
+        if session is None:
+            # (a) an OTP with this value was already used → idempotent success (POS retry)
+            done = await pos_otp_col.find_one(
+                {**mobile_match, "redeemed": True}, {"_id": 0}, sort=[("created_at", -1)])
+            if done:
+                resp = _ok({
+                    "points_value": str(done.get("redeemed_points", points_requested)),
+                    "points_monetary_value": str(done.get(
+                        "redeemed_value", round(points_requested * burn_ratio, 2))),
+                    "already_redeemed": True,
+                })
+                await _log_api(endpoint=endpoint, method="POST", status=200,
+                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                               bill_number=bill_number, error="idempotent retry (already redeemed)",
+                               payload=payload, response=resp, api_key_label=cred.get("label"))
+                return resp
+            # (b) the value matches a session for this mobile but it has lapsed → distinct msg
+            lapsed = await pos_otp_col.find_one(mobile_match, {"_id": 0}, sort=[("created_at", -1)])
+            if lapsed:
+                resp = _err(400, "OTP expired. Please request a new one.")
+                await _log_api(endpoint=endpoint, method="POST", status=400,
+                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                               bill_number=bill_number, error="OTP expired",
+                               payload=payload, response=resp, api_key_label=cred.get("label"))
+                return resp
+            # (c) no session for this mobile carries this OTP value → genuinely invalid
             reason = await _otp_failure_reason(mobile, mob_key, otp, "redeem_points")
             resp = _err(400, "Invalid OTP.")
             await _log_api(endpoint=endpoint, method="POST", status=400,
@@ -1178,33 +1204,8 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
                            payload=payload, response=resp, api_key_label=cred.get("label"))
             return resp
 
-        # IDEMPOTENCY: this OTP's redemption already completed (POS retry / double-tap).
-        # Return the SAME success WITHOUT deducting points again.
-        if session.get("redeemed"):
-            resp = _ok({
-                "points_value": str(session.get("redeemed_points", points_requested)),
-                "points_monetary_value": str(session.get(
-                    "redeemed_value", round(points_requested * burn_ratio, 2))),
-                "already_redeemed": True,
-            })
-            await _log_api(endpoint=endpoint, method="POST", status=200,
-                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number, error="idempotent retry (already redeemed)",
-                           payload=payload, response=resp, api_key_label=cred.get("label"))
-            return resp
-
-        if session.get("expires_at", "") < _now_iso():
-            resp = _err(400, "OTP expired. Please request a new one.")
-            await _log_api(endpoint=endpoint, method="POST", status=400,
-                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
-                           bill_number=bill_number, error="OTP expired",
-                           payload=payload, response=resp, api_key_label=cred.get("label"))
-            return resp
-
-        # POINTS: do NOT validate the `points` field on this verify call. The eWards POS
-        # sends points=0 here because the redemption amount was already fixed at
-        # posRedeemPointRequest. The authoritative amount is what the OTP was ISSUED for
-        # (snapshot.points) — use that for the actual deduction.
+        # POINTS: the POS sends points=0 on this verify call. The authoritative redemption
+        # amount is what the OTP was ISSUED for (snapshot.points).
         snapshot = session.get("payload_snapshot") or {}
         original_points = _parse_int(snapshot.get("points"))
         if original_points > 0:
@@ -1232,6 +1233,28 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
         return resp
 
     points_value = round(points_requested * burn_ratio, 2)
+
+    # PER-BILL IDEMPOTENCY: never deduct twice for the same bill, regardless of how many
+    # OTPs exist for this mobile. If a redemption ledger row already exists for this bill,
+    # return an idempotent success WITHOUT deducting again.
+    effective_bill = (bill_number or orig_bill or "").strip()
+    if effective_bill:
+        already = await points_ledger_col.find_one(
+            {"type": "redeem", "reference_type": "transaction", "reference_id": effective_bill})
+        if already:
+            if session is not None:
+                await pos_otp_col.update_one(
+                    {"otp_id": session["otp_id"]},
+                    {"$set": {"verified": True, "verified_at": _now_iso(), "redeemed": True,
+                               "redeemed_points": points_requested, "redeemed_value": points_value}})
+            resp = _ok({"points_value": str(points_requested),
+                        "points_monetary_value": str(points_value),
+                        "already_redeemed": True})
+            await _log_api(endpoint=endpoint, method="POST", status=200,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number, error="idempotent (bill already redeemed)",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
 
     # Atomically CLAIM the redemption for a real OTP session so two concurrent
     # duplicate submissions can never both deduct points. The winner sets
