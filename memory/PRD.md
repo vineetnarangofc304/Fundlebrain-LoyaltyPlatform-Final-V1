@@ -32,6 +32,13 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 78 (Jun 2026) — 🔴🔴 P0 FIX (recurring): live POS "Invalid OTP" — the OTP sent via SMS didn't match the portal/DB OTP
+User (LIVE POS): "Cus recv otp but it is showing invalid… Portal one worked… But the one sent sms not working. OTP is part of the redemption process of the API."
+- **Root cause:** the two RESEND endpoints — `resendOtPosRedeemPointRequest` (redeem) and `resendOtPcustomercheck` (customer-check) — generated a NEW OTP, **overwrote** it on the same `pos_otp_sessions` doc, and returned it to the portal/response, but **never dispatched a new SMS**. Only the very first `_create_otp` ever fired an SMS. So after any resend, the customer's phone still held the ORIGINAL OTP while the DB/portal held the resent value → the SMS OTP was rejected as "Invalid" and the portal value (latest) was accepted. (Compounded on prod by the iter-77 "accept any valid OTP" relaxation not yet being deployed.)
+- **Fix (`pos_ewards_routes.py`):** both resend endpoints now dispatch the new OTP over SMS via `_fire_and_forget(fire_event("otp", session.mobile, {"otp": new_otp, "purpose": ...}))` — exactly like the initial `_create_otp`. The SMS now always carries the current valid OTP, matching the DB/portal. (No change to OTP generation/verification security; iter-77 "accept any still-valid OTP" + per-bill idempotency guard retained.)
+- **Verified (e2e preview, real HTTP + DB asserts, `/tmp/otp_sms_resend_test.py` 8/8):** seeded an active `otp` SMS template + fast-failing provider so dispatch attempts log the rendered text. initial request → otp1 dispatched; RESEND → otp2 dispatched (message_log shows BOTH otp1 AND otp2 SMS texts — previously only otp1); DB session updated to otp2; verify with the resent otp2 → SUCCESS, balance 1000→600 (deducted once), exactly one redeem ledger row. ⚠️ Redeploy required for production.
+
+
 ### Iteration 77 (Jun 2026) — 🔴🔴 P0 FIX (recurring): POS "Invalid OTP" on redemption — the OTP shown in the interface was rejected
 User (LIVE POS): "OTP that we are getting in our interface is showing invalid when applied at POS."
 - **Root cause:** `posRedeemPointOtpCheck` accepted ONLY the single most-recently-issued OTP for a mobile (`sort created_at desc` + `session.otp != otp → Invalid`). A resend / duplicate `posRedeemPointRequest`, or an OTP a cashier read off the **Support Desk → Search Redeem Points OTP** screen, could be a *valid but not-the-latest* OTP → rejected as "Invalid OTP." The Support Desk search also filtered by exact `mobile` while the verify matched on canonical `mobile_key`, so the two could disagree on which OTP was "latest."

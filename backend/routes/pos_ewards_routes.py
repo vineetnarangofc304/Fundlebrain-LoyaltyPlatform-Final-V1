@@ -758,6 +758,14 @@ async def resend_otp_customer_check(payload: Dict[str, Any], request: Request,
         {"$set": {"otp": new_otp,
                   "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)).isoformat()}},
     )
+    # Dispatch the NEW OTP over SMS (same root-cause fix as the redeem resend — the
+    # resend must actually re-send the SMS, not just update the DB/portal value).
+    try:
+        from routes.communications_routes import fire_event
+        _fire_and_forget(fire_event("otp", session.get("mobile"),
+                                    {"otp": new_otp, "purpose": "customer_check"}))
+    except Exception as e:
+        logger.warning(f"Resend customer-check OTP SMS dispatch failed for {session.get('mobile')}: {e}")
     msg = f"{new_otp} is your OTP. Valid for the next 10 minutes."
     body = {"message": "Resend OTP successfully", "otp_message": msg}
     if TEST_MODE_RETURN_OTP:
@@ -1090,6 +1098,16 @@ async def resend_otp_redeem(payload: Dict[str, Any], request: Request,
         {"$set": {"otp": new_otp,
                    "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)).isoformat()}},
     )
+    # Dispatch the NEW OTP over SMS so the customer actually receives the resent value.
+    # ROOT CAUSE of the live "Invalid OTP": the resend used to ONLY update the DB/portal
+    # value and return it — the customer's phone still held the ORIGINAL OTP, so the SMS
+    # OTP was rejected while the portal (latest) value worked.
+    try:
+        from routes.communications_routes import fire_event
+        _fire_and_forget(fire_event("otp", session.get("mobile"),
+                                    {"otp": new_otp, "purpose": "redeem_points"}))
+    except Exception as e:
+        logger.warning(f"Resend redeem OTP SMS dispatch failed for {session.get('mobile')}: {e}")
     msg = f"{new_otp} is your OTP to redeem points. Valid for 10 minutes."
     body = {"message": "Resend OTP successfully", "otp_message": msg}
     if TEST_MODE_RETURN_OTP:
