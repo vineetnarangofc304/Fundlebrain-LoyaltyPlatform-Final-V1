@@ -219,7 +219,7 @@ async def run_aggregation(collection: str = "", pipeline: Any = None, user=None)
         pipeline = pipeline + [{"$limit": 100}]
     try:
         rows = await db[collection].aggregate(
-            pipeline, allowDiskUse=True, maxTimeMS=30000).to_list(200)
+            pipeline, allowDiskUse=True, maxTimeMS=18000).to_list(200)
         # strip _id ObjectIds for JSON safety
         for r in rows:
             if "_id" in r and not isinstance(r["_id"], (str, int, float, dict, list, type(None))):

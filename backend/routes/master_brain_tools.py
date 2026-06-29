@@ -972,7 +972,7 @@ async def _scan_double_redemptions(mobile: Optional[str] = None, cap: int = INLI
         q["customer_mobile"] = {"$in": strs + ints}
     rows = await points_ledger_col.find(
         q, {"_id": 0, "id": 1, "points": 1, "note": 1, "customer_id": 1, "customer_mobile": 1}
-    ).limit(cap).max_time_ms(45000).to_list(cap)
+    ).limit(cap).max_time_ms(20000).to_list(cap)
     if not rows:
         return []
     bills: Dict[str, List[Dict[str, Any]]] = {}
@@ -996,6 +996,89 @@ async def _scan_double_redemptions(mobile: Optional[str] = None, cap: int = INLI
                 r["_bill"] = bn
                 confirmed.append(r)
     return confirmed
+
+
+async def _tool_audit_negative_balances(user=None) -> Dict[str, Any]:
+    """FAST, READ-ONLY negative-balance audit. The AUTHORITATIVE count comes from the indexed
+    `customers.points_balance` field (instant). A ledger-sum cross-check is attempted
+    best-effort with a tight time cap and skipped gracefully if the ledger is too large —
+    so the assistant always returns real numbers fast instead of grouping the whole ledger."""
+    err = _require_master(user)
+    if err:
+        return err
+    field_count = await customers_col.count_documents({"points_balance": {"$lt": 0}}, maxTimeMS=15000)
+    field_sum = 0
+    worst: List[Dict[str, Any]] = []
+    if field_count:
+        agg = await customers_col.aggregate(
+            [{"$match": {"points_balance": {"$lt": 0}}},
+             {"$group": {"_id": None, "total": {"$sum": "$points_balance"}}}],
+            maxTimeMS=15000).to_list(1)
+        field_sum = int(agg[0]["total"]) if agg else 0
+        worst = await customers_col.find(
+            {"points_balance": {"$lt": 0}},
+            {"_id": 0, "mobile": 1, "points_balance": 1, "name": 1}
+        ).sort("points_balance", 1).limit(10).to_list(10)
+    # Best-effort ledger-sum cross-check (different from the authoritative field; may be skipped).
+    ledger_note = None
+    try:
+        lc = await points_ledger_col.aggregate(
+            [{"$group": {"_id": "$customer_mobile", "bal": {"$sum": "$points"}}},
+             {"$match": {"bal": {"$lt": 0}}}, {"$count": "n"}],
+            maxTimeMS=12000, allowDiskUse=True).to_list(1)
+        ledger_neg = lc[0]["n"] if lc else 0
+        ledger_note = (f"{ledger_neg} customers have a NEGATIVE ledger-sum (independent cross-check "
+                       "of summing every points_ledger row).")
+    except Exception:  # noqa: BLE001
+        ledger_note = "Ledger-sum cross-check skipped (ledger too large to compute live within the time cap)."
+    return {
+        "audit": "negative_balances",
+        "negative_balance_customers": field_count,
+        "total_deficit_points": field_sum,
+        "worst_customers": worst,
+        "source": "customers.points_balance (authoritative, indexed)",
+        "ledger_cross_check": ledger_note,
+        "reason_hint": ("Negative balances usually come from: redemptions/adjustments exceeding earned "
+                        "points, the POS double-deduction bug (run audit_double_redemptions), or "
+                        "migration/opening-balance mismatches during historic uploads."),
+        "message": (f"{field_count} customers currently have a negative points_balance "
+                    f"(total deficit {field_sum} pts)." if field_count
+                    else "No customers have a negative points_balance — field balances are clean."),
+    }
+
+
+async def _tool_audit_double_redemptions(mobile: Optional[str] = None, user=None) -> Dict[str, Any]:
+    """FAST, READ-ONLY duplicate-redemption audit. Reuses the confirmed-duplicate scan but
+    only REPORTS (never mutates), so the assistant can answer 'how many are affected?' in one
+    bounded call instead of writing slow ad-hoc ledger aggregations."""
+    err = _require_master(user)
+    if err:
+        return err
+    confirmed = await _scan_double_redemptions(mobile)
+    rows = confirmed[:INLINE_CAP]
+    total_points = sum(abs(int(r.get("points") or 0)) for r in rows)
+    cust_keys = {(r.get("customer_id") or r.get("customer_mobile")) for r in rows}
+    sample = [{"mobile": r.get("customer_mobile"), "bill": r.get("_bill"),
+               "points_double_deducted": abs(int(r.get("points") or 0))} for r in rows[:10]]
+    return {
+        "audit": "double_redemptions",
+        "scope": "single_customer" if mobile else "all_customers",
+        "duplicate_rows_found": len(rows),
+        "customers_affected": len(cust_keys),
+        "points_double_deducted": total_points,
+        "over_cap": len(confirmed) > INLINE_CAP,
+        "sample": sample,
+        "definition": ("A duplicate/double redemption = a points_ledger row with the POS bug "
+                       "signature (type=redeem, reference_type=transaction, note='Bill <no>') for a "
+                       "bill that ALSO has a legitimate POS OTP/non-OTP redeem row — i.e. the same "
+                       "bill's points were deducted twice."),
+        "message": ("No double-redemption deductions found"
+                    + (f" for {mobile}." if mobile else " across the customer base.")
+                    if not rows else
+                    f"{len(rows)} double-redemption ledger rows across {len(cust_keys)} customers; "
+                    f"{total_points} points were wrongly double-deducted. "
+                    "Use the fix_double_redemptions action to credit them back."),
+    }
 
 
 async def _tool_fix_double_redemptions(mobile: Optional[str] = None, reason: str = "",
@@ -1231,6 +1314,8 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
 ]
 
 MASTER_TOOL_HANDLERS = {
+    "audit_double_redemptions": _tool_audit_double_redemptions,
+    "audit_negative_balances": _tool_audit_negative_balances,
     "grant_bonus_points": _tool_grant_bonus_points,
     "adjust_points": _tool_adjust_points,
     "fix_negative_balances": _tool_fix_negative_balances,
@@ -1244,3 +1329,27 @@ MASTER_TOOL_HANDLERS = {
     "cancel_campaign": _tool_cancel_campaign,
     "fix_double_redemptions": _tool_fix_double_redemptions,
 }
+
+# READ-ONLY Master tools — safe to expose on analysis/read questions (no mutation). Kept
+# separate from the action schemas so the read path can include them without unlocking writes.
+MASTER_READ_TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    {"type": "function", "function": {
+        "name": "audit_negative_balances",
+        "description": ("FAST, read-only audit of customers with a NEGATIVE loyalty points balance. "
+                        "Returns the authoritative indexed count + total deficit from "
+                        "customers.points_balance, the worst cases, and a best-effort ledger-sum "
+                        "cross-check. ALWAYS use this for any 'how many / which customers have "
+                        "negative balance and why' question — do NOT group the whole ledger yourself."),
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "audit_double_redemptions",
+        "description": ("FAST, read-only audit of double/duplicate point redemptions (the POS "
+                        "double-deduction bug). Returns how many ledger rows and customers are "
+                        "affected and the total points double-deducted. ALWAYS use this for any "
+                        "'duplicate-redemption audit / how many are affected' question — do NOT "
+                        "write your own ledger aggregations for this. Optional `mobile` scopes to "
+                        "one customer."),
+        "parameters": {"type": "object", "properties": {
+            "mobile": {"type": "string", "description": "Optional 10-digit mobile to scope the audit."}
+        }}}},
+]

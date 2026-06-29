@@ -27,7 +27,8 @@ from models import AIChatRequest
 from routes.ai_routes import _build_completion_params, _resolve_model, EMERGENT_LLM_KEY, SYSTEM_PROMPT
 from routes.ai_tools import TOOL_SCHEMAS, execute_tool
 from routes.master_brain_tools import (
-    MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, _tool_undo_action, _tool_cancel_campaign,
+    MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, MASTER_READ_TOOL_SCHEMAS,
+    _tool_undo_action, _tool_cancel_campaign,
 )
 from routes import mb_attachments as MBA
 
@@ -37,8 +38,15 @@ import logging
 logger = logging.getLogger("kazo-fundle.master-brain")
 
 MAX_TOOL_ITERATIONS = 12
-MB_DEADLINE_SECONDS = 90  # force a final answer before the 120s proxy read timeout
-ALL_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_TOOL_SCHEMAS
+# Hard wall-clock cap for the tool-gathering loop. The K8s ingress returns a 502 at ~60s, so
+# we MUST finish the loop AND the final synthesis well under that. Loop ≤ this + one ~15s
+# synthesis call stays comfortably under 60s. The loop runs on FAST Sonnet so it rarely
+# approaches this; it's a safety net, not the common case.
+MB_DEADLINE_SECONDS = 26
+# Analysis/read questions get the Fundle read tools PLUS the read-only Master audits (e.g.
+# the fast duplicate-redemption audit). The full action set is added only on write intent.
+READ_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_READ_TOOL_SCHEMAS
+ALL_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_READ_TOOL_SCHEMAS + MASTER_TOOL_SCHEMAS
 
 # Master Brain = ALL of Fundle Brain (reads/analytics/CSV/agentic behaviour) + an action layer.
 # We literally reuse Fundle Brain's full system prompt and append the action protocol so Master
@@ -120,7 +128,11 @@ You are MASTER BRAIN (the Master Admin tool). For THIS analysis/read question, a
 like Fundle Brain — same read tools, same decisiveness, same formatting — and ALWAYS give a
 REAL, COMPLETE answer with the actual numbers. Be decisive: reach the answer in as few tool
 calls as possible (a single `$match`+`$count` or filtered `count_documents` is enough for a
-count). NEVER reply "timed out", "I couldn't", or a vague placeholder.
+count). For any DUPLICATE/DOUBLE-REDEMPTION audit ("how many are affected"), call the
+`audit_double_redemptions` tool ONCE; for any NEGATIVE-BALANCE question ("how many / which
+customers have negative balance and why"), call `audit_negative_balances` ONCE — never
+hand-write ledger aggregations for these. NEVER reply "timed out", "I couldn't", or a vague
+placeholder.
 
 After the answer, add a short prose "**Recommended actions**" list. For each recommendation you
 could carry out with an action tool (set_customer_tier, grant_bonus_points, adjust_points,
@@ -165,18 +177,28 @@ async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, 
 
 
 _MB_RETRY = 3
+_BUDGET_MSG = ("⚠️ **AI usage budget exhausted.** The Universal LLM Key for this workspace has "
+               "run out of balance, so I can't run the analysis right now. Please top it up under "
+               "**Profile → Universal Key → Add Balance** (or enable auto top-up), then ask me again.")
+
+
+class _BudgetExceeded(Exception):
+    """Emergent Universal Key budget exhausted — not retryable; surfaced as a clear message."""
 
 
 async def _completion(params: Dict[str, Any]):
     """Call the LLM off the event loop with a small retry for transient proxy/network
-    errors (rate-limit / timeout / 5xx / overloaded) so a blip never becomes a hard error."""
+    errors (rate-limit / timeout / 5xx / overloaded) so a blip never becomes a hard error.
+    A budget-exhausted error is raised as `_BudgetExceeded` so callers can show a clear note."""
     last = None
     for attempt in range(1, _MB_RETRY + 1):
         try:
             return await asyncio.to_thread(litellm.completion, **params)
         except Exception as e:  # noqa: BLE001
-            last = e
             blob = f"{type(e).__name__}: {e}".lower()
+            if "budget has been exceeded" in blob or "max budget" in blob:
+                raise _BudgetExceeded(str(e))
+            last = e
             transient = any(k in blob for k in (
                 "timeout", "timed out", "rate", "429", "500", "502", "503", "504",
                 "overloaded", "connection", "temporarily", "unavailable", "apierror",
@@ -219,35 +241,49 @@ def _compact_trace(trace: List[Dict[str, Any]]) -> str:
 
 async def _final_synthesis(system_content: str, question: str, trace: List[Dict[str, Any]],
                            model: str, provider: str) -> str:
-    """Compose a final answer from ONLY the accumulated tool results, on a fresh, small
-    message list (no tool-call scaffolding) so it can't overflow context or break on the
-    tool-message ordering rules. Safe fallback path."""
+    """Compose the final answer from ONLY the accumulated tool results, on a fresh, small
+    message list with a COMPACT system prompt (not the full Master prompt) so the premium
+    engine has little to read and replies fast + bounded. No tool-call scaffolding, so it
+    can't overflow context or break Anthropic's tool-message ordering rules."""
     msgs = [
-        {"role": "system", "content": system_content},
+        {"role": "system", "content": (
+            "You are Master Brain, an elite retail-loyalty & CRM data analyst for KAZO. Compose a "
+            "decisive, executive-grade FINAL answer in clean Markdown (use tables for tabular data, "
+            "bold the key numbers). Use ONLY the data provided below — never invent figures. If a "
+            "scan timed out, say so in one line and give what you can. Do NOT mention tools.")},
         {"role": "user", "content": (
             (question or "Answer the user's question.")
-            + "\n\nData results gathered so far (tool outputs):\n" + _compact_trace(trace)
-            + "\n\nUsing ONLY these results, give the best possible FINAL answer now as clean "
-            "Markdown (use a table for tabular data). If a needed scan timed out, say so in one "
-            "line and provide what you can. Do NOT mention tools and do NOT request more tools.")},
+            + "\n\nData gathered (tool outputs):\n" + _compact_trace(trace)
+            + "\n\nGive the best possible final answer now.")},
     ]
     params = _build_completion_params(msgs, model, provider)
+    params["max_tokens"] = 2500
     resp = await _completion(params)
     return resp.choices[0].message.content or ""
 
 
 async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str,
                          user: Dict[str, Any],
-                         tools: Optional[List[Dict[str, Any]]] = None) -> tuple[str, List[Dict[str, Any]]]:
+                         tools: Optional[List[Dict[str, Any]]] = None,
+                         answer_model: Optional[str] = None,
+                         answer_provider: Optional[str] = None,
+                         trace_out: Optional[List[Dict[str, Any]]] = None) -> tuple[str, List[Dict[str, Any]]]:
     """Run the model<->tool loop OFF the event loop (litellm.completion is blocking) and
-    enforce a wall-clock budget so we always return before the 120s proxy read timeout.
-    Resilient: an LLM/context error never bubbles up as a hard 500 — we fall back to a
-    final synthesis from whatever tool results we already have. `tools` selects the schema
-    set (read-only for analysis questions, full read+action set for write intents)."""
-    trace: List[Dict[str, Any]] = []
+    enforce a wall-clock budget so we ALWAYS return well before the ~60s ingress 502.
+    Resilient: an LLM/context/budget error never bubbles up as a hard 500.
+
+    HYBRID engine: `model` is the FAST loop engine that gathers data via tool calls
+    (Sonnet 4.6). If `answer_model` is given (Opus 4.7), the user-facing FINAL answer is
+    composed by that premium engine from the gathered results — giving Opus-grade depth
+    without Opus latency on every tool round (which is what caused the 502 timeouts).
+    `tools` selects the schema set (read-only for analysis, full read+action for writes).
+    `trace_out`, if passed, is the live trace list the caller can read for partial results
+    (used by the outer hard-timeout guard to synthesise from whatever was gathered)."""
+    trace: List[Dict[str, Any]] = trace_out if trace_out is not None else []
     tool_schemas = tools if tools is not None else ALL_TOOL_SCHEMAS
+    am, ap = (answer_model or model), (answer_provider or provider)
     t0 = time.time()
-    # Capture the system prompt + the user's question for the safe-synthesis fallback.
+    # Capture the system prompt + the user's question for the synthesis pass.
     system_content = next((m["content"] for m in messages
                            if m.get("role") == "system" and isinstance(m.get("content"), str)),
                           MASTER_SYSTEM_PROMPT)
@@ -268,6 +304,8 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
         params = _build_completion_params(messages, model, provider, tools=tool_schemas)
         try:
             resp = await _completion(params)
+        except _BudgetExceeded:
+            return _BUDGET_MSG, trace
         except Exception as e:  # noqa: BLE001 — LLM/context error: stop looping, synthesise
             logger.warning(f"MB tool-loop completion failed ({type(e).__name__}: {e}); "
                            f"falling back to synthesis from {len(trace)} tool result(s)")
@@ -294,29 +332,28 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
                 messages.append({"role": "tool", "tool_call_id": tc.id, "name": name,
                                  "content": json.dumps(result, default=str)[:18000]})
             continue
-        return (msg.content or ""), trace
+        # Model produced a direct answer. If no premium answer engine is configured (action
+        # path), return it as-is. Otherwise hand the gathered data to the premium engine so
+        # the user-facing answer gets Opus-grade depth.
+        if not answer_model or answer_model == model:
+            return (msg.content or ""), trace
+        if msg.content:
+            trace.append({"tool": "draft_answer", "args": {}, "result_preview": (msg.content or "")[:2000]})
+        break
 
-    # Budget reached OR an LLM error broke the loop -> compose a FINAL answer resiliently.
+    # Compose the FINAL answer with the premium engine from gathered results, on a FRESH,
+    # small message list (no assistant tool_calls scaffolding — works for Anthropic and can't
+    # overflow context).
     try:
-        messages.append({"role": "system", "content": (
-            "Tool/time budget reached. Give the best possible FINAL answer NOW from the results above "
-            "as clean Markdown (tables for tabular data); if data is still missing, say so in one line. "
-            "Do NOT call any more tools.")})
-        params = _build_completion_params(messages, model, provider)
-        resp = await _completion(params)
-        return (resp.choices[0].message.content or ""), trace
-    except Exception as e:  # noqa: BLE001 — replay failed (often context overflow): trim & retry
-        logger.warning(f"MB full-context synthesis failed ({type(e).__name__}: {e}); trying trimmed")
-        try:
-            return await _final_synthesis(system_content, question, trace, model, provider), trace
-        except Exception as e2:  # noqa: BLE001 — last resort: return the raw findings
-            logger.warning(f"MB trimmed synthesis also failed ({type(e2).__name__}: {e2})")
-            if trace:
-                return ("I gathered the data but couldn't fully compose the narrative this time. "
-                        "Here is what the scans returned:\n\n" + _compact_trace(trace)), trace
-            return ("I couldn't complete this request — the underlying data scan took too long on the "
-                    "full customer base. Please narrow it (e.g. a single store, tier, or date range) "
-                    "and try again."), trace
+        return await _final_synthesis(system_content, question, trace, am, ap), trace
+    except _BudgetExceeded:
+        return _BUDGET_MSG, trace
+    except Exception as e:  # noqa: BLE001 — last resort: return the raw findings (no LLM)
+        logger.warning(f"MB final synthesis failed ({type(e).__name__}: {e})")
+        if trace:
+            return ("Here is what I found from the data so far:\n\n" + _compact_trace(trace)), trace
+        return ("I couldn't complete this request just now. Please try again, or narrow it "
+                "(e.g. a single store, tier, or date range)."), trace
 
 
 async def require_query_viewer(user: dict = Depends(get_current_user)) -> dict:
@@ -572,12 +609,40 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     # expose the session to action tools (server-side fallback for uploaded reports)
     user["_mb_session"] = session_id
 
-    provider, model = _resolve_model(req.model, default=("anthropic", "claude-opus-4-7"))
-    # `wants_action` (computed above) already chose the lean read prompt vs the full action
-    # prompt; use the matching tool set: read-only for analysis, full read+action for writes.
-    tool_set = ALL_TOOL_SCHEMAS if wants_action else TOOL_SCHEMAS
+    # HYBRID engines (best LLM + no timeouts):
+    #  • READ/analysis → gather data with FAST Sonnet 4.6, compose the final deep answer with
+    #    Opus 4.7. Many tool rounds stay fast (no 502), the user-facing answer is Opus-grade.
+    #  • ACTION/write → run the whole preview→confirm flow on Opus 4.7 directly (few tool
+    #    calls, fast) so the execution semantics stay precise.
+    if wants_action:
+        provider, model = _resolve_model(req.model, default=("anthropic", "claude-opus-4-7"))
+        answer_provider, answer_model = None, None
+        tool_set = ALL_TOOL_SCHEMAS
+    else:
+        provider, model = _resolve_model(req.model, default=("anthropic", "claude-sonnet-4-6"))
+        answer_provider, answer_model = "anthropic", "claude-opus-4-7"
+        tool_set = READ_TOOL_SCHEMAS
     try:
-        reply, trace = await _run_tool_loop(history, model, provider, user=user, tools=tool_set)
+        trace: List[Dict[str, Any]] = []
+        # HARD overall wall-clock guarantee: the K8s ingress 502s at ~60s, so we cap the whole
+        # run at 46s. If it's about to exceed that, we cancel and instantly compose a REAL answer
+        # from whatever data was already gathered (fast Sonnet) — the user NEVER sees a 502.
+        try:
+            reply, trace = await asyncio.wait_for(
+                _run_tool_loop(history, model, provider, user=user, tools=tool_set,
+                               answer_model=answer_model, answer_provider=answer_provider,
+                               trace_out=trace),
+                timeout=46)
+        except asyncio.TimeoutError:
+            logger.warning(f"MB overall 46s cap hit; fast-synthesising from {len(trace)} tool result(s)")
+            try:
+                reply = await asyncio.wait_for(
+                    _final_synthesis("", req.message, trace, "claude-sonnet-4-6", "anthropic"),
+                    timeout=9)
+            except Exception:  # noqa: BLE001
+                reply = (("Here is what I found before the deep scan ran long:\n\n" + _compact_trace(trace))
+                         if trace else "That query is taking longer than expected on the full dataset.") + \
+                        "\n\n_Tip: narrow it to a single store, tier, or date range for a faster, fuller answer._"
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"AI error: {str(e)}")
 
