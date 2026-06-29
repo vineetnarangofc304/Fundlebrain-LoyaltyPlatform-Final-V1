@@ -33,6 +33,9 @@ from routes import mb_attachments as MBA
 
 router = APIRouter(prefix="/master-brain", tags=["master-brain"])
 
+import logging
+logger = logging.getLogger("kazo-fundle.master-brain")
+
 MAX_TOOL_ITERATIONS = 12
 MB_DEADLINE_SECONDS = 90  # force a final answer before the 120s proxy read timeout
 ALL_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_TOOL_SCHEMAS
@@ -128,17 +131,69 @@ async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, 
     return await execute_tool(name, args, user=user)
 
 
+def _compact_trace(trace: List[Dict[str, Any]]) -> str:
+    """A short, model-readable summary of the tool results gathered so far — used to
+    synthesise a final answer when the full message history can't be replayed (e.g. an
+    LLM error or context-window overflow after many heavy tool calls)."""
+    parts = []
+    for t in trace[-12:]:
+        args = json.dumps(t.get("args", {}), default=str)[:200]
+        parts.append(f"- {t.get('tool')}({args}) => {str(t.get('result_preview', ''))[:600]}")
+    return "\n".join(parts) or "(no tool results were gathered)"
+
+
+async def _final_synthesis(system_content: str, question: str, trace: List[Dict[str, Any]],
+                           model: str, provider: str) -> str:
+    """Compose a final answer from ONLY the accumulated tool results, on a fresh, small
+    message list (no tool-call scaffolding) so it can't overflow context or break on the
+    tool-message ordering rules. Safe fallback path."""
+    msgs = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": (
+            (question or "Answer the user's question.")
+            + "\n\nData results gathered so far (tool outputs):\n" + _compact_trace(trace)
+            + "\n\nUsing ONLY these results, give the best possible FINAL answer now as clean "
+            "Markdown (use a table for tabular data). If a needed scan timed out, say so in one "
+            "line and provide what you can. Do NOT mention tools and do NOT request more tools.")},
+    ]
+    params = _build_completion_params(msgs, model, provider)
+    resp = await asyncio.to_thread(litellm.completion, **params)
+    return resp.choices[0].message.content or ""
+
+
 async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str,
                          user: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
     """Run the model<->tool loop OFF the event loop (litellm.completion is blocking) and
-    enforce a wall-clock budget so we always return before the 120s proxy read timeout."""
+    enforce a wall-clock budget so we always return before the 120s proxy read timeout.
+    Resilient: an LLM/context error never bubbles up as a hard 500 — we fall back to a
+    final synthesis from whatever tool results we already have."""
     trace: List[Dict[str, Any]] = []
     t0 = time.time()
+    # Capture the system prompt + the user's question for the safe-synthesis fallback.
+    system_content = next((m["content"] for m in messages
+                           if m.get("role") == "system" and isinstance(m.get("content"), str)),
+                          MASTER_SYSTEM_PROMPT)
+    question = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                question = c
+            elif isinstance(c, list):
+                question = next((p.get("text", "") for p in c
+                                 if isinstance(p, dict) and p.get("type") == "text"), "")
+            break
+
     for _ in range(MAX_TOOL_ITERATIONS):
         if time.time() - t0 > MB_DEADLINE_SECONDS:
             break  # out of time budget -> force a final synthesis below
         params = _build_completion_params(messages, model, provider, tools=ALL_TOOL_SCHEMAS)
-        resp = await asyncio.to_thread(litellm.completion, **params)
+        try:
+            resp = await asyncio.to_thread(litellm.completion, **params)
+        except Exception as e:  # noqa: BLE001 — LLM/context error: stop looping, synthesise
+            logger.warning(f"MB tool-loop completion failed ({type(e).__name__}: {e}); "
+                           f"falling back to synthesis from {len(trace)} tool result(s)")
+            break
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None) or []
         if tool_calls:
@@ -162,13 +217,28 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
                                  "content": json.dumps(result, default=str)[:18000]})
             continue
         return (msg.content or ""), trace
-    messages.append({"role": "system", "content": (
-        "Tool/time budget reached. Give the best possible FINAL answer NOW from the results above "
-        "as clean Markdown (tables for tabular data); if data is still missing, say so in one line. "
-        "Do NOT call any more tools.")})
-    params = _build_completion_params(messages, model, provider)
-    resp = await asyncio.to_thread(litellm.completion, **params)
-    return (resp.choices[0].message.content or ""), trace
+
+    # Budget reached OR an LLM error broke the loop -> compose a FINAL answer resiliently.
+    try:
+        messages.append({"role": "system", "content": (
+            "Tool/time budget reached. Give the best possible FINAL answer NOW from the results above "
+            "as clean Markdown (tables for tabular data); if data is still missing, say so in one line. "
+            "Do NOT call any more tools.")})
+        params = _build_completion_params(messages, model, provider)
+        resp = await asyncio.to_thread(litellm.completion, **params)
+        return (resp.choices[0].message.content or ""), trace
+    except Exception as e:  # noqa: BLE001 — replay failed (often context overflow): trim & retry
+        logger.warning(f"MB full-context synthesis failed ({type(e).__name__}: {e}); trying trimmed")
+        try:
+            return await _final_synthesis(system_content, question, trace, model, provider), trace
+        except Exception as e2:  # noqa: BLE001 — last resort: return the raw findings
+            logger.warning(f"MB trimmed synthesis also failed ({type(e2).__name__}: {e2})")
+            if trace:
+                return ("I gathered the data but couldn't fully compose the narrative this time. "
+                        "Here is what the scans returned:\n\n" + _compact_trace(trace)), trace
+            return ("I couldn't complete this request — the underlying data scan took too long on the "
+                    "full customer base. Please narrow it (e.g. a single store, tier, or date range) "
+                    "and try again."), trace
 
 
 async def require_query_viewer(user: dict = Depends(get_current_user)) -> dict:

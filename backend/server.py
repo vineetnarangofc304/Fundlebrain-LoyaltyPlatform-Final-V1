@@ -424,6 +424,9 @@ async def ensure_indexes():
         (customers_col, [("city", 1)], {"name": "ix_cust_city"}),
         (customers_col, [("created_at", -1)], {"name": "ix_cust_created"}),
         (customers_col, [("visit_count", -1)], {"name": "ix_cust_visit_count"}),
+        # points_balance — negative-balance / liability scans (Master Brain "customers with
+        # negative points" question COLLSCANs 9L+ customers and times out without this).
+        (customers_col, [("points_balance", 1)], {"name": "ix_cust_points_balance"}),
         # ingest_job_id — the customer post-pass (opening-balance ledger) finds all
         # rows loaded by a job; without this it COLLSCANs 1M+ customers each load.
         (customers_col, [("ingest_job_id", 1)], {"name": "ix_cust_ingest_job"}),
