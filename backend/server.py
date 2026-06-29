@@ -433,6 +433,11 @@ async def ensure_indexes():
         # points ledger — economics / expiry
         (points_ledger_col, [("customer_mobile", 1)], {"name": "ix_pl_mobile"}),
         (points_ledger_col, [("type", 1), ("expires_at", 1)], {"name": "ix_pl_type_expiry"}),
+        # (type, reference_type) — Master Brain double-redemption repair scan filters on
+        # type=redeem + reference_type=transaction; without this it COLLSCANs the full ledger.
+        (points_ledger_col, [("type", 1), ("reference_type", 1)], {"name": "ix_pl_type_reftype"}),
+        # reference_id — the repair's legit-sibling lookup joins ledger rows by bill number.
+        (points_ledger_col, [("reference_id", 1)], {"name": "ix_pl_reference_id"}),
         (points_ledger_col, [("created_at", -1)], {"name": "ix_pl_created"}),
         (points_ledger_col, [("source_bill_id", 1)], {"name": "ix_pl_bill"}),
         # opening-balance post-pass upserts keyed on (customer_mobile, reference_type);

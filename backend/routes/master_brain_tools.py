@@ -972,7 +972,7 @@ async def _scan_double_redemptions(mobile: Optional[str] = None, cap: int = INLI
         q["customer_mobile"] = {"$in": strs + ints}
     rows = await points_ledger_col.find(
         q, {"_id": 0, "id": 1, "points": 1, "note": 1, "customer_id": 1, "customer_mobile": 1}
-    ).limit(cap).to_list(cap)
+    ).limit(cap).max_time_ms(45000).to_list(cap)
     if not rows:
         return []
     bills: Dict[str, List[Dict[str, Any]]] = {}
@@ -987,7 +987,7 @@ async def _scan_double_redemptions(mobile: Optional[str] = None, cap: int = INLI
         async for lr in points_ledger_col.find(
                 {"type": "redeem", "reference_id": {"$in": batch},
                  "note": {"$in": _LEGIT_REDEEM_NOTES}},
-                {"_id": 0, "reference_id": 1}):
+                {"_id": 0, "reference_id": 1}).max_time_ms(30000):
             legit.add(lr.get("reference_id"))
     confirmed: List[Dict[str, Any]] = []
     for bn, rs in bills.items():

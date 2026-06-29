@@ -48,7 +48,12 @@ MASTER_ADDENDUM = """
 =====================================================================
 MASTER BRAIN — ACTION LAYER  (you are *Master Brain*, used ONLY by a Master Admin)
 =====================================================================
-EVERYTHING ABOVE STILL APPLIES. You are Fundle Brain with extra powers. You MUST answer ANY analytics / data / "where do I see…" / list / export question exactly like Fundle Brain — same READ tools (customer_search, run_aggregation, export_csv, get_data_dictionary, …), same decisiveness, same formatting. NEVER refuse or downgrade a read/analytics request, and never say "I can only do actions".
+EVERYTHING ABOVE STILL APPLIES. You are Fundle Brain with extra powers. You MUST answer ANY analytics / data / "where do I see…" / list / export question exactly like Fundle Brain — same READ tools (customer_search, run_aggregation, export_csv, get_data_dictionary, …), same decisiveness, same formatting. NEVER refuse or downgrade a read/analytics request, and never say "I can only do actions". You give REAL, COMPLETE answers with actual numbers — never "timed out", never "I couldn't", never a vague placeholder. If one query is heavy, use a tighter/indexed query (a `$match` + `$count`, a filtered `count_documents`, or a `$limit`ed sample) and still deliver the number.
+
+CRITICAL — READ vs WRITE separation (this is what keeps you fast and reliable):
+- When the user is ASKING A QUESTION / requesting analysis, a count, a list, a report, or "where do I see X" (e.g. "how many customers have a negative balance and why?"), answer it using ONLY the READ tools (run_aggregation, customer_search, get_data_dictionary, export_csv, …). Do NOT call ANY action/repair tool (fix_negative_balances, fix_double_redemptions, retier_customers, grant/adjust, send_campaign, …) — not even in "preview" — merely to answer a question. Using a repair tool to "check" data is WRONG and slow.
+- BUT when the user EXPLICITLY asks you to DO an action (e.g. "fix the double redemptions for 60000…", "re-tier the zero-spend customers", "grant 100 points to …", "send an SMS to Gold"), you MUST immediately CALL the matching action tool with confirm=false to PREVIEW it. The action tool gathers its OWN data — do NOT say "I don't have the scan result" or ask the user to generate data first; just call the tool. After it returns, show the preview table + count and ask for confirmation + a reason.
+- For analysis answers, recommend follow-up actions in PROSE plus the suggested-actions block (the user clicks Execute to run them under the preview→confirm→reason flow).
 
 ON TOP of reads, you have an ACTION layer that WRITES to the live database:
 - grant_bonus_points / adjust_points — award or add/deduct points for one customer
@@ -105,9 +110,37 @@ Rules for the suggested-actions block:
 
 MASTER_SYSTEM_PROMPT = SYSTEM_PROMPT + MASTER_ADDENDUM
 
+# LEAN prompt used for ANALYSIS/READ questions: identical to Fundle Brain (so reads are
+# exactly as fast & reliable), plus just the "Recommended actions / suggested-actions"
+# layer so the UI can still show one-click Execute buttons. NO heavy action protocol here.
+MASTER_READ_ADDENDUM = """
 
-async def _seeded_history(user: Dict[str, Any]) -> List[Dict[str, Any]]:
-    msgs: List[Dict[str, Any]] = [{"role": "system", "content": MASTER_SYSTEM_PROMPT}]
+=====================================================================
+You are MASTER BRAIN (the Master Admin tool). For THIS analysis/read question, answer EXACTLY
+like Fundle Brain — same read tools, same decisiveness, same formatting — and ALWAYS give a
+REAL, COMPLETE answer with the actual numbers. Be decisive: reach the answer in as few tool
+calls as possible (a single `$match`+`$count` or filtered `count_documents` is enough for a
+count). NEVER reply "timed out", "I couldn't", or a vague placeholder.
+
+After the answer, add a short prose "**Recommended actions**" list. For each recommendation you
+could carry out with an action tool (set_customer_tier, grant_bonus_points, adjust_points,
+fix_negative_balances, retier_customers, fix_double_redemptions, apply_to_uploaded_report,
+send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI
+shows an Execute button:
+
+```suggested-actions
+[{"label":"…","description":"…","tool":"…","args":{…}}]
+```
+Emit the block ONLY if there is a concrete, executable action; map each to one of the tools above
+with valid args. Do NOT call any action tool yourself here — the user clicks Execute to run it
+under the preview → confirm → reason flow.
+"""
+MASTER_READ_SYSTEM_PROMPT = SYSTEM_PROMPT + MASTER_READ_ADDENDUM
+
+
+async def _seeded_history(user: Dict[str, Any], read_only: bool = False) -> List[Dict[str, Any]]:
+    prompt = MASTER_READ_SYSTEM_PROMPT if read_only else MASTER_SYSTEM_PROMPT
+    msgs: List[Dict[str, Any]] = [{"role": "system", "content": prompt}]
     try:
         from routes.ai_data_expert import build_data_context
         ctx = await build_data_context()
@@ -129,6 +162,48 @@ async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, 
             return {"error": f"Tool {name} failed: {e}"}
     # Fall back to the shared Fundle Brain tool registry (reads + L1 writes).
     return await execute_tool(name, args, user=user)
+
+
+_MB_RETRY = 3
+
+
+async def _completion(params: Dict[str, Any]):
+    """Call the LLM off the event loop with a small retry for transient proxy/network
+    errors (rate-limit / timeout / 5xx / overloaded) so a blip never becomes a hard error."""
+    last = None
+    for attempt in range(1, _MB_RETRY + 1):
+        try:
+            return await asyncio.to_thread(litellm.completion, **params)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            blob = f"{type(e).__name__}: {e}".lower()
+            transient = any(k in blob for k in (
+                "timeout", "timed out", "rate", "429", "500", "502", "503", "504",
+                "overloaded", "connection", "temporarily", "unavailable", "apierror",
+                "internalserver", "service unavailable"))
+            if attempt < _MB_RETRY and transient:
+                logger.warning(f"MB completion transient error (attempt {attempt}/{_MB_RETRY}): {e}")
+                await asyncio.sleep(0.8 * attempt)
+                continue
+            raise
+    raise last  # pragma: no cover
+
+
+# Words that signal the user wants to CHANGE data (not just read/analyse). Action tools are
+# exposed ONLY when this matches (or the user clicked an Execute button) — so analysis/read
+# questions behave EXACTLY like Fundle Brain (read tools only) and never spiral into heavy
+# action-tool previews that stall on the full customer base.
+_ACTION_INTENT_RE = re.compile(
+    r"\b(fix|repair|correct|restore|grant|give|award|credit|deduct|debit|remove|adjust|"
+    r"set\s+tier|re-?tier|change\s+tier|move\s+to\s+tier|upgrade|downgrade|apply|"
+    r"send\s+(an?\s+)?(sms|campaign|message|blast)|launch\s+(a\s+)?campaign|broadcast|"
+    r"cancel\s+campaign|undo|revert|reverse|void|merge|de-?dupe|bonus|top\s*-?up|"
+    r"add\s+points|zero\s+out|write[\s-]*off|reset|wipe|enroll|enrol|opt[\s-]*out)\b",
+    re.IGNORECASE)
+
+
+def _has_action_intent(text: str) -> bool:
+    return bool(_ACTION_INTENT_RE.search(text or ""))
 
 
 def _compact_trace(trace: List[Dict[str, Any]]) -> str:
@@ -157,17 +232,20 @@ async def _final_synthesis(system_content: str, question: str, trace: List[Dict[
             "line and provide what you can. Do NOT mention tools and do NOT request more tools.")},
     ]
     params = _build_completion_params(msgs, model, provider)
-    resp = await asyncio.to_thread(litellm.completion, **params)
+    resp = await _completion(params)
     return resp.choices[0].message.content or ""
 
 
 async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str,
-                         user: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
+                         user: Dict[str, Any],
+                         tools: Optional[List[Dict[str, Any]]] = None) -> tuple[str, List[Dict[str, Any]]]:
     """Run the model<->tool loop OFF the event loop (litellm.completion is blocking) and
     enforce a wall-clock budget so we always return before the 120s proxy read timeout.
     Resilient: an LLM/context error never bubbles up as a hard 500 — we fall back to a
-    final synthesis from whatever tool results we already have."""
+    final synthesis from whatever tool results we already have. `tools` selects the schema
+    set (read-only for analysis questions, full read+action set for write intents)."""
     trace: List[Dict[str, Any]] = []
+    tool_schemas = tools if tools is not None else ALL_TOOL_SCHEMAS
     t0 = time.time()
     # Capture the system prompt + the user's question for the safe-synthesis fallback.
     system_content = next((m["content"] for m in messages
@@ -187,9 +265,9 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
     for _ in range(MAX_TOOL_ITERATIONS):
         if time.time() - t0 > MB_DEADLINE_SECONDS:
             break  # out of time budget -> force a final synthesis below
-        params = _build_completion_params(messages, model, provider, tools=ALL_TOOL_SCHEMAS)
+        params = _build_completion_params(messages, model, provider, tools=tool_schemas)
         try:
-            resp = await asyncio.to_thread(litellm.completion, **params)
+            resp = await _completion(params)
         except Exception as e:  # noqa: BLE001 — LLM/context error: stop looping, synthesise
             logger.warning(f"MB tool-loop completion failed ({type(e).__name__}: {e}); "
                            f"falling back to synthesis from {len(trace)} tool result(s)")
@@ -225,7 +303,7 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
             "as clean Markdown (tables for tabular data); if data is still missing, say so in one line. "
             "Do NOT call any more tools.")})
         params = _build_completion_params(messages, model, provider)
-        resp = await asyncio.to_thread(litellm.completion, **params)
+        resp = await _completion(params)
         return (resp.choices[0].message.content or ""), trace
     except Exception as e:  # noqa: BLE001 — replay failed (often context overflow): trim & retry
         logger.warning(f"MB full-context synthesis failed ({type(e).__name__}: {e}); trying trimmed")
@@ -443,7 +521,13 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     existing = await ai_chats_col.find_one(
         {"id": session_id, "user_id": user["id"], "surface": "master"}, {"_id": 0})
 
-    history: List[Dict[str, Any]] = await _seeded_history(user)
+    # Read vs write intent decides the prompt + tool set. Analysis/read questions use the
+    # LEAN Fundle-Brain prompt + read-only tools (so they're as fast & reliable as Fundle
+    # Brain); action tools + the full write protocol are exposed only on real action intent
+    # (or when the user clicked Execute on a recommendation).
+    wants_action = bool(req.force_action) or _has_action_intent(req.message or "")
+
+    history: List[Dict[str, Any]] = await _seeded_history(user, read_only=not wants_action)
     if existing:
         for m in (existing.get("messages") or [])[-12:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
@@ -489,8 +573,11 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     user["_mb_session"] = session_id
 
     provider, model = _resolve_model(req.model)
+    # `wants_action` (computed above) already chose the lean read prompt vs the full action
+    # prompt; use the matching tool set: read-only for analysis, full read+action for writes.
+    tool_set = ALL_TOOL_SCHEMAS if wants_action else TOOL_SCHEMAS
     try:
-        reply, trace = await _run_tool_loop(history, model, provider, user=user)
+        reply, trace = await _run_tool_loop(history, model, provider, user=user, tools=tool_set)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"AI error: {str(e)}")
 
