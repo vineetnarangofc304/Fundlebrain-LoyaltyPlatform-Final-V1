@@ -572,7 +572,7 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     # expose the session to action tools (server-side fallback for uploaded reports)
     user["_mb_session"] = session_id
 
-    provider, model = _resolve_model(req.model)
+    provider, model = _resolve_model(req.model, default=("anthropic", "claude-opus-4-7"))
     # `wants_action` (computed above) already chose the lean read prompt vs the full action
     # prompt; use the matching tool set: read-only for analysis, full read+action for writes.
     tool_set = ALL_TOOL_SCHEMAS if wants_action else TOOL_SCHEMAS

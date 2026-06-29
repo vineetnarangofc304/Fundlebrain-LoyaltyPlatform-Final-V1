@@ -136,17 +136,23 @@ def _build_completion_params(messages: List[Dict[str, Any]], model: str,
     return params
 
 
-def _resolve_model(req_model: Optional[str]) -> tuple[str, str]:
-    """Fundle Brain runs on a single locked engine (best agentic data analyst).
-    Optional overrides kept for API callers/tests."""
+def _resolve_model(req_model: Optional[str],
+                   default: tuple[str, str] = ("anthropic", "claude-sonnet-4-6")) -> tuple[str, str]:
+    """Resolve (provider, model). With NO explicit override, returns `default`
+    (Fundle Brain = Claude Sonnet 4.6 fast analytics; Master Brain passes Opus 4.7).
+    An explicit model string (API callers / tests) still overrides."""
     m = (req_model or "").lower()
+    if not m:
+        return default
     if "gpt" in m or "openai" in m:
         return "openai", "gpt-5.5"
     if "opus" in m:
-        return "anthropic", "claude-opus-4-8"
+        return "anthropic", "claude-opus-4-7"
+    if "sonnet" in m:
+        return "anthropic", "claude-sonnet-4-6"
     if "gemini" in m:
         return "gemini", "gemini-3.1-pro-preview"
-    return "anthropic", "claude-sonnet-4-6"
+    return default
 
 
 async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: str, user: Dict[str, Any] | None = None) -> tuple[str, List[Dict[str, Any]]]:
