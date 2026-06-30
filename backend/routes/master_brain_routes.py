@@ -280,17 +280,18 @@ _DUP_AUDIT_RE = re.compile(r"(duplicate|double)[\s-]*redempt", re.IGNORECASE)
 
 async def _deterministic_audit(question: str, user: Dict[str, Any]) -> tuple[Optional[str], List[Dict[str, Any]]]:
     """Answer the two recurring audit questions DIRECTLY from the DB (no LLM) so they ALWAYS
-    return an EXACT, clean answer — instant, free, and immune to LLM budget/timeout limits."""
+    return an EXACT, clean answer — instant, free, and immune to LLM budget/timeout limits.
+    Each tool call is itself hard-capped so it can never hang the request."""
     q = question or ""
     try:
         if _DUP_AUDIT_RE.search(q):
             from routes.master_brain_tools import _tool_audit_double_redemptions
-            r = await _tool_audit_double_redemptions(user=user)
+            r = await asyncio.wait_for(_tool_audit_double_redemptions(user=user), timeout=40)
             return _fmt_double_redemptions(r), [{"tool": "audit_double_redemptions", "args": {},
                                                  "result_preview": str(r)[:500]}]
         if _NEG_BAL_RE.search(q):
             from routes.master_brain_tools import _tool_audit_negative_balances
-            r = await _tool_audit_negative_balances(user=user)
+            r = await asyncio.wait_for(_tool_audit_negative_balances(user=user), timeout=40)
             return _fmt_negative_balances(r), [{"tool": "audit_negative_balances", "args": {},
                                                 "result_preview": str(r)[:500]}]
     except Exception as e:  # noqa: BLE001
