@@ -232,13 +232,70 @@ def _has_action_intent(text: str) -> bool:
 
 def _compact_trace(trace: List[Dict[str, Any]]) -> str:
     """A short, model-readable summary of the tool results gathered so far — used to
-    synthesise a final answer when the full message history can't be replayed (e.g. an
-    LLM error or context-window overflow after many heavy tool calls)."""
+    synthesise a final answer when the full message history can't be replayed."""
     parts = []
     for t in trace[-12:]:
         args = json.dumps(t.get("args", {}), default=str)[:200]
         parts.append(f"- {t.get('tool')}({args}) => {str(t.get('result_preview', ''))[:600]}")
     return "\n".join(parts) or "(no tool results were gathered)"
+
+
+def _fmt_negative_balances(r: Dict[str, Any]) -> str:
+    n = int(r.get("negative_balance_customers", 0) or 0)
+    cross = r.get("ledger_cross_check", "") or ""
+    if not n:
+        return ("### Customers with a negative points balance\n\n"
+                "**None.** No customer currently has a negative `points_balance` — the authoritative, "
+                "indexed source of truth shows **0** negative balances, so field balances are clean.\n\n"
+                f"_{cross}_")
+    lines = ["### Customers with a negative points balance\n",
+             f"- **{n} customers** currently have a negative `points_balance` (authoritative field), "
+             f"with a combined deficit of **{r.get('total_deficit_points', 0)} points**.",
+             f"- {cross}"]
+    worst = r.get("worst_customers") or []
+    if worst:
+        lines.append("\n**Worst-affected customers**\n")
+        lines.append("| Mobile | Name | Balance |\n|---|---|---:|")
+        for w in worst[:10]:
+            lines.append(f"| {w.get('mobile', '')} | {w.get('name') or '—'} | {w.get('points_balance', '')} |")
+    lines.append(f"\n**Exact reason / why this happens:** {r.get('reason_hint', '')}")
+    return "\n".join(lines)
+
+
+def _fmt_double_redemptions(r: Dict[str, Any]) -> str:
+    n = int(r.get("duplicate_rows_found", 0) or 0)
+    if not n:
+        return ("### Duplicate-redemption audit\n\n**0 affected.** No double-redemption deductions "
+                "were found across the entire customer base — the points ledger is clean on this check "
+                "(exact count over all history).")
+    return ("### Duplicate-redemption audit\n\n"
+            f"- **{n}** duplicate ledger rows across **{r.get('customers_affected', 0)}** customers (exact).\n"
+            f"- **{r.get('points_double_deducted', 0)} points** were wrongly double-deducted.\n\n"
+            "Ask me to *fix the double redemptions* to credit these back (preview → confirm).")
+
+
+_NEG_BAL_RE = re.compile(r"negative[\s-]+(?:loyalty[\s-]+)?(?:point|points|bal)", re.IGNORECASE)
+_DUP_AUDIT_RE = re.compile(r"(duplicate|double)[\s-]*redempt", re.IGNORECASE)
+
+
+async def _deterministic_audit(question: str, user: Dict[str, Any]) -> tuple[Optional[str], List[Dict[str, Any]]]:
+    """Answer the two recurring audit questions DIRECTLY from the DB (no LLM) so they ALWAYS
+    return an EXACT, clean answer — instant, free, and immune to LLM budget/timeout limits."""
+    q = question or ""
+    try:
+        if _DUP_AUDIT_RE.search(q):
+            from routes.master_brain_tools import _tool_audit_double_redemptions
+            r = await _tool_audit_double_redemptions(user=user)
+            return _fmt_double_redemptions(r), [{"tool": "audit_double_redemptions", "args": {},
+                                                 "result_preview": str(r)[:500]}]
+        if _NEG_BAL_RE.search(q):
+            from routes.master_brain_tools import _tool_audit_negative_balances
+            r = await _tool_audit_negative_balances(user=user)
+            return _fmt_negative_balances(r), [{"tool": "audit_negative_balances", "args": {},
+                                                "result_preview": str(r)[:500]}]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"MB deterministic audit failed: {e}")
+    return None, []
 
 
 async def _final_synthesis(system_content: str, question: str, trace: List[Dict[str, Any]],
@@ -308,7 +365,8 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
         try:
             resp = await _completion(params)
         except _BudgetExceeded:
-            return _BUDGET_MSG, trace
+            det, dtr = await _deterministic_audit(question, user)
+            return (det, dtr) if det else (_BUDGET_MSG, trace)
         except Exception as e:  # noqa: BLE001 — LLM/context error: stop looping, synthesise
             logger.warning(f"MB tool-loop completion failed ({type(e).__name__}: {e}); "
                            f"falling back to synthesis from {len(trace)} tool result(s)")
@@ -350,11 +408,13 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
     try:
         return await _final_synthesis(system_content, question, trace, am, ap), trace
     except _BudgetExceeded:
-        return _BUDGET_MSG, trace
-    except Exception as e:  # noqa: BLE001 — last resort: return the raw findings (no LLM)
+        det, dtr = await _deterministic_audit(question, user)
+        return (det, dtr) if det else (_BUDGET_MSG, trace)
+    except Exception as e:  # noqa: BLE001 — last resort: deterministic audit or a clean message
         logger.warning(f"MB final synthesis failed ({type(e).__name__}: {e})")
-        if trace:
-            return ("Here is what I found from the data so far:\n\n" + _compact_trace(trace)), trace
+        det, dtr = await _deterministic_audit(question, user)
+        if det:
+            return det, dtr
         return ("I couldn't complete this request just now. Please try again, or narrow it "
                 "(e.g. a single store, tier, or date range)."), trace
 
@@ -612,42 +672,45 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     # expose the session to action tools (server-side fallback for uploaded reports)
     user["_mb_session"] = session_id
 
-    # HYBRID engines (best LLM + no timeouts):
-    #  • READ/analysis → gather data with FAST Sonnet 4.6, compose the final deep answer with
-    #    Opus 4.7. Many tool rounds stay fast (no 502), the user-facing answer is Opus-grade.
-    #  • ACTION/write → run the whole preview→confirm flow on Opus 4.7 directly (few tool
-    #    calls, fast) so the execution semantics stay precise.
-    if wants_action:
-        provider, model = _resolve_model(req.model, default=("anthropic", "claude-opus-4-7"))
-        answer_provider, answer_model = None, None
-        tool_set = ALL_TOOL_SCHEMAS
-    else:
-        provider, model = _resolve_model(req.model, default=("anthropic", "claude-sonnet-4-6"))
-        answer_provider, answer_model = "anthropic", "claude-opus-4-7"
-        tool_set = READ_TOOL_SCHEMAS
-    try:
-        trace: List[Dict[str, Any]] = []
-        # HARD overall wall-clock guarantee: the K8s ingress 502s at ~60s, so we cap the whole
-        # run at 46s. If it's about to exceed that, we cancel and instantly compose a REAL answer
-        # from whatever data was already gathered (fast Sonnet) — the user NEVER sees a 502.
+    # Engine: Master Brain runs on Claude Sonnet 4.6 (same fast, highly-capable engine as
+    # Fundle Brain). Opus was burning the AI budget fast AND its latency caused 502 timeouts;
+    # Sonnet is ~5x cheaper, faster and reliable. (Override via req.model still works.)
+    provider, model = _resolve_model(req.model, default=("anthropic", "claude-sonnet-4-6"))
+    tool_set = ALL_TOOL_SCHEMAS if wants_action else READ_TOOL_SCHEMAS
+    trace: List[Dict[str, Any]] = []
+    reply: Optional[str] = None
+
+    # DETERMINISTIC FAST-PATH: the two recurring, expensive audit questions are answered
+    # straight from the DB (no LLM) — always exact, instant, free, and immune to budget/timeout.
+    if not wants_action:
+        det_reply, det_trace = await _deterministic_audit(req.message, user)
+        if det_reply:
+            reply, trace = det_reply, det_trace
+
+    if reply is None:
         try:
-            reply, trace = await asyncio.wait_for(
-                _run_tool_loop(history, model, provider, user=user, tools=tool_set,
-                               answer_model=answer_model, answer_provider=answer_provider,
-                               trace_out=trace),
-                timeout=46)
-        except asyncio.TimeoutError:
-            logger.warning(f"MB overall 46s cap hit; fast-synthesising from {len(trace)} tool result(s)")
+            # HARD overall wall-clock guarantee: the K8s ingress 502s at ~60s, so we cap the whole
+            # run at 46s. If exceeded, we cancel and compose a REAL answer from gathered data.
             try:
-                reply = await asyncio.wait_for(
-                    _final_synthesis("", req.message, trace, "claude-sonnet-4-6", "anthropic"),
-                    timeout=9)
-            except Exception:  # noqa: BLE001
-                reply = (("Here is what I found before the deep scan ran long:\n\n" + _compact_trace(trace))
-                         if trace else "That query is taking longer than expected on the full dataset.") + \
-                        "\n\n_Tip: narrow it to a single store, tier, or date range for a faster, fuller answer._"
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"AI error: {str(e)}")
+                reply, trace = await asyncio.wait_for(
+                    _run_tool_loop(history, model, provider, user=user, tools=tool_set,
+                                   trace_out=trace),
+                    timeout=46)
+            except asyncio.TimeoutError:
+                logger.warning(f"MB overall 46s cap hit; recovering from {len(trace)} tool result(s)")
+                det_reply, det_trace = await _deterministic_audit(req.message, user)
+                if det_reply:
+                    reply, trace = det_reply, (det_trace or trace)
+                else:
+                    try:
+                        reply = await asyncio.wait_for(
+                            _final_synthesis("", req.message, trace, "claude-sonnet-4-6", "anthropic"),
+                            timeout=9)
+                    except Exception:  # noqa: BLE001
+                        reply = ("That query is taking longer than expected on the full dataset. "
+                                 "Please narrow it to a single store, tier, or date range and try again.")
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, f"AI error: {str(e)}")
 
     reply, suggested_actions = _extract_suggested_actions(reply)
 
