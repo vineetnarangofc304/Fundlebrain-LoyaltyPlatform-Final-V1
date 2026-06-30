@@ -32,6 +32,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 83 (Jun 2026) — 🔴 Master Brain answers must be EXACT (no fallback / dummy / sample / capped numbers)
+User: "It should always give the right answer — no fallback or dummy or hard-coded or no answer based on sample data."
+- **Fix:** `audit_double_redemptions` rewritten to compute the **EXACT, uncapped** total via indexed aggregations (Pass-1 group every bug-signature row by bill using the `(type,reference_type)` index; Pass-2 batched `reference_id` lookups to confirm a legit sibling) — replaced the old 20,001-row capped scan + 10-row sample. `audit_negative_balances` ledger cross-check cap raised to 22s and labelled exact; authoritative `points_balance` count is always exact (indexed). Both tool outputs now expose `examples` (clearly illustrative only) instead of `sample`, and the read prompt + synthesis prompt forbid answering from samples, caps, estimates, or invented figures — only the exact totals the tools return.
+- **Verified (e2e preview + raw-DB cross-check):** bug-signature redeem rows = **0** → audit returns exactly 0 (19.9s); `customers.points_balance<0` = **0** and exact ledger-sum-negative = **157** → audit returns 0 authoritative + 157 cross-check (28.1s). Tool numbers match the raw DB exactly — no silent zeros, no sampling, no fallback path hit. ⚠️ Redeploy required for production.
+
+
 ### Iteration 82 (Jun 2026) — 🔴🔴 P0 ROOT-CAUSE FIX: Master Brain "Sorry, I encountered an error" on prod = **502 gateway timeout** (not budget)
 User (LIVE PROD): "Run a duplicate-redemption audit and how many are affected" → "Sorry, I encountered an error." Insisted it's NOT budget (showed 109.59 credits + auto-recharge ON).
 - **Root cause (proven by reproduction in preview):** the request returned a **502 at 60.1s** — the K8s ingress kills requests at ~60s. Opus 4.7 is slow (~7–15s/LLM call) and audit questions trigger several rounds PLUS a heavy whole-ledger aggregation, so total blew past 60s → empty 502 → frontend shows "Sorry, I encountered an error." (Two secondary bugs also found & fixed: the resilient final-synthesis crashed on Anthropic — "tool calling without tools=" — and a per-key proxy budget cap had been hit during heavy Opus testing; both now handled, the latter shows a clear top-up message.)

@@ -131,8 +131,10 @@ calls as possible (a single `$match`+`$count` or filtered `count_documents` is e
 count). For any DUPLICATE/DOUBLE-REDEMPTION audit ("how many are affected"), call the
 `audit_double_redemptions` tool ONCE; for any NEGATIVE-BALANCE question ("how many / which
 customers have negative balance and why"), call `audit_negative_balances` ONCE — never
-hand-write ledger aggregations for these. NEVER reply "timed out", "I couldn't", or a vague
-placeholder.
+hand-write ledger aggregations for these. These audit tools return EXACT, uncapped totals;
+report those exact numbers. NEVER answer from a `examples`/sample list, a capped/partial
+result, an estimate, or invented figures — always state the exact totals the tools return.
+NEVER reply "timed out", "I couldn't", or a vague placeholder.
 
 After the answer, add a short prose "**Recommended actions**" list. For each recommendation you
 could carry out with an action tool (set_customer_tier, grant_bonus_points, adjust_points,
@@ -249,8 +251,9 @@ async def _final_synthesis(system_content: str, question: str, trace: List[Dict[
         {"role": "system", "content": (
             "You are Master Brain, an elite retail-loyalty & CRM data analyst for KAZO. Compose a "
             "decisive, executive-grade FINAL answer in clean Markdown (use tables for tabular data, "
-            "bold the key numbers). Use ONLY the data provided below — never invent figures. If a "
-            "scan timed out, say so in one line and give what you can. Do NOT mention tools.")},
+            "bold the key numbers). Use ONLY the exact figures in the data below — never invent, "
+            "estimate, round-guess, or extrapolate from an 'examples'/sample list. Report the exact "
+            "total counts the tools returned. Do NOT mention tools.")},
         {"role": "user", "content": (
             (question or "Answer the user's question.")
             + "\n\nData gathered (tool outputs):\n" + _compact_trace(trace)

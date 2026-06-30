@@ -1025,12 +1025,13 @@ async def _tool_audit_negative_balances(user=None) -> Dict[str, Any]:
         lc = await points_ledger_col.aggregate(
             [{"$group": {"_id": "$customer_mobile", "bal": {"$sum": "$points"}}},
              {"$match": {"bal": {"$lt": 0}}}, {"$count": "n"}],
-            maxTimeMS=12000, allowDiskUse=True).to_list(1)
+            maxTimeMS=22000, allowDiskUse=True).to_list(1)
         ledger_neg = lc[0]["n"] if lc else 0
-        ledger_note = (f"{ledger_neg} customers have a NEGATIVE ledger-sum (independent cross-check "
-                       "of summing every points_ledger row).")
+        ledger_note = (f"{ledger_neg} customers have a NEGATIVE ledger-sum (exact, independent "
+                       "cross-check that sums every points_ledger row per customer).")
     except Exception:  # noqa: BLE001
-        ledger_note = "Ledger-sum cross-check skipped (ledger too large to compute live within the time cap)."
+        ledger_note = ("Ledger-sum cross-check could not finish within the time cap; the "
+                       "authoritative customers.points_balance count above is exact.")
     return {
         "audit": "negative_balances",
         "negative_balance_customers": field_count,
@@ -1048,35 +1049,69 @@ async def _tool_audit_negative_balances(user=None) -> Dict[str, Any]:
 
 
 async def _tool_audit_double_redemptions(mobile: Optional[str] = None, user=None) -> Dict[str, Any]:
-    """FAST, READ-ONLY duplicate-redemption audit. Reuses the confirmed-duplicate scan but
-    only REPORTS (never mutates), so the assistant can answer 'how many are affected?' in one
-    bounded call instead of writing slow ad-hoc ledger aggregations."""
+    """EXACT, READ-ONLY duplicate-redemption audit (no caps, no sampling). Computes the true
+    total of confirmed double-redemption ledger rows, affected customers and double-deducted
+    points across the WHOLE dataset via indexed aggregations, so the assistant can answer
+    'how many are affected?' precisely. `examples` are illustrative only — never the basis of
+    the counts."""
     err = _require_master(user)
     if err:
         return err
-    confirmed = await _scan_double_redemptions(mobile)
-    rows = confirmed[:INLINE_CAP]
-    total_points = sum(abs(int(r.get("points") or 0)) for r in rows)
-    cust_keys = {(r.get("customer_id") or r.get("customer_mobile")) for r in rows}
-    sample = [{"mobile": r.get("customer_mobile"), "bill": r.get("_bill"),
-               "points_double_deducted": abs(int(r.get("points") or 0))} for r in rows[:10]]
+    match = dict(_DUP_REDEEM_Q)
+    if mobile:
+        strs, ints = _mobile_candidates(mobile)
+        match["customer_mobile"] = {"$in": strs + ints}
+    # Pass 1 — group EVERY bug-signature row by its bill number (exact, uses the
+    # (type, reference_type) index for the $match; allowDiskUse for large groups).
+    groups = await points_ledger_col.aggregate(
+        [{"$match": match},
+         {"$addFields": {"_bill": {"$trim": {"input": {"$substrCP": ["$note", 5, 64]}}}}},
+         {"$group": {"_id": "$_bill",
+                     "bug_rows": {"$sum": 1},
+                     "points": {"$sum": {"$abs": "$points"}},
+                     "mobiles": {"$addToSet": "$customer_mobile"}}}],
+        allowDiskUse=True, maxTimeMS=25000).to_list(None)
+    bills = [g["_id"] for g in groups if g["_id"]]
+    # Pass 2 — of those bills, which ALSO have a legitimate POS redeem row (the proof the
+    # bill was already counted once, making the bug row a true DOUBLE). Exact, indexed on
+    # reference_id, batched.
+    legit: set = set()
+    for i in range(0, len(bills), 2000):
+        batch = bills[i:i + 2000]
+        async for lr in points_ledger_col.find(
+                {"type": "redeem", "reference_id": {"$in": batch},
+                 "note": {"$in": _LEGIT_REDEEM_NOTES}},
+                {"_id": 0, "reference_id": 1}).max_time_ms(25000):
+            legit.add(lr.get("reference_id"))
+    dup_rows = 0
+    dup_points = 0
+    custs: set = set()
+    examples: List[Dict[str, Any]] = []
+    for g in groups:
+        if g["_id"] in legit:
+            dup_rows += int(g["bug_rows"])
+            dup_points += int(g["points"])
+            custs.update(m for m in (g.get("mobiles") or []) if m)
+            if len(examples) < 10:
+                examples.append({"bill": g["_id"], "rows": int(g["bug_rows"]),
+                                 "points_double_deducted": int(g["points"])})
     return {
         "audit": "double_redemptions",
         "scope": "single_customer" if mobile else "all_customers",
-        "duplicate_rows_found": len(rows),
-        "customers_affected": len(cust_keys),
-        "points_double_deducted": total_points,
-        "over_cap": len(confirmed) > INLINE_CAP,
-        "sample": sample,
+        "exact": True,
+        "duplicate_rows_found": dup_rows,
+        "customers_affected": len(custs),
+        "points_double_deducted": dup_points,
+        "examples": examples,
         "definition": ("A duplicate/double redemption = a points_ledger row with the POS bug "
                        "signature (type=redeem, reference_type=transaction, note='Bill <no>') for a "
                        "bill that ALSO has a legitimate POS OTP/non-OTP redeem row — i.e. the same "
                        "bill's points were deducted twice."),
         "message": ("No double-redemption deductions found"
-                    + (f" for {mobile}." if mobile else " across the customer base.")
-                    if not rows else
-                    f"{len(rows)} double-redemption ledger rows across {len(cust_keys)} customers; "
-                    f"{total_points} points were wrongly double-deducted. "
+                    + (f" for {mobile}." if mobile else " across the entire customer base.")
+                    if not dup_rows else
+                    f"EXACTLY {dup_rows} double-redemption ledger rows across {len(custs)} customers; "
+                    f"{dup_points} points were wrongly double-deducted. "
                     "Use the fix_double_redemptions action to credit them back."),
     }
 
