@@ -241,6 +241,12 @@ def _compact_trace(trace: List[Dict[str, Any]]) -> str:
 
 
 def _fmt_negative_balances(r: Dict[str, Any]) -> str:
+    if r.get("computed") is False:
+        msg = r.get("message") or ("Couldn't compute the negative-balance count right now — "
+                                   "please retry in a few seconds.")
+        cross = r.get("ledger_cross_check") or ""
+        return ("### Customers with a negative points balance\n\n" + msg
+                + (f"\n\n_{cross}_" if cross else ""))
     n = int(r.get("negative_balance_customers", 0) or 0)
     cross = r.get("ledger_cross_check", "") or ""
     if not n:
@@ -263,6 +269,10 @@ def _fmt_negative_balances(r: Dict[str, Any]) -> str:
 
 
 def _fmt_double_redemptions(r: Dict[str, Any]) -> str:
+    if r.get("computed") is False or r.get("exact") is False:
+        return ("### Duplicate-redemption audit\n\n"
+                + (r.get("message") or "Couldn't complete an exact scan right now — please retry, "
+                   "or scope it to a single customer's mobile for an instant exact answer."))
     n = int(r.get("duplicate_rows_found", 0) or 0)
     if not n:
         return ("### Duplicate-redemption audit\n\n**0 affected.** No double-redemption deductions "

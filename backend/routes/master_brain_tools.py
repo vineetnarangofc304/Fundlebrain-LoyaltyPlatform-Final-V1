@@ -14,6 +14,8 @@ Points changes always write a `points_ledger` row (never silent) so they are
 traceable and reversible. Audit entries use action `master_brain.*`.
 """
 import uuid
+import logging
+import time as _time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,8 @@ from database import (
 # to the dedicated batched re-tier tool on the Loyalty Rules page.
 INLINE_CAP = 20000
 BATCH = 1000
+
+logger = logging.getLogger("kazo-fundle.master-brain-tools")
 
 
 def _now_iso() -> str:
@@ -998,52 +1002,87 @@ async def _scan_double_redemptions(mobile: Optional[str] = None, cap: int = INLI
     return confirmed
 
 
+# Module-level TTL cache for the heavy ledger-sum cross-check (a SECONDARY, informational
+# metric). Caching it stops a burst of repeated "negative balance?" questions from each kicking
+# off a fresh full-ledger $group on production — the exact load spiral that made the audit time
+# out and fall back to the slow LLM loop.
+_NEG_LEDGER_CACHE: Dict[str, Any] = {"note": None, "ts": 0.0}
+_NEG_LEDGER_TTL = 300.0
+
+
+async def _neg_ledger_crosscheck() -> str:
+    """Return the (cached) ledger-sum negative-balance cross-check note. Tightly capped and
+    cached for 5 min so it can never block or pile up under repeated questions."""
+    now = _time.time()
+    cached = _NEG_LEDGER_CACHE.get("note")
+    if cached and (now - _NEG_LEDGER_CACHE.get("ts", 0.0)) < _NEG_LEDGER_TTL:
+        return cached
+    try:
+        lc = await points_ledger_col.aggregate(
+            [{"$group": {"_id": "$customer_mobile", "bal": {"$sum": "$points"}}},
+             {"$match": {"bal": {"$lt": 0}}}, {"$count": "n"}],
+            maxTimeMS=8000, allowDiskUse=True).to_list(1)
+        n = lc[0]["n"] if lc else 0
+        note = (f"{n} customers have a NEGATIVE ledger-sum (independent cross-check that sums "
+                "every points_ledger row per customer).")
+    except Exception:  # noqa: BLE001
+        note = ("Ledger-sum cross-check not run this time (too large to compute live within the "
+                "cap); the authoritative customers.points_balance count above is exact.")
+    _NEG_LEDGER_CACHE["note"] = note
+    _NEG_LEDGER_CACHE["ts"] = now
+    return note
+
+
 async def _tool_audit_negative_balances(user=None) -> Dict[str, Any]:
-    """FAST, READ-ONLY negative-balance audit. The AUTHORITATIVE count comes from the indexed
-    `customers.points_balance` field (instant). A ledger-sum cross-check is attempted
-    best-effort with a tight time cap and skipped gracefully if the ledger is too large —
-    so the assistant always returns real numbers fast instead of grouping the whole ledger."""
+    """EXACT, READ-ONLY negative-balance audit. The authoritative count/total/worst come from
+    the indexed `customers.points_balance` field in ONE bounded `$facet` aggregation (instant
+    even at 1M+ rows). A best-effort ledger-sum cross-check is cached + tightly capped so it can
+    NEVER stall the answer (a burst of repeated questions won't each kick off a fresh full-ledger
+    $group — the load spiral that caused the production timeouts). If the authoritative compute
+    can't finish within the cap we say so HONESTLY — we never return a fake zero."""
     err = _require_master(user)
     if err:
         return err
     field_count = 0
     field_sum = 0
     worst: List[Dict[str, Any]] = []
+    computed = False
     try:
-        field_count = await customers_col.count_documents({"points_balance": {"$lt": 0}}, maxTimeMS=15000)
-    except Exception:  # noqa: BLE001
-        field_count = -1
-    if field_count and field_count > 0:
-        try:
-            agg = await customers_col.aggregate(
-                [{"$match": {"points_balance": {"$lt": 0}}},
-                 {"$group": {"_id": None, "total": {"$sum": "$points_balance"}}}],
-                maxTimeMS=12000).to_list(1)
-            field_sum = int(agg[0]["total"]) if agg else 0
-        except Exception:  # noqa: BLE001
-            field_sum = 0
-        try:
-            worst = await customers_col.find(
-                {"points_balance": {"$lt": 0}},
-                {"_id": 0, "mobile": 1, "points_balance": 1, "name": 1}
-            ).sort("points_balance", 1).limit(10).max_time_ms(8000).to_list(10)
-        except Exception:  # noqa: BLE001
-            worst = []
-    # Best-effort ledger-sum cross-check (different from the authoritative field; may be skipped).
-    ledger_note = None
-    try:
-        lc = await points_ledger_col.aggregate(
-            [{"$group": {"_id": "$customer_mobile", "bal": {"$sum": "$points"}}},
-             {"$match": {"bal": {"$lt": 0}}}, {"$count": "n"}],
-            maxTimeMS=12000, allowDiskUse=True).to_list(1)
-        ledger_neg = lc[0]["n"] if lc else 0
-        ledger_note = (f"{ledger_neg} customers have a NEGATIVE ledger-sum (independent cross-check "
-                       "that sums every points_ledger row per customer).")
-    except Exception:  # noqa: BLE001
-        ledger_note = ("Ledger-sum cross-check skipped (too large to compute live within the cap); "
-                       "the authoritative customers.points_balance count above is exact.")
+        facet = await customers_col.aggregate(
+            [{"$match": {"points_balance": {"$lt": 0}}},
+             {"$facet": {
+                 "stats": [{"$group": {"_id": None, "n": {"$sum": 1},
+                                       "total": {"$sum": "$points_balance"}}}],
+                 "worst": [{"$sort": {"points_balance": 1}}, {"$limit": 10},
+                           {"$project": {"_id": 0, "mobile": 1, "name": 1, "points_balance": 1}}],
+             }}],
+            maxTimeMS=15000, allowDiskUse=True).to_list(1)
+        f = facet[0] if facet else {}
+        stats = f.get("stats") or []
+        field_count = int(stats[0].get("n") or 0) if stats else 0
+        field_sum = int(stats[0].get("total") or 0) if stats else 0
+        worst = f.get("worst") or []
+        computed = True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit_negative_balances authoritative compute failed: {e}")
+        computed = False
+
+    # Best-effort, CACHED, tightly-capped ledger-sum cross-check (secondary metric only).
+    ledger_note = await _neg_ledger_crosscheck()
+
+    if not computed:
+        return {
+            "audit": "negative_balances",
+            "computed": False,
+            "ledger_cross_check": ledger_note,
+            "message": ("The negative-balance count couldn't be computed within the time limit on "
+                        "this dataset right now (the database is likely under heavy load). Please "
+                        "retry in a few seconds — the count comes straight from the indexed "
+                        "customers.points_balance field and is normally instant."),
+        }
     return {
         "audit": "negative_balances",
+        "computed": True,
         "negative_balance_customers": field_count,
         "total_deficit_points": field_sum,
         "worst_customers": worst,
@@ -1072,8 +1111,10 @@ async def _tool_audit_double_redemptions(mobile: Optional[str] = None, user=None
         strs, ints = _mobile_candidates(mobile)
         match["customer_mobile"] = {"$in": strs + ints}
     # Pass 1 — group EVERY bug-signature row by its bill number (exact, uses the
-    # (type, reference_type) index for the $match; allowDiskUse for large groups). Wrapped so a
-    # time-cap never raises — we return the exact figures computed, never a hard error.
+    # (type, reference_type) index for the $match; allowDiskUse for large groups). If the
+    # aggregation can't finish within the cap we record that it did NOT complete so we never
+    # report a misleading "0 affected / exact" — we tell the user honestly instead.
+    p1_ok = True
     try:
         groups = await points_ledger_col.aggregate(
             [{"$match": match},
@@ -1083,23 +1124,42 @@ async def _tool_audit_double_redemptions(mobile: Optional[str] = None, user=None
                          "points": {"$sum": {"$abs": "$points"}},
                          "mobiles": {"$addToSet": "$customer_mobile"}}}],
             allowDiskUse=True, maxTimeMS=20000).to_list(None)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit_double_redemptions pass-1 did not complete: {e}")
         groups = []
+        p1_ok = False
     bills = [g["_id"] for g in groups if g["_id"]]
     # Pass 2 — of those bills, which ALSO have a legitimate POS redeem row (the proof the
     # bill was already counted once, making the bug row a true DOUBLE). Exact, indexed on
-    # reference_id, batched.
+    # reference_id, batched. Bounded by a wall-clock budget so it can never run long.
     legit: set = set()
+    p2_ok = True
+    _t2 = _time.time()
     try:
         for i in range(0, len(bills), 2000):
+            if _time.time() - _t2 > 15:
+                p2_ok = False
+                break
             batch = bills[i:i + 2000]
             async for lr in points_ledger_col.find(
                     {"type": "redeem", "reference_id": {"$in": batch},
                      "note": {"$in": _LEGIT_REDEEM_NOTES}},
-                    {"_id": 0, "reference_id": 1}).max_time_ms(20000):
+                    {"_id": 0, "reference_id": 1}).max_time_ms(8000):
                 legit.add(lr.get("reference_id"))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit_double_redemptions pass-2 did not complete: {e}")
+        p2_ok = False
+    if not p1_ok or not p2_ok:
+        return {
+            "audit": "double_redemptions",
+            "scope": "single_customer" if mobile else "all_customers",
+            "exact": False,
+            "computed": False,
+            "message": ("The duplicate-redemption audit couldn't complete an EXACT scan within the "
+                        "time limit on this dataset right now (the database is likely under heavy "
+                        "load). Please retry in a few seconds, or pass a single customer's mobile "
+                        "for an instant exact answer."),
+        }
     dup_rows = 0
     dup_points = 0
     custs: set = set()
