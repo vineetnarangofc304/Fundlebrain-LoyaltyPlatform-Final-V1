@@ -5,6 +5,35 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-25 — Fix: CSV Recon "still not done" — large-file OOM stall (iter 75, 5/5 PASS)
+
+⚠️ Redeploy required for production (this fix lives in preview until Save to GitHub → Deploy).
+- **Symptom (production):** Recon of large billing CSVs never finished. Prod jobs
+  `Billing_Report_New.csv` (114 chunks ≈ 171 MB) and `SKU-wise_Billing_Rep.csv`
+  (179 chunks ≈ 268 MB) both auto-failed with *"Stalled — no progress for over 8 min
+  (likely a server restart mid-run)"*, frozen at `processed=150000`. Prod DB is only
+  ~759k transactions, so the DB compare was NOT the bottleneck — the file size was.
+- **Root cause:** `_run_recon_job` still used the OLD in-memory stitch — accumulated every
+  uploaded chunk into a `List[bytes]`, joined them into one bytes blob, then decoded to a
+  full string (peak ≈ 2–4× file size). On a 170–270 MB file this OOM-restarted the pod;
+  the job row stayed "running" with no heartbeat and the 8-min stale watchdog failed it.
+  (The historic *ingest* path was already fixed to stream to disk; recon was not.)
+- **Fix (`/app/backend/routes/recon_routes.py`):**
+  1. Stream uploaded chunks straight to a temp file on disk (O(chunk) memory); parse the
+     CSV line-by-line from disk. `_parse_transactions/customers/items_csv` now take a
+     `csv_path` and `open()` it instead of `io.StringIO(text)`. xlsx still stitched in
+     memory (small in practice).
+  2. Wrap the whole background body in `with pymongo.timeout(RECON_DB_DEADLINE_SECONDS=1800)`
+     so the detached task isn't killed by the aggressive prod client `timeoutMS` (~10s) on
+     the deep-scan / final `$group`.
+- **Verified:** 244 MB wide CSV (150k rows) → done in 15.5s, **peak RSS 153 MB** (was ~730MB+).
+  Testing agent 5/5 PASS: 90 MB / 64-chunk upload → `status=done` in 21.6s, no stall, correct counts.
+- **Known follow-up (P2):** very large **.xlsx** recon still buffers in memory (same OOM path).
+  CSV — the actual failing format — is fixed.
+
+---
+
+
 ## 2026-06-23 — Fix: "CSV export failed" on customer drill-down (iter 32, 3/3 PASS)
 
 ⚠️ Redeploy required for production.
