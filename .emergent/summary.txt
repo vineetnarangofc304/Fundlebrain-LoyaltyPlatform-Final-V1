@@ -1,117 +1,150 @@
-<analysis>**original_problem_statement**: Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign automation, customer intelligence, support, reporting and API-monitoring platform for KAZO, powered by Fundle. PRODUCT REQUIREMENTS: Single-tenant (zero fake data except seeded users). Recent addition: Build exact replica APIs of their previous POS vendor (eWards) so KAZO can switch the base URL without changing their ERP system. Include a Live Bill Monitor cockpit and ensure robust, multi-megabyte historical data CSV ingestion.
+<analysis>**original_problem_statement**: Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign automation, customer intelligence, support, reporting, and API-monitoring platform for KAZO. PRODUCT REQUIREMENTS: Single-tenant. Enforce strict canonical loyalty data rules. Handle POS configurations. 
 
 **User's preferred language**: English (INSTRUCT next agent to respond in English only)
 
 **what currently exists?** 
-A production-grade MVP is live. Features include modular analytical dashboards, AI Conversation Engine, Communications module (Karix API), a resilient background scheduler for multi-megabyte CSV data ingestion (using MongoDB chunking to bypass pod limits), an exact replica of 14 eWards POS API endpoints, a Live Bill Monitor cockpit for real-time transaction tracking (highlighting anonymous walk-ins as Lost Opportunities), and upgraded API payload monitoring. Critical POS OTP/redemption security vulnerabilities have been patched. 
+A fully functional Kazo CRM/Loyalty platform. Master Brain architecture utilizes Claude Sonnet 4.6 and includes deterministic fast-paths (bypassing the LLM entirely) for heavy DB audit aggregations. In this session, the agent successfully optimized these deterministic paths using bounded  queries and cached ledger cross-checks so they no longer timeout on production-scale data. The CSV Data Recon hang issue is also fully resolved in the preview environment.
 
-**Last working item**: 
-    - Last item agent was working: Fixing a critical POS security vulnerability where users could bypass OTP verification and tamper with redemption amounts (e.g., requesting OTP for 10 points but redeeming 100 points). Also seeded the correct 10-digit test customer number (9266681235) as requested by the user.
-    - Status: USER VERIFICATION PENDING (Completed in preview environment, user must redeploy to see on production)
+**Last working item**:
+    - Last item agent was working: Educating the user on the difference between the Preview environment and Production deployment. The user was testing the Recon CSV upload on their live production app and reported it as still not done. The agent verified that the Recon and Master Brain fixes are 100% functional in preview and instructed the user to push/deploy the code to production to see the changes.
+    - Status: USER VERIFICATION PENDING
     - Agent Testing Done: Y
-    - Which testing method agent to use? manual testing by bash/curl
-    - User Testing Done: N
+    - Which testing method agent to use? backend (python -c / bash profiling)
+    - User Testing Done: N (User was erroneously testing on the production server instead of preview)
 
-**All Pending/In progress Issue list**: 
-  None. (All reported bugs regarding large CSV uploads, POS payload tampering, and missing test points were successfully resolved and tested).
+**All Pending/In progress Issue list**:
+  Issue 1: Live Bills earning points on Tax-Inclusive amount & silent fallback rules [P0]
+     - Attempted fixes: None. Paused waiting for user clarification.
+     - Next debug checklist: Modify  so  if the user confirms logic requires tax exclusion.
+     - Why fix this issue and what will be achieved with the fix? Prevents double-counting tax and over-awarding loyalty points.
+     - Status: BLOCKED (Awaiting user clarification)
+     - Is recurring issue? Y
+     - Should Test frontend/backend/both after fix? backend
+     - Blocked on other issue: User clarification.
 
-**In progress Task List**: 
-  None. 
+  Issue 2: Distinct Items count mismatch [P2]
+     - Attempted fixes: None.
+     - Next debug checklist: Investigate why count shows 18k but actual data is 22k+. Check chunking/deduplication in .
+     - Why fix this issue and what will be achieved with the fix? Ensures accurate data reporting.
+     - Status: NOT STARTED
+     - Is recurring issue? N
+     - Should Test frontend/backend/both after fix? backend
+     - Blocked on other issue: None
+
+  Issue 3: Karix SMS Intermittent Delivery Failures () [P1]
+     - Attempted fixes: None (Requires Emergent Support).
+     - Next debug checklist: INFRASTRUCTURE issue. Coordinate with Emergent Support for static IP/CIDR.
+     - Why fix this issue and what will be achieved with the fix? Stabilize SMS delivery.
+     - Status: BLOCKED
+     - Is recurring issue? Y
+     - Should Test frontend/backend/both after fix? backend
+     - Blocked on other issue: Platform Support.
+
+**In progress Task List**:
+  None. The in-progress Master Brain timeout issue was completed and successfully tested in the preview environment.
 
 **Upcoming and Future Tasks**
     Upcoming Tasks:
-    - P1: Refactor POS API File: The newly created  exceeds 1400 lines. The testing agent recommended splitting this into 4-5 smaller modules to adhere to maintainability guidelines.
+    - P1: Complete Phase 2/3 of Gap Analysis (Location-wise DLT SMS Config, OTP Audit search by OTP string, Reward Brands, and Reward GVs).
+    - P2: Add ⚡ Quick Wins / Data Health panel on the Master Brain home that proactively runs daily data-health scans.
     
     Future Tasks:
-    - P2: Post-Ingest Auto-Report: Add a Fundle Brain hook to auto-generate a narrative email summarising what changed in the database after a successful historical data upload.
-    - P2: Drag-and-drop report builder, support bot, mobile app (Noted in PRD).
+    - P2: Build In-app scheduled backups to object storage.
+    - P2: Drag-and-drop report builder.
+    - P2: Refactor Backend Routes: Split  and .
+    - P2: Add Re-upload to heal flow in Recon page to backfill missing rows for previously discarded CSV files.
 
 **Completed work in this session**
-- Built 14 eWards-compatible POS APIs at  mapping to platform logic (DONE)
-- Created Live Monitor cockpit and POS Credentials admin pages (DONE)
-- Upgraded API Monitor to show clickable request/response payloads in a modal (DONE)
-- Refactored CSV ingestion to use chunked frontend uploads, MongoDB shared storage (to support multi-pod production), and an  background job for resilience (DONE)
-- Fixed ingestion mapping to process anonymous walk-ins as  (Lost Opportunities) rather than failing the upload (DONE)
-- Patched critical POS API security bug (enforced OTP presence, amount matching, and bill matching) (DONE)
-- Generated a Postman Collection for POS APIs (DONE)
+- Fixed P0 Master Brain production timeout by optimizing  to use a bounded  query and cached ledger cross-checks, resolving the 40s budget timeouts. (DONE)
+- Modified  to have a strict wall-clock bound and return honest not exact messages upon timeout. (DONE)
+- Clarified Preview vs Production deployment workflow for the user (explaining why fixes weren't showing up on their live app yet). (DONE)
 
 **Earlier issues found/mentioned but not fixed**
-   None. All user-reported issues were thoroughly debugged and fixed.
+   Issue 1: Karix SMS Intermittent Delivery Failures ()
+   - Debug checklist: INFRASTRUCTURE issue. Needs Emergent Support static IP/CIDR.
+   - Why to solve this issue and what will be achieved with this? Reliable OTP/SMS delivery.
+   - Should Test frontend/backend/both after fix: backend
+   - Is recurring issue? Y
 
 **Known issue recurrence from previous fork**
-  - Issue recurrence in previous fork: The large CSV upload failed across 3 different iterations due to varying production environment constraints (Ingress limits, multi-pod  isolation,  worker timeouts, and mapping logic dropping empty mobiles).
-  - Recurrence count: 3 (within this session)
-  - Status: RESOLVED (Do NOT modify the current  background ingestion or MongoDB chunking logic for uploads, as it is perfectly tuned for the user's production constraints).
+  - Issue recurrence in previous fork: Agent repeatedly ignores the POS math bug when user interrupts with new features.
+  - Recurrence count: 5
+  - Status: BLOCKED (User clarification needed)
+  - Issue recurrence in previous fork: User testing on the live production URL instead of preview, leading to confusion when fixes aren't visible.
+  - Recurrence count: 2
+  - Status: USER VERIFICATION PENDING
 
 **Code Architecture**
 
 
 **Key Technical Concepts**
-- Frontend: React, TailwindCSS, Recharts, shadcn/ui. 
-- Backend: FastAPI, Async Motor MongoDB driver,  for CRON tasks and resilient background data ingestion.
-- POS Integration: eWards API schema replication (unauthenticated but requires , ,  headers).
+- Backend: FastAPI, Async Motor MongoDB.
+- Master Brain deterministic router: Bypasses Claude for heavy queries to prevent 60s Gateway Timeouts. Now uses heavily optimized, bounded  queries with caching.
+- LLM usage: Claude Sonnet 4.6 via LiteLLM Emergent Universal Key. *DO NOT switch to Opus 4.7*.
 
 **key DB schema**
-  - : 
-  -  (NEW): Temporary collection for storing CSV chunks to bypass Kubernetes ingress and multi-pod restrictions.
-  - : Tracks background ingestion progress with a  and  state updated via heartbeat.
+  - : Tracks generated OTPs.
+  - : Source of truth for balances.
+  - : Uses  index for fast deterministic facet scanning.
 
 **changes in tech stack**
-  - Heavy utilization of  for background tasks to prevent worker-timeout deaths during massive CSV parsing.
+  - None
 
 **All files of reference** 
-  -  (New: Houses the 14 replica eWards endpoints)
-  -  (New: Feeds the Live Monitor Cockpit)
-  -  (Updated extensively for resilient chunked/scheduled uploads)
-  -  (New: Cockpit view)
-  -  (New: Admin view for Postman keys)
-  -  (Updated to handle 15-second interval ingest polling)
-  -  (Updated with new 10-digit test customer)
+  -  (Formatter changes)
+  -  (Fixed query timeouts)
+  -  (Index creation logic verified here)
 
 **Areas that need refactoring**: 
-  - : Contains over 1400 lines of code. Needs to be split into logical sub-modules (e.g., point redemption, bill settlement, customer lookup).
+  -  and  are massive and need splitting.
 
 **key api endpoints**
--  (Unauthenticated ERP system endpoints, secured by specific headers)
--  and  (Upload flow)
--  (Cockpit endpoints)
-
-**Critical Info for New Agent** 
-- **ENVIRONMENT DUALITY**: The user deploys the app to a custom production domain (). You only have access to the PREVIEW environment. If the user reports an issue, ALWAYS clarify if it is happening on preview or production. Fixes made in preview require the user to redeploy to see them in production.
-- **ANONYMOUS WALK-INS**: Transactions with no mobile number are considered Lost Opportunities. Do NOT drop them during ingestion; they must be saved with  so they appear highlighted in red on the Live Monitor.
-- **SECURITY INTEGRITY**: The  must strictly validate that the OTP is present, the bill number matches, and the requested points exactly match the points authorized by the generated OTP.
-
-**documents and test reports created in this job** 
   - 
-  - 
+
+**Critical Info for New Agent**
+- **Production vs Preview:** The user tests heavily on their live Production URL. You must remind them that fixes made in the agent workspace ONLY exist in Preview until they explicitly Save to GitHub and Deploy.
+- **60-Second Gateway Limit:** Any API request taking >60s will return a 502 Gateway Timeout. Ensure all queries have  or .
+- **LLM Selection:** Keep Master Brain on **Claude Sonnet 4.6**. 
+- **Exactness:** The user strictly forbids estimated, sampled, capped, or fallback data in Master Brain. Return honest Could not compute within time limit errors if deterministic tools fail, rather than fake 0 values.
+
+**documents and test reports created in this job**
   - 
   - 
 
 **Last 10 User Messages and any pending HUMAN messages** 
- 1. User: upload still not working.. it took 2000 records and aborted... (Agent refactored to  background job).
- 2. User: Shared screenshot showing upload aborted at 199,897 rows out of 199,999. Shared CSV file. (Agent identified trailing rows lacked mobile numbers and were crashing the mapper; fixed to ingest as Lost Opportunities).
- 3. User: cant see points on this number 9266681235. (Agent seeded the 10-digit number and verified it).
- 4. User: Uploaded 4 screenshots showing a critical POS security vulnerability (OTP bypass and point tampering).
- 5. Agent: Identified the bug, applied stringent verification logic, tested attack vectors via bash, and finished the task.
- - *Pending User Message*: None. Await user verification of the security patch and new POS flow.
+ 1. User: Demanded Fundle/Master brains be put on the best LLM possible for deep analytics. (Done/Reverted to Sonnet 4.6 earlier)
+ 2. User: Stated It shld always give right answer.. no fall back or dummy or hard coded. (Done)
+ 3. User: Brain not working..giving strange responses. (Done)
+ 4. User: Does.not.work (Showing production UI taking too long). (Done)
+ 5. User: Please use ask_human tool and confirm your plan now. (Done)
+ 6. User: Not working (Provided image showing timeout loop). (Done - optimized queries)
+ 7. User: Recon still.not.done Shld.we.scrap this and restart...are the files now on prod server? (Answered - explained that preview works, production needs deploy).
+ *Pending Human Message*: None. Waiting for the user to confirm they understand the deployment gap, deploy to production, and verify.
 
 **Project Health Check:**
-- Broken: None
-- Mocked: None (Zero fake data rule actively enforced; only test users/POS customers seeded)
+- Broken: POS  tax logic.
+- Mocked: None.
 
 **3rd Party Integrations** 
-- OpenAI GPT-5.2 (AI Narratives) — uses Emergent LLM Key.
-- Karix SMS/WhatsApp/RCS — requires User API Key.
+- Karix SMS/WhatsApp/RCS — requires User API Key 
+- Universal LLM Key (Claude Sonnet 4.6) — uses Emergent LLM Key
 
 **Testing status**
-  - Testing agent used after significant changes: YES (iteration 10)
-  - Troubleshoot agent used after agent stuck in loop: NO
+  - Testing agent used after significant changes: NO (relied on backend python tests/profiling)
+  - Troubleshoot agent used after agent stuck in loop: NO (Support Agent was used for deployment logic)
   - Test files created: None
   - Known regressions: None
 
 **Credentials to test flow:**
-Refer to . 
-New test customer seeded for POS testing: Mobile  (5000 points, Gold tier).
+  - URL: 
+  - Email:  (Master Admin)
+  - Password: 
 
 **What agent forgot to execute**
-Everything requested was thoroughly executed, including rigorous local testing of edge-case security exploits.</analysis>
+- POS tax logic  (Awaiting user confirmation, but heavily delayed).
+
+**Debugging checklist for current issue**
+    Issue: Live Bills earning points on Tax-Inclusive amount
+    Backend files to check:
+    - 
+    Action: Await user approval. If approved, modify the bill parsing logic so that loyalty points are calculated strictly on  instead of the raw total. Test endpoint via CURL/python script.</analysis>

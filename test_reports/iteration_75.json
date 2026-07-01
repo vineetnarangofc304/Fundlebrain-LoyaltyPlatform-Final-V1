@@ -1,0 +1,27 @@
+{
+  "summary": "Iteration 75 — verified the recon OOM/stall fix (streaming uploaded chunks to a temp file on disk + wrapping the background body in pymongo.timeout(1800)). Backend pytest 5/5 PASS end-to-end against the preview URL as Master Admin. CRITICAL LARGE-file regression is FIXED: a synthetic wide-padded transactions CSV of 90.5 MB (60,000 data rows, 30 padding columns × 50 chars each) was uploaded as 64 × 1.5MB chunks via /api/recon/init → /api/recon/chunk (×64) → /api/recon/finalize, and the job reached status='done' in ~21.6s wall-clock (upload 15.0s + processing 6.5s) — NO 'Stalled' error, NO 'failed', report.csv.rows == 60000, matched + missing_in_db == unique_bills, and GET /api/recon/jobs lists the job. Small (50-row / 1-chunk) transactions recon completes in 3.3s with the same internal-count invariant. GET /api/recon/jobs/{id}/mismatches.csv returns 200 with content-type text/csv and a proper header row 'type,key,csv_value,db_value,detail'. Unauthed POST /api/recon/init is rejected 401/403. Deep_scan was left FALSE per the review request (real DB has ~1.5M transactions in preview).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration75_recon_stream_test.py",
+    "/app/test_reports/pytest/iteration75.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "The streaming fix in _run_recon_job is correct: for .csv it opens the tmp file in 'wb' and streams historic_chunks_col cursor bytes straight to disk, so memory stays O(chunk) instead of O(file). For .xlsx it still buffers `parts: List[bytes]` and _stitch_and_decode's returned string — acceptable because xlsx recon size is small in practice, but the same OOM path exists for very large xlsx (170MB+). If future users upload huge xlsx billing files, replicate the streaming path for xlsx too (openpyxl can be pointed at a NamedTemporaryFile).",
+    "pymongo.timeout(RECON_DB_DEADLINE_SECONDS=1800) wraps the entire background body including the deep_scan full-collection cursor and the final $group aggregate — correctly overrides the aggressive prod client timeoutMS (~10s) that was killing MaxTimeMSExpired on multi-million-doc scans.",
+    "tempfile.mkstemp uses os.fdopen(fd, ...) so the fd from mkstemp is properly closed via context manager; finally block unlinks it. No fd leak observed in the 64-chunk run.",
+    "For the wide-padded 90MB CSV the parse+DB compare finished in ~6.5s and status stayed responsive; asyncio.to_thread(_parse_transactions_csv, csv_path) plus per-batch asyncio.sleep(0) in the compare loop keeps the event loop free.",
+    "Consider surfacing tmp_path size in the heartbeat/phase so users watching a very large upload see 'stitched 210MB → parsing'; today the UI shows 'parsing' without a byte count."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration75_recon_stream_test.py (new)"
+  ],
+  "success_rate": {"backend": "100% (5/5)", "frontend": "n/a (skipped per review request)"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (login returns {token, user}); Authorization: Bearer <token>",
+  "seed_data_creation": "Created 3 test recon jobs (job_id prefix 'IT75BILL'/'IT75WIDE'/'TESTBILL' in bill_number keys); recon_routes.finally block already deletes historic_chunks for the job, and the report is retained. No transactions were inserted into the DB — recon is read-only against transactions_col. TESTBILL/IT75WIDE bills will show as 'missing_in_db' in each job's report (expected and irrelevant per the review note).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite: pytest /app/backend/tests/iteration75_recon_stream_test.py -v -s (~30s). The LARGE test (TestLargeReconNoStall) builds a 90MB wide-padded CSV → 64 chunks → asserts status='done'. If future recon changes touch _run_recon_job / _parse_transactions_csv / the tempfile-stream path, re-run this iteration. Master Admin creds are role=crm_manager+is_master_admin (accepted by recon RBAC — {super_admin, brand_admin, crm_manager}).",
+  "rca of the issue": "Root cause was that _run_recon_job previously (a) accumulated every uploaded chunk into an in-memory `List[bytes]`, (b) called _stitch_and_decode which joined them into a single bytes blob AND decoded that to a str, giving a peak memory footprint of ~2-4× the file size, and (c) the whole background body ran without a pymongo.timeout override so the aggressive prod client timeoutMS killed the deep-scan / final aggregate. For a 170-270MB billing CSV the pod OOM-restarted mid-run; the job row stayed 'running' with no heartbeat and the stale-recon watchdog auto-failed it after 8 min with 'Stalled — likely a server restart mid-run'. The fix (verified here) streams the uploaded chunks straight to a NamedTemporaryFile on disk (memory stays O(1_500_000) per chunk) and wraps the recon body in `with pymongo.timeout(1800)`. Verified against a 90.5MB / 64-chunk CSV: status='done' in 21.6s wall clock, no OOM, no stall."
+}

@@ -20,10 +20,13 @@ import asyncio
 import csv
 import io
 import logging
+import os
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import pymongo
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -48,6 +51,11 @@ MISMATCH_DETAIL_CAP = 5000  # rows persisted for CSV download (per job)
 SAMPLE_CAP = 200            # rows embedded in the JSON report
 STALE_RECON_MINUTES = 8     # a "running" job with no heartbeat for this long is auto-failed
 HEARTBEAT_EVERY_BATCHES = 5  # write progress/heartbeat every N batches during DB compare
+# The recon body runs as a detached background task — OUTSIDE the router's db_deadline
+# dependency — so it would otherwise inherit the aggressive production client `timeoutMS`
+# (~10s) and MaxTimeMSExpired on the deep-scan / final aggregate. Give the whole run a
+# generous ceiling (no ingress limit applies to a background task).
+RECON_DB_DEADLINE_SECONDS = 1800  # 30 min hard ceiling for the entire recon run
 
 
 class ReconInitIn(BaseModel):
@@ -225,35 +233,56 @@ async def _fail(job_id: str, reason: str):
 
 
 async def _run_recon_job(job_id: str):
+    tmp_path = None
     try:
         job = await recon_jobs_col.find_one({"id": job_id}, {"_id": 0})
         if not job:
             return
         dataset = job["dataset"]
         deep_scan = bool(job.get("deep_scan"))
+        filename = job.get("filename", "recon.csv") or "recon.csv"
         await _heartbeat(job_id, phase="stitching")
-        # stitch chunks
-        parts: List[bytes] = []
-        async for c in historic_chunks_col.find(
-                {"job_id": job_id}, {"_id": 0, "data": 1}).sort("chunk_index", 1):
-            parts.append(c["data"])
-        if not parts:
-            return await _fail(job_id, "No uploaded chunks found")
-        try:
-            text = await asyncio.to_thread(_stitch_and_decode, parts, job.get("filename", "recon.csv"))
-        except Exception as e:
-            return await _fail(job_id, f"Could not decode file: {e}")
-        parts = None  # free memory
 
-        if await _is_cancelled(job_id):
-            return
+        # Give the whole background run a generous DB deadline that OVERRIDES the
+        # aggressive production client `timeoutMS` (the router's db_deadline dependency
+        # does not apply to this detached task).
+        with pymongo.timeout(RECON_DB_DEADLINE_SECONDS):
+            # Stage uploaded chunks to a temp file on disk (O(chunk) memory). We do NOT
+            # join the whole file into one in-memory bytes blob + decoded string — that
+            # spiked memory to 2-4x the file size and OOM-restarted the pod on large
+            # billing files, silently stalling the job (watchdog then marks it "server
+            # restart"). Mirrors the historic ingest chunk-staging.
+            is_xlsx = filename.lower().endswith(".xlsx")
+            cursor = historic_chunks_col.find(
+                {"job_id": job_id}, {"_id": 0, "chunk_index": 1, "data": 1}).sort("chunk_index", 1)
+            fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"recon_{job_id}_")
+            wrote_any = False
+            if is_xlsx:
+                parts: List[bytes] = []
+                async for c in cursor:
+                    parts.append(c["data"]); wrote_any = True
+                text = await asyncio.to_thread(_stitch_and_decode, parts, filename)
+                parts = []
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(text)
+                del text
+            else:
+                # Stream raw CSV bytes straight to disk — never holds the full file.
+                with os.fdopen(fd, "wb") as f:
+                    async for c in cursor:
+                        f.write(c["data"]); wrote_any = True
+            if not wrote_any:
+                return await _fail(job_id, "No uploaded chunks found")
 
-        if dataset == "transactions":
-            report = await _recon_transactions(job_id, text, deep_scan)
-        elif dataset == "customers":
-            report = await _recon_customers(job_id, text, deep_scan)
-        else:
-            report = await _recon_items(job_id, text, deep_scan)
+            if await _is_cancelled(job_id):
+                return
+
+            if dataset == "transactions":
+                report = await _recon_transactions(job_id, tmp_path, deep_scan)
+            elif dataset == "customers":
+                report = await _recon_customers(job_id, tmp_path, deep_scan)
+            else:
+                report = await _recon_items(job_id, tmp_path, deep_scan)
 
         await recon_jobs_col.update_one(
             {"id": job_id},
@@ -267,6 +296,11 @@ async def _run_recon_job(job_id: str):
         await _fail(job_id, str(e)[:500])
     finally:
         await historic_chunks_col.delete_many({"job_id": job_id})
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 async def _record_mismatches(job_id: str, rows: List[Dict[str, Any]]):
@@ -298,9 +332,11 @@ class _Cancelled(Exception):
     pass
 
 
-def _parse_transactions_csv(text: str):
-    """Pure-CPU parse (runs in a worker thread so it never blocks the loop)."""
-    reader = csv.DictReader(io.StringIO(text))
+def _parse_transactions_csv(csv_path: str):
+    """Pure-CPU parse streamed from disk (runs in a worker thread; never holds the whole
+    file in memory — mirrors the historic ingest to avoid OOM on large billing files)."""
+    fh = open(csv_path, "r", encoding="utf-8-sig", errors="replace", newline="")
+    reader = csv.DictReader(fh)
     store_cache: Dict[str, Dict[str, Any]] = {}
     csv_map: Dict[str, Dict[str, Any]] = {}      # bill_number -> {net, mobile}
     total_rows = parse_failed = dup_keys = 0
@@ -319,13 +355,14 @@ def _parse_transactions_csv(text: str):
             csv_map[key]["net"] += net   # CSV may carry one row per line item
         else:
             csv_map[key] = {"net": net, "mobile": doc.get("customer_mobile")}
+    fh.close()
     return csv_map, total_rows, parse_failed, dup_keys, csv_net_sum
 
 
-async def _recon_transactions(job_id: str, text: str, deep_scan: bool = False) -> Dict[str, Any]:
+async def _recon_transactions(job_id: str, csv_path: str, deep_scan: bool = False) -> Dict[str, Any]:
     await _heartbeat(job_id, phase="parsing")
     csv_map, total_rows, parse_failed, dup_keys, csv_net_sum = await asyncio.to_thread(
-        _parse_transactions_csv, text)
+        _parse_transactions_csv, csv_path)
     await _progress(job_id, total_rows, phase="comparing")
     if await _is_cancelled(job_id):
         raise _Cancelled()
@@ -428,8 +465,9 @@ async def _recon_transactions(job_id: str, text: str, deep_scan: bool = False) -
     }
 
 
-def _parse_customers_csv(text: str):
-    reader = csv.DictReader(io.StringIO(text))
+def _parse_customers_csv(csv_path: str):
+    fh = open(csv_path, "r", encoding="utf-8-sig", errors="replace", newline="")
+    reader = csv.DictReader(fh)
     csv_map: Dict[str, Dict[str, Any]] = {}
     total_rows = parse_failed = dup_keys = 0
     for r in reader:
@@ -443,6 +481,7 @@ def _parse_customers_csv(text: str):
             dup_keys += 1
         csv_map[mob] = {"lifetime_spend": float(doc.get("lifetime_spend") or 0),
                         "points_balance": int(doc.get("points_balance") or 0)}
+    fh.close()
     return csv_map, total_rows, parse_failed, dup_keys
 
 
@@ -537,8 +576,9 @@ async def _recon_customers(job_id: str, text: str, deep_scan: bool = False) -> D
     }
 
 
-def _parse_items_csv(text: str):
-    reader = csv.DictReader(io.StringIO(text))
+def _parse_items_csv(csv_path: str):
+    fh = open(csv_path, "r", encoding="utf-8-sig", errors="replace", newline="")
+    reader = csv.DictReader(fh)
     csv_keys: set = set()
     total_rows = parse_failed = dup_keys = 0
     for r in reader:
@@ -554,14 +594,15 @@ def _parse_items_csv(text: str):
         if key in csv_keys:
             dup_keys += 1
         csv_keys.add(key)
+    fh.close()
     return csv_keys, total_rows, parse_failed, dup_keys
 
 
-async def _recon_items(job_id: str, text: str, deep_scan: bool = False) -> Dict[str, Any]:
+async def _recon_items(job_id: str, csv_path: str, deep_scan: bool = False) -> Dict[str, Any]:
     items_col = db["items"]
     await _heartbeat(job_id, phase="parsing")
     csv_keys, total_rows, parse_failed, dup_keys = await asyncio.to_thread(
-        _parse_items_csv, text)
+        _parse_items_csv, csv_path)
     await _progress(job_id, total_rows, phase="comparing")
     if await _is_cancelled(job_id):
         raise _Cancelled()
