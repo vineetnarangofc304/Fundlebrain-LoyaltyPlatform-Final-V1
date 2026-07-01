@@ -6,6 +6,9 @@ import { SectionHeading, KPICard } from "../_shared";
 
 const fmtNum = (v) => (v == null ? "—" : Number(v).toLocaleString("en-IN"));
 const CHUNK_BYTES = 1_500_000;
+const CHUNK_MAX_RETRIES = 5;          // retry each chunk on transient network / 5xx errors
+const CHUNK_TIMEOUT_MS = 120_000;     // per-chunk hard timeout so a half-open socket can't hang forever
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const DATASET_OPTIONS = [
   { value: "transactions", label: "Transactions (Billing Report)" },
@@ -100,6 +103,7 @@ export default function CsvReconSection() {
   const [jobs, setJobs] = useState([]);
   const [activeJob, setActiveJob] = useState(null);
   const [cancelling, setCancelling] = useState({});
+  const [uploadNote, setUploadNote] = useState("");
   const fileRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -145,33 +149,82 @@ export default function CsvReconSection() {
     }
   };
 
+  // Upload one chunk with retry + backoff. A single transient network blip (or a
+  // Cloudflare 5xx) must NOT abort the whole multi-hundred-MB upload — that was why
+  // large billing files stalled at only a few of N chunks on flaky connections.
+  const uploadChunk = async (jobId, i, file, totalChunks) => {
+    const blob = file.slice(i * CHUNK_BYTES, Math.min((i + 1) * CHUNK_BYTES, file.size));
+    let lastErr;
+    for (let attempt = 1; attempt <= CHUNK_MAX_RETRIES; attempt++) {
+      try {
+        const fd = new FormData();
+        fd.append("job_id", jobId);
+        fd.append("chunk_index", String(i));
+        fd.append("chunk", blob, `${file.name}.part${i}`);
+        await api.post("/recon/chunk", fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+          timeout: CHUNK_TIMEOUT_MS,
+        });
+        setUploadNote("");
+        return;
+      } catch (e) {
+        lastErr = e;
+        const st = e?.response?.status;
+        // Genuine client errors (bad request / auth / too large) won't fix themselves.
+        if (st && st >= 400 && st < 500 && st !== 408 && st !== 429) throw e;
+        if (attempt < CHUNK_MAX_RETRIES) {
+          setUploadNote(`Network hiccup on chunk ${i + 1}/${totalChunks} — retrying (${attempt}/${CHUNK_MAX_RETRIES - 1})…`);
+          await sleep(Math.min(1000 * 2 ** (attempt - 1), 8000));
+        }
+      }
+    }
+    throw lastErr;
+  };
+
   const upload = async (file) => {
     if (!file) return;
     setUploading(true);
     setProgress(0);
+    setUploadNote("");
+    let uploaded = 0;
+    let totalChunks = 0;
     try {
-      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_BYTES));
+      totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_BYTES));
       const init = await api.post("/recon/init", {
         dataset, filename: file.name, total_chunks: totalChunks, total_bytes: file.size,
         deep_scan: deepScan,
       });
       const jobId = init.data.id;
       for (let i = 0; i < totalChunks; i++) {
-        const blob = file.slice(i * CHUNK_BYTES, Math.min((i + 1) * CHUNK_BYTES, file.size));
-        const fd = new FormData();
-        fd.append("job_id", jobId);
-        fd.append("chunk_index", String(i));
-        fd.append("chunk", blob, `${file.name}.part${i}`);
-        await api.post("/recon/chunk", fd, { headers: { "Content-Type": "multipart/form-data" } });
-        setProgress(Math.round(((i + 1) / totalChunks) * 100));
+        await uploadChunk(jobId, i, file, totalChunks);
+        uploaded = i + 1;
+        setProgress(Math.round((uploaded / totalChunks) * 100));
       }
-      await api.post("/recon/finalize", { job_id: jobId });
+      // Finalize can transiently 5xx too — retry a few times.
+      let finalized = false;
+      for (let attempt = 1; attempt <= 3 && !finalized; attempt++) {
+        try {
+          await api.post("/recon/finalize", { job_id: jobId }, { timeout: CHUNK_TIMEOUT_MS });
+          finalized = true;
+        } catch (e) {
+          if (attempt === 3) throw e;
+          await sleep(1500 * attempt);
+        }
+      }
+      setUploadNote("");
       toast.info("Reconciliation running — comparing CSV against the database…");
       setActiveJob({ id: jobId, status: "running", dataset });
       startPolling(jobId);
       loadJobs();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Recon upload failed");
+      const detail = e.response?.data?.detail;
+      const where = totalChunks ? ` (uploaded ${uploaded}/${totalChunks} chunks before it stopped)` : "";
+      setUploadNote("");
+      toast.error(
+        detail
+          ? `Recon upload failed: ${detail}`
+          : `Recon upload failed${where}. This is usually a network drop on a large file — please click "Upload CSV & Reconcile" again to retry.`
+      );
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -204,6 +257,15 @@ export default function CsvReconSection() {
           Deep DB-side scan (also find rows in DB not in the CSV — slower)
         </label>
       </div>
+
+      {uploading && (
+        <div className="mt-3 flex items-center gap-2 text-xs text-amber-700" data-testid="recon-upload-note">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+          <span>
+            {uploadNote || `Uploading… ${progress}% — large files are sent in 1.5 MB chunks and auto-retry on network drops. Keep this tab open.`}
+          </span>
+        </div>
+      )}
 
       {activeJob?.status === "running" && (
         <div className="mt-4 flex items-center gap-3 text-sm text-indigo-700" data-testid="recon-running">
