@@ -5,6 +5,28 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-25 (b) — Fix: Recon "failing when we try to upload file" — fragile chunk upload (iter 76, 3/3 PASS)
+
+⚠️ Redeploy required for production (frontend change).
+- **Symptom (production):** New attempts to recon a large `billing kazo.csv` (114 chunks ≈ 171MB)
+  got stuck in status `uploading` at only **2–10 / 114 chunks** and never finished. Backend chunk
+  endpoint is healthy (verified 25/25 chunks OK from a datacenter) — the problem was purely client-side.
+- **Root cause:** `CsvReconSection.jsx` uploaded chunks sequentially with **NO retry** and **NO
+  per-request timeout**. A single transient network blip / Cloudflare 5xx on any chunk over the
+  user's real-world uplink threw, broke the for-loop, and abandoned the whole upload — leaving the
+  job stuck `uploading` (then watchdog-failed after 8 min).
+- **Fix (`frontend/src/pages/admin/recon/CsvReconSection.jsx`):** each chunk now goes through
+  `uploadChunk()` with **5-attempt exponential backoff** (1→2→4→8s), a **120s per-chunk timeout**,
+  and short-circuits genuine 4xx (400/401/403/413). `finalize` also retries ×3. A new inline note
+  (`data-testid="recon-upload-note"`) shows retry progress; on total failure a friendly
+  "Upload interrupted — likely a network drop, click Upload again" toast appears instead of a silent stall.
+- **Verified (testing agent 3/3):** normal 6.29MB/5-chunk upload → done; a simulated abort of chunk 2
+  auto-recovered (retry note shown, job reached done); total failure showed the toast + reset the button
+  with no hang.
+
+---
+
+
 ## 2026-06-25 — Fix: CSV Recon "still not done" — large-file OOM stall (iter 75, 5/5 PASS)
 
 ⚠️ Redeploy required for production (this fix lives in preview until Save to GitHub → Deploy).

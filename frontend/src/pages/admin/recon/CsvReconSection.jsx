@@ -218,12 +218,12 @@ export default function CsvReconSection() {
       loadJobs();
     } catch (e) {
       const detail = e.response?.data?.detail;
-      const where = totalChunks ? ` (uploaded ${uploaded}/${totalChunks} chunks before it stopped)` : "";
+      const where = totalChunks ? ` (${uploaded}/${totalChunks} chunks sent)` : "";
       setUploadNote("");
       toast.error(
         detail
           ? `Recon upload failed: ${detail}`
-          : `Recon upload failed${where}. This is usually a network drop on a large file — please click "Upload CSV & Reconcile" again to retry.`
+          : `Upload interrupted${where} — likely a network drop. Click Upload again to retry.`
       );
     } finally {
       setUploading(false);
