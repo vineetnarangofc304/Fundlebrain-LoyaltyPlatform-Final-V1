@@ -1,0 +1,43 @@
+{
+  "summary": "Master Brain Fix B (routing/tool exposure) verified end-to-end. 10/10 backend tests pass against the external preview URL. Natural-language action commands ('Change customer X to platinum tier', 'Add 30 bonus points to customer X') are now correctly understood — the model shows a PREVIEW with tools_used including set_customer_tier / grant_bonus_points, then bare confirmations ('Go ahead. Reason:...' / 'yes confirm, reason:...') APPLY the action with an audit ID on a single follow-up turn. NO 'I don't have that tool' / 'capability gap' hallucinations were observed on any turn. Read analytics still returns real data (KPI ~31s, tier ~26s, no 'Data Unavailable/timed out'). Deterministic negative-balance read audit stays instant (~2.8s). Reads do not accidentally invoke write tools.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/master-brain/chat", "issue": "On the confirm turn of a tier change, tools_used is sometimes returned WITH set_customer_tier and sometimes empty (when the model correctly detects the previous turn already applied it). The action is applied correctly either way and an audit UUID is echoed. This is not a bug but if you want deterministic tools_used metadata on every confirm turn, consider always echoing the last executed tool for that session_id."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration78_master_brain_routing_fix_test.py",
+    "/app/test_reports/pytest/iteration78.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Fix B works as designed: chat() now unconditionally exposes ALL_TOOL_SCHEMAS with the write-capable prompt while is_action_command only gates the deterministic read-audit fast-path. Natural-language tier + points commands consistently returned a PREVIEW with the correct write tool name in tools_used (set_customer_tier, grant_bonus_points).",
+    "Bare confirmations ('Go ahead. Reason: ...', 'yes confirm, reason: ...') applied cleanly in the SAME session_id on a single turn — no explicit 'confirm=true' phrasing required. Audit UUIDs (e.g. ed18038d-3953-4d1c-b554-7a8a618633e2, 19c82b26-079b-41b3-b583-da21cc16366a) are echoed.",
+    "Deterministic read-audit fast-path preserved: 'List all customers with a negative points balance' finished in 2.8s and correctly reported 0 field balances (with the 157 ledger-sum cross-check).",
+    "Fix-negative action (an ACTION command, not read fast-path) correctly reports 0 negatives — proving the write-capable path is honest and not fabricating counts.",
+    "Read query 'top 5 customers by points balance' used top_customers_report only — no write tools, no audit id in reply — good separation."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration78_master_brain_routing_fix_test.py"
+  ],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026",
+  "seed_data_creation": "Customer 6000013876 (Karan Singh): tier moved Gold -> Platinum (audit ed18038d-3953-4d1c-b554-7a8a618633e2), balance 75 -> 105 (audit 19c82b26-079b-41b3-b583-da21cc16366a). Both reversible via Master Brain Action Log Undo. This matches the expected reset note in the review request.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Fix B verified. Test file at /app/backend/tests/iteration78_master_brain_routing_fix_test.py covers 10 flows: login, KPI, tier distribution, negative-balance read audit, natural-language tier PREVIEW + bare-confirm APPLY, natural-language points PREVIEW + bare-confirm APPLY, fix-negative honest zero, top-5 read no-mutation. Wall-clock per call: KPI 31.4s, tier 26.2s, neg-audit 2.8s, tier-preview 13.2s, tier-confirm 5.8s, points-preview 12.5s, points-confirm 10.1s, fix-neg 7.9s, top-5 12.3s. NOTE: after this run customer 6000013876 is now tier=Platinum with 105 points. If you re-run the tier preview test the model will respond 'already on Platinum' — reset via Action Log Undo before re-running action tests, or adjust the target tier in the test.",
+  "wall_clock_times": {
+    "kpi_query": "31.4s",
+    "tier_distribution": "26.2s",
+    "negative_balance_read_audit_deterministic": "2.8s",
+    "tier_command_preview": "13.2s",
+    "tier_command_confirm_applies": "5.8s (retry ~10s)",
+    "points_command_preview": "12.5s",
+    "points_command_bare_confirm_applies": "10.1s",
+    "fix_negative_action_honest_zero": "7.9s",
+    "read_top_customers_no_mutation": "12.3s"
+  },
+  "rca_of_the_issue": "N/A — Fix B is confirmed working. Root cause of the original 'I don't have that tool' hallucination (Master Brain was previously being handed a READ-ONLY tool schema + read-only prompt for anything the router classified as a plain question, so natural-language action verbs like 'change to platinum' or bare 'yes/go ahead' confirmations had no matching tool) is fully addressed by (a) unconditionally exposing ALL_TOOL_SCHEMAS in chat(), (b) using the write-capable seeded_history, and (c) gating only the deterministic read-audit fast-path behind is_action_command via _has_action_intent / _looks_like_confirmation / _session_has_pending_action helpers. Every write remains safe via the mandatory preview -> confirm(+reason) audited path."
+}

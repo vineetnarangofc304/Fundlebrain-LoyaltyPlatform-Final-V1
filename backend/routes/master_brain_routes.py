@@ -88,7 +88,7 @@ WRITE/ACTION protocol — non-negotiable (this is what makes you safe):
 1. NEVER mutate on the first turn — call the action tool with confirm=false to PREVIEW (returns exactly what changes + the affected count + a sample).
 2. Present the preview as a Markdown table + the count, then ASK "Shall I go ahead and apply this?". Do not proceed on your own.
 3. A REASON is MANDATORY. If approved but no reason was given, ask for one. Never invent it.
-4. Only after explicit approval AND a reason, call again with confirm=true + reason.
+4. Only after explicit approval AND a reason, call the SAME action tool AGAIN with confirm=true + the reason. When the user says "yes" / "confirm" / "go ahead" to an action you PREVIEWED earlier in THIS conversation, you ALREADY HAVE that tool (you just called it for the preview) — so you MUST call it again with confirm=true and the captured reason. NEVER reply that you "don't have", "can't find", or "no longer have" that tool on the confirm turn; every action tool is available on every turn.
 5. After applying, report what changed, the count, and that it was logged to the Master Brain action log (name + reason + timestamp).
 6. If the request is AMBIGUOUS for a WRITE (which customers? which slab? how many points?), ASK a short clarifying question and CONFIRM your understanding BEFORE previewing — never guess on a write.
 7. If a tool errors (permission / too large / no reason), relay it plainly. If NO existing tool fits, state what IS possible and offer the closest path (e.g. "I can set tier='kazo insider' on every customer with lifetime_spend = 0 via set_customer_tier — shall I preview that?") — do NOT just say "I can't".
@@ -243,6 +243,40 @@ _ACTION_INTENT_RE = re.compile(
 
 def _has_action_intent(text: str) -> bool:
     return bool(_ACTION_INTENT_RE.search(text or ""))
+
+
+# A bare "yes / confirm / go ahead / reason: …" reply carries no action verb, so it would
+# otherwise be routed as a READ turn (action tools stripped) and the model would hallucinate
+# "I don't have that tool" on the confirm step. We detect confirmation + a pending preview.
+_CONFIRM_RE = re.compile(
+    r"\b(yes|yep|yeah|yup|sure|confirm(ed)?|confirm=true|go ahead|proceed|do it|apply( it| now)?|"
+    r"approve|approved|sounds good|please do|ok(ay)? do|make it so|execute|reason\s*[:=])\b",
+    re.IGNORECASE)
+# Signals the previous assistant turn was an action PREVIEW awaiting confirmation.
+_PREVIEW_HINT_RE = re.compile(
+    r"(preview|shall i (go ahead|apply|proceed|run)|confirm.{0,40}reason|provide a reason|"
+    r"before i apply|apply this|go ahead and apply|confirmation[_ ]required)",
+    re.IGNORECASE)
+
+
+def _looks_like_confirmation(text: str) -> bool:
+    return bool(_CONFIRM_RE.search(text or ""))
+
+
+def _session_has_pending_action(existing: Optional[Dict[str, Any]]) -> bool:
+    """True if the recent conversation was mid-action (a preview awaiting confirmation) — so a
+    bare 'yes / confirm' follow-up still gets the action tools instead of the read-only set."""
+    if not existing:
+        return False
+    for m in reversed((existing.get("messages") or [])[-6:]):
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        if m.get("role") == "user" and _has_action_intent(content):
+            return True
+        if m.get("role") == "assistant" and _PREVIEW_HINT_RE.search(content):
+            return True
+    return False
 
 
 def _compact_trace(trace: List[Dict[str, Any]]) -> str:
@@ -647,13 +681,19 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     existing = await ai_chats_col.find_one(
         {"id": session_id, "user_id": user["id"], "surface": "master"}, {"_id": 0})
 
-    # Read vs write intent decides the prompt + tool set. Analysis/read questions use the
-    # LEAN Fundle-Brain prompt + read-only tools (so they're as fast & reliable as Fundle
-    # Brain); action tools + the full write protocol are exposed only on real action intent
-    # (or when the user clicked Execute on a recommendation).
-    wants_action = bool(req.force_action) or _has_action_intent(req.message or "")
+    # Master Brain ALWAYS gets the full tool set (reads + audited actions) and the write-capable
+    # prompt. The old read/write keyword-routing was brittle — natural commands like "change
+    # customer X to gold tier" missed the regex and got the read-only tools, so the model wrongly
+    # claimed "I don't have that tool". Writes stay safe because EVERY action tool is gated behind
+    # the mandatory preview -> confirm(+reason) protocol (nothing mutates on confirm=false).
+    # `is_action_command` is now used ONLY to decide whether the instant deterministic read-audit
+    # fast-path may run (it must NOT short-circuit an actual "fix ..." action command).
+    is_action_command = (bool(req.force_action)
+                         or _has_action_intent(req.message or "")
+                         or (_looks_like_confirmation(req.message or "")
+                             and _session_has_pending_action(existing)))
 
-    history: List[Dict[str, Any]] = await _seeded_history(user, read_only=not wants_action)
+    history: List[Dict[str, Any]] = await _seeded_history(user, read_only=False)
     if existing:
         for m in (existing.get("messages") or [])[-12:]:
             if m["role"] in {"user", "assistant"} and m.get("content"):
@@ -702,13 +742,15 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     # Fundle Brain). Opus was burning the AI budget fast AND its latency caused 502 timeouts;
     # Sonnet is ~5x cheaper, faster and reliable. (Override via req.model still works.)
     provider, model = _resolve_model(req.model, default=("anthropic", "claude-sonnet-4-6"))
-    tool_set = ALL_TOOL_SCHEMAS if wants_action else READ_TOOL_SCHEMAS
+    tool_set = ALL_TOOL_SCHEMAS
     trace: List[Dict[str, Any]] = []
     reply: Optional[str] = None
 
     # DETERMINISTIC FAST-PATH: the two recurring, expensive audit questions are answered
     # straight from the DB (no LLM) — always exact, instant, free, and immune to budget/timeout.
-    if not wants_action:
+    # Skipped for action commands so a "fix negative balances" request is not short-circuited by
+    # the read-only audit answer.
+    if not is_action_command:
         det_reply, det_trace = await _deterministic_audit(req.message, user)
         if det_reply:
             reply, trace = det_reply, det_trace
