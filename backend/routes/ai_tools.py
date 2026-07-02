@@ -13,6 +13,31 @@ from database import (
 )
 from routes._loyalty import LOYALTY_TX_MATCH, loyalty_match
 
+import time as _time
+
+# Platform-wide KPI/tier snapshots are expensive full-collection aggregations. Cache them
+# briefly so repeated Brain calls don't re-scan 800k+ rows every time — this keeps analytics
+# fast and well under the chat wall-clock caps. Any write clears the cache (see clear_stats_cache).
+_STATS_TTL_SECONDS = 60
+_stats_cache: Dict[str, tuple] = {}
+
+
+def _stats_cache_get(key: str):
+    hit = _stats_cache.get(key)
+    if hit and (_time.time() - hit[0]) < _STATS_TTL_SECONDS:
+        return hit[1]
+    return None
+
+
+def _stats_cache_set(key: str, value: Dict[str, Any]) -> Dict[str, Any]:
+    _stats_cache[key] = (_time.time(), value)
+    return value
+
+
+def clear_stats_cache() -> None:
+    """Invalidate cached platform stats — called after any write so KPIs reflect it at once."""
+    _stats_cache.clear()
+
 
 # ---------------- Tool JSON schemas (OpenAI function-calling) ----------------
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
@@ -181,6 +206,10 @@ def _norm_days(days: int) -> int:
 # ---------------- Tool implementations ----------------
 async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
     days = _norm_days(days)
+    _ck = f"overall_kpis:{days}"
+    _cached = _stats_cache_get(_ck)
+    if _cached is not None:
+        return _cached
     start = _iso(datetime.now(timezone.utc) - timedelta(days=days))
     # R5: loyalty members only
     total_cust = await customers_col.count_documents({"mobile": {"$nin": [None, ""]}})
@@ -203,7 +232,7 @@ async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
     burn_ratio = float((cfg or {}).get("burn_ratio") or 0.25)
     earn_ratio = float((cfg or {}).get("earn_ratio") or 1.0)
     outstanding = int(pts[0]["outstanding"]) if pts else 0
-    return {
+    return _stats_cache_set(_ck, {
         "window_days": days,
         "total_customers": total_cust,
         "net_sales": round(sales[0]["net"], 2) if sales else 0,
@@ -215,7 +244,7 @@ async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
         "earn_ratio_pts_per_inr": earn_ratio,
         "lifetime_points_earned": int(pts[0]["earned"]) if pts else 0,
         "lifetime_points_redeemed": int(pts[0]["redeemed"]) if pts else 0,
-    }
+    })
 
 
 async def _tool_top_churning_customers(inactive_days: int = 120, min_lifetime_spend: float = 5000,
@@ -334,17 +363,20 @@ async def _tool_top_skus(days: int = 30, limit: int = 15, category: str | None =
 
 
 async def _tool_tier_distribution() -> Dict[str, Any]:
+    _cached = _stats_cache_get("tier_distribution")
+    if _cached is not None:
+        return _cached
     rows = await customers_col.aggregate([
         {"$match": {"mobile": {"$nin": [None, ""]}}},  # R5: loyalty members only
         {"$group": {"_id": "$tier", "count": {"$sum": 1},
                     "spend": {"$sum": "$lifetime_spend"},
                     "points": {"$sum": "$points_balance"}}}
     ]).to_list(20)
-    return {
+    return _stats_cache_set("tier_distribution", {
         "tiers": [{"tier": r["_id"], "customers": r["count"],
                     "lifetime_spend": round(r["spend"], 2),
                     "points_outstanding": int(r["points"])} for r in rows],
-    }
+    })
 
 
 async def _tool_nps_summary(days: int = 60) -> Dict[str, Any]:

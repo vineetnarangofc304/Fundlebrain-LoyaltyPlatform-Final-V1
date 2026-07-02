@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 
 import litellm
+import pymongo
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
@@ -25,7 +26,7 @@ from database import (
 from auth import get_current_user, log_audit
 from models import AIChatRequest
 from routes.ai_routes import _build_completion_params, _resolve_model, EMERGENT_LLM_KEY, SYSTEM_PROMPT
-from routes.ai_tools import TOOL_SCHEMAS, execute_tool
+from routes.ai_tools import TOOL_SCHEMAS, execute_tool, clear_stats_cache
 from routes.master_brain_tools import (
     MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, MASTER_READ_TOOL_SCHEMAS,
     _tool_undo_action, _tool_cancel_campaign,
@@ -43,6 +44,12 @@ MAX_TOOL_ITERATIONS = 12
 # synthesis call stays comfortably under 60s. The loop runs on FAST Sonnet so it rarely
 # approaches this; it's a safety net, not the common case.
 MB_DEADLINE_SECONDS = 26
+# Per-tool DB deadline. Master Brain tools run heavy full-collection aggregations; without this
+# they inherit the aggressive production Atlas client `timeoutMS` (~10s) and fail with a read
+# timeout (users saw "Data Unavailable — System Timeout"). A scoped pymongo.timeout per tool
+# call OVERRIDES that so each aggregation can complete, while the outer 26s/46s caps still bound
+# the whole run. (Same pattern used by the dashboards' db_deadline and the recon engine.)
+MB_TOOL_DB_DEADLINE = 25
 # Analysis/read questions get the Fundle read tools PLUS the read-only Master audits (e.g.
 # the fast duplicate-redemption audit). The full action set is added only on write intent.
 READ_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_READ_TOOL_SCHEMAS
@@ -167,15 +174,23 @@ async def _seeded_history(user: Dict[str, Any], read_only: bool = False) -> List
 
 async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
     handler = MASTER_TOOL_HANDLERS.get(name)
-    if handler:
-        try:
-            return await handler(**(args or {}), user=user)
-        except TypeError as e:
-            return {"error": f"Bad arguments for {name}: {e}"}
-        except Exception as e:  # noqa: BLE001
-            return {"error": f"Tool {name} failed: {e}"}
-    # Fall back to the shared Fundle Brain tool registry (reads + L1 writes).
-    return await execute_tool(name, args, user=user)
+    try:
+        # Give every tool a generous, per-call DB deadline that OVERRIDES the aggressive
+        # production Atlas client `timeoutMS` (~10s) — otherwise heavy analytics aggregations
+        # die mid-flight and the model reports a "timeout / data unavailable".
+        with pymongo.timeout(MB_TOOL_DB_DEADLINE):
+            if handler:
+                result = await handler(**(args or {}), user=user)
+                # A master ACTION tool may have mutated data — drop cached platform stats so a
+                # follow-up KPI question reflects the change immediately.
+                clear_stats_cache()
+                return result
+            # Fall back to the shared Fundle Brain tool registry (reads + L1 writes).
+            return await execute_tool(name, args, user=user)
+    except TypeError as e:
+        return {"error": f"Bad arguments for {name}: {e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"Tool {name} failed: {e}"}
 
 
 _MB_RETRY = 3
