@@ -5,6 +5,21 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-02 — Fix: Master Brain "not working / timing out / doesn't understand commands" (iters 77+78, 17/17 PASS)
+
+⚠️ Redeploy required for production.
+- **Symptoms (production):** (1) Analytics questions returned *"Data Unavailable — System Timeout / database read timeout"* (a KPI query took 71s on prod vs 28s in preview). (2) Natural-language action commands ("change customer X to gold tier") and bare confirmations ("yes / go ahead") were refused with *"I don't have that tool."*
+- **Root cause A (timeout):** Master Brain's analytics tools ran heavy full-collection aggregations but — unlike Fundle Brain — had NO DB-deadline override, so production's aggressive Atlas client `timeoutMS` (~10s) killed them (aggregations themselves are only 1–6s). Proven: same aggregation under a 200ms client timeout → NetworkTimeout; wrapped in `pymongo.timeout(25)` → completes in ~1s.
+- **Root cause B (commands):** `chat()` used a brittle keyword regex (`_has_action_intent`) to decide read-vs-action. It handed a READ-ONLY tool schema + read prompt to anything that didn't match the regex, so natural commands ("change X to gold tier") and confirmations ("yes/go ahead") had no matching action tool → the model hallucinated a "capability gap."
+- **Fixes:**
+  - `master_brain_routes.py`: `_master_execute_tool` now wraps every tool call in `with pymongo.timeout(MB_TOOL_DB_DEADLINE=25)` and clears the stats cache after action handlers. `chat()` now ALWAYS exposes `ALL_TOOL_SCHEMAS` with the write-capable prompt; writes stay safe via the mandatory preview→confirm(+reason) audited protocol. `is_action_command` (action verb OR confirmation-of-a-pending-preview) now only gates the instant deterministic read-audit fast-path. New helpers: `_looks_like_confirmation`, `_session_has_pending_action`.
+  - `ai_tools.py`: `get_overall_kpis` / `tier_distribution` cached (60s TTL) with `clear_stats_cache()` invalidation after writes.
+- **Verified:** iter 77 (7/7) + iter 78 (10/10). Analytics return real data (~800k customers) with no timeout; deterministic negative-balance audit instant (2.8s) & honest; natural-language tier/points commands preview→confirm→apply on one "yes/go ahead" turn with audit IDs; reads don't mutate.
+- **Note:** Master Brain still depends on the Emergent Universal LLM Key balance (auto top-up is ON). If it ever runs dry, Master Brain replies "AI usage budget exhausted."
+
+---
+
+
 ## 2026-06-25 (b) — Fix: Recon "failing when we try to upload file" — fragile chunk upload (iter 76, 3/3 PASS)
 
 ⚠️ Redeploy required for production (frontend change).
