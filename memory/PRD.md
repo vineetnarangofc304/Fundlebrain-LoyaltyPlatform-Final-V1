@@ -32,6 +32,17 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### Iteration 85 (Jun 2026) — 🔴🔴 P0 FIX (recurring): Recon CSV stalled at `phase=parsing` (watchdog false-kill + malformed-CSV abort)
+User: "Recon issue fix". Continuation of the recon reliability work (prior forms: OOM iter-75, client-upload stall iter-76).
+- **Root cause:** the CSV parse runs in a worker thread via `asyncio.to_thread` (so it can't touch the async DB) and emitted **NO heartbeat** during the parse. On a large production file the parse legitimately runs minutes → the `STALE_RECON_MINUTES=8` stale-job watchdog falsely marks the job `failed`. Separately, a malformed row (unterminated quote / oversized field) raised `_csv.Error` from the reader and **aborted the entire parse**.
+- **Fix (`recon_routes.py`, backend-only):**
+  1. **Module-level `csv.field_size_limit(sys.maxsize)`** (with OverflowError fallback) so a single very large / unterminated-quote field no longer raises "field larger than field limit".
+  2. **`_parse_with_heartbeat(job_id, parse_fn, *args)`** — runs the parse as a task and pumps `_heartbeat(phase="parsing")` every `PARSE_HEARTBEAT_EVERY=30`s until the thread finishes (re-raising any parse error). The three `_recon_*` call sites now use it instead of raw `asyncio.to_thread`.
+  3. **Guarded row iteration** in `_parse_transactions_csv` / `_parse_customers_csv` / `_parse_items_csv` (`while True: next(row_iter)` mirroring `historic_routes.py`) — a malformed line or mapper exception is counted as `parse_failed` and skipped, never fatal.
+- **Verified:** unit self-test `/tmp/recon_parse_test.py` (field limit raised, malformed + 2MB oversized fields no crash, dup accumulation, heartbeat pump returns result) + testing_agent iteration_79 **5/5 backend PASS** (full init→chunk→finalize→poll over real HTTP for well-formed txns ×200, malformed unterminated-quote CSV, 1.5MB oversized-field CSV, customers ×50, and heartbeat-advancement on a 1000-row job — ALL reach `status=done`, none stuck `parsing` or wrongly `failed`). Regression: `tests/iteration79_recon_parse_heartbeat_test.py`. ⚠️ **Redeploy required for production.**
+- **Note (P2):** `recon_routes.py` now 724 lines — consider splitting parse helpers into `recon_parsers.py` later.
+
+
 ### Iteration 84 (Jun 2026) — 🔴🔴 Master Brain "strange responses" on prod = budget-exhaustion (Opus cost) + raw-trace fallback dump
 User (LIVE PROD): two screenshots — (1) "Customers with Negative Points balance and the exact reason" → a RAW tool-trace dump ("Here is what I found before the deep scan ran long: …"); (2) "Are there customers with negative balance…" → "AI usage budget exhausted". Demand: "should ALWAYS give the right answer — no fallback / dummy / sample / no-answer."
 - **Root cause:** Opus 4.7 (set in iter-81) is expensive and was hitting the per-key litellm budget cap (acct has 109 credits, but the KEY cap ~$41 — explained to user via support). When budget hit mid-run, the loop broke and the 46s fallback dumped the raw `_compact_trace` (the "strange" screenshot 1); when budget hit on the first call, it showed the budget message (screenshot 2).
