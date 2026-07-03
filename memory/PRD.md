@@ -32,7 +32,15 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
-### Iteration 87 (Jul 3, 2026) — 🔴🔴 P0 FIX (production): ALL CSV/XLSX/PDF/file downloads returned EMPTY ("Internal Server Error" / "Download failed")
+### Iteration 88 (Jul 3, 2026) — 🔴🔴 P0 FIX (production, recurring): Recon jobs "Stalled — no progress for over 8 min" (uploading / stitching / parsing)
+Read the LIVE production recon jobs (read-only) and found ALL failures were the stale-job watchdog killing jobs. Three distinct causes across phases:
+- **`uploading` (biggest cause):** `POST /api/recon/chunk` only did `$inc chunks_uploaded` and **never refreshed `heartbeat`**. A large historical CSV uploads for longer than `STALE_RECON_MINUTES=8`, so the watchdog marked it "Stalled" *mid-upload* and the next chunk 400'd. **Fix:** chunk endpoint now sets `heartbeat` on every chunk. Verified: heartbeat advances per chunk (…45→…47→…48) and the full chunked upload → done.
+- **`stitching`:** the chunk-staging loop (`_run_recon_job`) set phase once and emitted no heartbeat while writing many chunks to the temp file. **Fix:** heartbeat every 25 chunks; XLSX decode now uses the heartbeat pump (`_parse_with_heartbeat(..., phase="stitching")`, generalized to take a `phase`).
+- **`parsing`:** already fixed in iteration 85 (heartbeat pump + guarded iteration).
+- **User's actual goal (their words):** match every row of the pre-June-8 historical CSVs against the DB, find gaps, and backfill so no customer is left un-updated → this is exactly **Recon (find `missing_in_db`) → Heal (one-click re-ingest, iteration 86)**. Also flagged: `SKU-wise_Billing_Rep` should be reconciled as the **items** dataset (their items run succeeded), NOT transactions.
+- ⚠️ **Redeploy required** — production still lacked the upload/stitching heartbeat fixes.
+
+
 Two production reports: Deepak — "exporting birthday data → internal server error" (Segments audience export); Hardik — "Download failed on Fundle brain" (AI `export_csv` download). **Single shared root cause.**
 - **Root cause:** `APILogMiddleware` was a Starlette **`BaseHTTPMiddleware`**. It buffers the request in a `_CachedRequest` and then replays the `http.request` message to the response's `listen_for_disconnect()`. For **any `StreamingResponse`/`FileResponse`** that raises `RuntimeError: Unexpected message received: http.request`, truncating the streamed body to **0 bytes** (client saw 500 / empty file). This silently broke EVERY streamed download: segments audience CSV/XLSX/PDF, recon `mismatches.csv`, and the Fundle Brain AI CSV download.
 - **Fix (`server.py`):** rewrote `APILogMiddleware` as a **pure-ASGI middleware** (`__call__(self, scope, receive, send)`) that wraps `receive`/`send` transparently, captures request/response bodies for the API-monitor log, **skips body capture for streaming content-types** (`text/csv`, `application/pdf`, `spreadsheetml`, `octet-stream`, `application/zip`), and **never touches the disconnect channel** — so streams pass straight through. All logging fields preserved (status, latency, actor email, `_streamed` marker, error `detail`).

@@ -134,8 +134,14 @@ async def recon_chunk(
         {"$set": {"job_id": job_id, "chunk_index": chunk_index, "data": data, "size": len(data)}},
         upsert=True,
     )
+    # Refresh the job heartbeat on EVERY chunk so the stale-job watchdog never kills an
+    # actively-uploading client mid-transfer. Large historical billing CSVs upload for well
+    # over the 8-min watchdog window; previously only chunks_uploaded was bumped (not the
+    # heartbeat), so big uploads were falsely marked "Stalled" and the next chunk 400'd.
+    upd: Dict[str, Any] = {"$set": {"heartbeat": datetime.now(timezone.utc).isoformat()}}
     if result.upserted_id is not None:
-        await recon_jobs_col.update_one({"id": job_id}, {"$inc": {"chunks_uploaded": 1}})
+        upd["$inc"] = {"chunks_uploaded": 1}
+    await recon_jobs_col.update_one({"id": job_id}, upd)
     return {"ok": True, "chunk_index": chunk_index}
 
 
@@ -347,18 +353,31 @@ async def _run_recon_job(job_id: str):
             wrote_any = False
             if is_xlsx:
                 parts: List[bytes] = []
+                staged = 0
                 async for c in cursor:
                     parts.append(c["data"]); wrote_any = True
-                text = await asyncio.to_thread(_stitch_and_decode, parts, filename)
+                    staged += 1
+                    if staged % 25 == 0:
+                        await _heartbeat(job_id, phase="stitching")
+                # XLSX decode is CPU-bound → run in a thread with a heartbeat pump so a large
+                # workbook can't outrun the stale-job watchdog.
+                text = await _parse_with_heartbeat(
+                    job_id, _stitch_and_decode, parts, filename, phase="stitching")
                 parts = []
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(text)
                 del text
             else:
-                # Stream raw CSV bytes straight to disk — never holds the full file.
+                # Stream raw CSV bytes straight to disk — never holds the full file. Emit a
+                # heartbeat every N chunks so staging a many-hundred-MB file (which can take
+                # longer than the 8-min watchdog window) is never falsely marked "Stalled".
+                staged = 0
                 with os.fdopen(fd, "wb") as f:
                     async for c in cursor:
                         f.write(c["data"]); wrote_any = True
+                        staged += 1
+                        if staged % 25 == 0:
+                            await _heartbeat(job_id, phase="stitching")
             if not wrote_any:
                 return await _fail(job_id, "No uploaded chunks found")
 
@@ -420,19 +439,20 @@ async def _heartbeat(job_id: str, phase: Optional[str] = None):
     await recon_jobs_col.update_one({"id": job_id}, {"$set": upd})
 
 
-async def _parse_with_heartbeat(job_id: str, parse_fn, *args):
-    """Run a CPU-bound CSV parse in a worker thread while keeping the job's heartbeat fresh.
+async def _parse_with_heartbeat(job_id: str, parse_fn, *args, phase: str = "parsing"):
+    """Run a CPU-bound function in a worker thread while keeping the job's heartbeat fresh.
 
-    The parse cannot touch the async DB, so on a large file that legitimately takes minutes
+    The thread cannot touch the async DB, so on a large file that legitimately takes minutes
     the stale-job watchdog (STALE_RECON_MINUTES) would falsely mark the job 'failed'. This
-    pumps a ``phase=parsing`` heartbeat every PARSE_HEARTBEAT_EVERY seconds until the parse
-    thread finishes, then returns its result (re-raising any exception it raised)."""
+    pumps a heartbeat (with the given phase) every PARSE_HEARTBEAT_EVERY seconds until the
+    thread finishes, then returns its result (re-raising any exception it raised). Used for
+    both the CSV parse and the (CPU-bound) XLSX stitch/decode."""
     task = asyncio.create_task(asyncio.to_thread(parse_fn, *args))
     while True:
         done, _pending = await asyncio.wait({task}, timeout=PARSE_HEARTBEAT_EVERY)
         if done:
             break
-        await _heartbeat(job_id, phase="parsing")
+        await _heartbeat(job_id, phase=phase)
     return task.result()
 
 
