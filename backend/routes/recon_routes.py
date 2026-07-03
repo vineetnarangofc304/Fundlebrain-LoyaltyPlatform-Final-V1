@@ -42,6 +42,19 @@ from routes.historic_routes import (
 
 logger = logging.getLogger("kazo-fundle.recon")
 
+# Raise the CSV field-size limit so a single very large field — or a malformed /
+# unterminated-quote field that the reader tries to slurp all the way to EOF — does not
+# crash the parse with "_csv.Error: field larger than field limit". Combined with the
+# guarded row iteration in the parse functions, malformed rows are counted as
+# parse_failed, never fatal.
+_csv_field_limit = sys.maxsize
+while True:
+    try:
+        csv.field_size_limit(_csv_field_limit)
+        break
+    except OverflowError:
+        _csv_field_limit = int(_csv_field_limit // 10)
+
 router = APIRouter(prefix="/recon", tags=["recon"], dependencies=[Depends(db_deadline)])
 
 recon_jobs_col = db["recon_jobs"]
@@ -52,6 +65,7 @@ MISMATCH_DETAIL_CAP = 5000  # rows persisted for CSV download (per job)
 SAMPLE_CAP = 200            # rows embedded in the JSON report
 STALE_RECON_MINUTES = 8     # a "running" job with no heartbeat for this long is auto-failed
 HEARTBEAT_EVERY_BATCHES = 5  # write progress/heartbeat every N batches during DB compare
+PARSE_HEARTBEAT_EVERY = 30   # seconds — pump a heartbeat this often while the parse thread runs
 # The recon body runs as a detached background task — OUTSIDE the router's db_deadline
 # dependency — so it would otherwise inherit the aggressive production client `timeoutMS`
 # (~10s) and MaxTimeMSExpired on the deep-scan / final aggregate. Give the whole run a
@@ -324,6 +338,22 @@ async def _heartbeat(job_id: str, phase: Optional[str] = None):
     await recon_jobs_col.update_one({"id": job_id}, {"$set": upd})
 
 
+async def _parse_with_heartbeat(job_id: str, parse_fn, *args):
+    """Run a CPU-bound CSV parse in a worker thread while keeping the job's heartbeat fresh.
+
+    The parse cannot touch the async DB, so on a large file that legitimately takes minutes
+    the stale-job watchdog (STALE_RECON_MINUTES) would falsely mark the job 'failed'. This
+    pumps a ``phase=parsing`` heartbeat every PARSE_HEARTBEAT_EVERY seconds until the parse
+    thread finishes, then returns its result (re-raising any exception it raised)."""
+    task = asyncio.create_task(asyncio.to_thread(parse_fn, *args))
+    while True:
+        done, _pending = await asyncio.wait({task}, timeout=PARSE_HEARTBEAT_EVERY)
+        if done:
+            break
+        await _heartbeat(job_id, phase="parsing")
+    return task.result()
+
+
 async def _is_cancelled(job_id: str) -> bool:
     j = await recon_jobs_col.find_one({"id": job_id}, {"_id": 0, "cancel_requested": 1, "status": 1})
     return bool(j) and (j.get("cancel_requested") or j.get("status") == "failed")
@@ -335,16 +365,30 @@ class _Cancelled(Exception):
 
 def _parse_transactions_csv(csv_path: str):
     """Pure-CPU parse streamed from disk (runs in a worker thread; never holds the whole
-    file in memory — mirrors the historic ingest to avoid OOM on large billing files)."""
+    file in memory — mirrors the historic ingest to avoid OOM on large billing files).
+    The CSV iteration is guarded so a malformed line (bad quoting / embedded newline /
+    oversized field) is counted as parse_failed and skipped instead of aborting the parse."""
     fh = open(csv_path, "r", encoding="utf-8-sig", errors="replace", newline="")
     reader = csv.DictReader(fh)
     store_cache: Dict[str, Dict[str, Any]] = {}
     csv_map: Dict[str, Dict[str, Any]] = {}      # bill_number -> {net, mobile}
     total_rows = parse_failed = dup_keys = 0
     csv_net_sum = 0.0
-    for r in reader:
+    row_iter = iter(reader)
+    while True:
+        try:
+            r = next(row_iter)
+        except StopIteration:
+            break
+        except Exception:
+            total_rows += 1
+            parse_failed += 1
+            continue
         total_rows += 1
-        doc, err = _map_transaction_row(r, store_cache)
+        try:
+            doc, err = _map_transaction_row(r, store_cache)
+        except Exception:
+            doc, err = None, "mapper error"
         if err or not doc:
             parse_failed += 1
             continue
@@ -362,8 +406,8 @@ def _parse_transactions_csv(csv_path: str):
 
 async def _recon_transactions(job_id: str, csv_path: str, deep_scan: bool = False) -> Dict[str, Any]:
     await _heartbeat(job_id, phase="parsing")
-    csv_map, total_rows, parse_failed, dup_keys, csv_net_sum = await asyncio.to_thread(
-        _parse_transactions_csv, csv_path)
+    csv_map, total_rows, parse_failed, dup_keys, csv_net_sum = await _parse_with_heartbeat(
+        job_id, _parse_transactions_csv, csv_path)
     await _progress(job_id, total_rows, phase="comparing")
     if await _is_cancelled(job_id):
         raise _Cancelled()
@@ -471,9 +515,21 @@ def _parse_customers_csv(csv_path: str):
     reader = csv.DictReader(fh)
     csv_map: Dict[str, Dict[str, Any]] = {}
     total_rows = parse_failed = dup_keys = 0
-    for r in reader:
+    row_iter = iter(reader)
+    while True:
+        try:
+            r = next(row_iter)
+        except StopIteration:
+            break
+        except Exception:
+            total_rows += 1
+            parse_failed += 1
+            continue
         total_rows += 1
-        doc, err = _map_customer_row(r)
+        try:
+            doc, err = _map_customer_row(r)
+        except Exception:
+            doc, err = None, "mapper error"
         if err or not doc:
             parse_failed += 1
             continue
@@ -488,8 +544,8 @@ def _parse_customers_csv(csv_path: str):
 
 async def _recon_customers(job_id: str, text: str, deep_scan: bool = False) -> Dict[str, Any]:
     await _heartbeat(job_id, phase="parsing")
-    csv_map, total_rows, parse_failed, dup_keys = await asyncio.to_thread(
-        _parse_customers_csv, text)
+    csv_map, total_rows, parse_failed, dup_keys = await _parse_with_heartbeat(
+        job_id, _parse_customers_csv, text)
     await _progress(job_id, total_rows, phase="comparing")
     if await _is_cancelled(job_id):
         raise _Cancelled()
@@ -582,9 +638,21 @@ def _parse_items_csv(csv_path: str):
     reader = csv.DictReader(fh)
     csv_keys: set = set()
     total_rows = parse_failed = dup_keys = 0
-    for r in reader:
+    row_iter = iter(reader)
+    while True:
+        try:
+            r = next(row_iter)
+        except StopIteration:
+            break
+        except Exception:
+            total_rows += 1
+            parse_failed += 1
+            continue
         total_rows += 1
-        doc, err = _map_item_row(r)
+        try:
+            doc, err = _map_item_row(r)
+        except Exception:
+            doc, err = None, "mapper error"
         if err or not doc:
             parse_failed += 1
             continue
@@ -602,8 +670,8 @@ def _parse_items_csv(csv_path: str):
 async def _recon_items(job_id: str, csv_path: str, deep_scan: bool = False) -> Dict[str, Any]:
     items_col = db["items"]
     await _heartbeat(job_id, phase="parsing")
-    csv_keys, total_rows, parse_failed, dup_keys = await asyncio.to_thread(
-        _parse_items_csv, csv_path)
+    csv_keys, total_rows, parse_failed, dup_keys = await _parse_with_heartbeat(
+        job_id, _parse_items_csv, csv_path)
     await _progress(job_id, total_rows, phase="comparing")
     if await _is_cancelled(job_id):
         raise _Cancelled()

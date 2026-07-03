@@ -1,0 +1,23 @@
+{
+  "summary": "Iteration 79 — Backend E2E validation of the Recon parse-heartbeat / malformed-CSV fix. Ran /api/recon/init -> chunk -> finalize -> poll over real HTTP for 4 CSV scenarios (well-formed transactions x200, malformed transactions with unterminated quote, transactions with a 1.5MB oversized field, well-formed customers x50) plus a heartbeat-advancement check on a 1000-row job. All 5 pytest cases PASSED. Every job reached status='done'; the malformed and oversized-field CSVs no longer crash the parse to 'failed'; heartbeat timestamps advance while the parse thread runs, so the 8-min stale-job watchdog will no longer falsely fail active jobs.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration79_recon_parse_heartbeat_test.py",
+    "/app/test_reports/pytest/iteration79.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "recon_routes.py is 724 lines — approaching the 700-line threshold; consider splitting the parse helpers (_parse_transactions_csv / _parse_customers_csv / _parse_items_csv) into a recon_parsers.py module for future maintainability.",
+    "_parse_with_heartbeat busy-loops with await asyncio.wait({task}, timeout=30); if the parse raises, task.result() re-raises correctly, but the heartbeat pump does NOT record the error phase before propagating — the outer _run_recon_job catches and calls _fail(), so behaviour is correct, just worth a comment.",
+    "In _parse_transactions_csv the guarded 'except Exception' after next(row_iter) is intentional to catch csv.Error mid-iteration; the module-level csv.field_size_limit bump plus this guard together neutralise the two known failure modes (oversized field, unterminated quote). Validated end-to-end."
+  ],
+  "updated_files": ["/app/backend/tests/iteration79_recon_parse_heartbeat_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "n/a (skipped per request)"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (from review_request; login returned token successfully)",
+  "seed_data_creation": "Each test uploads a synthetic CSV with TEST79-prefixed bill numbers / mobiles so it does not collide with real data. Bill numbers won't exist in DB so they show as missing_in_db in the report, but the recon completes normally. No cleanup of recon_jobs rows was done (not mandatory per instructions); the uploaded chunks are auto-deleted by _run_recon_job's finally block.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite for the recon parse-heartbeat fix lives at /app/backend/tests/iteration79_recon_parse_heartbeat_test.py — 5 tests, ~15s total. Reuse for any future recon changes. Previous iterations 74/75/76 covered OOM and streaming issues; 79 specifically covers parse-thread heartbeat and CSV error resilience.",
+  "rca of the issue": "P0 recon stall RCA: CSV parse ran inside asyncio.to_thread with no heartbeat emission — a large-file parse taking >8min triggered the stale-job watchdog which set status=failed. Separately, malformed rows (unterminated quotes, oversized fields) raised csv.Error and aborted the entire parse. Fix (in /app/backend/routes/recon_routes.py, verified working): (a) module-level csv.field_size_limit raised to sys.maxsize; (b) new _parse_with_heartbeat wraps to_thread and pumps _heartbeat(phase='parsing') every 30s while parse is running; (c) the three parse functions now iterate with a guarded 'while True: next(row_iter)' loop that catches csv.Error / mapper exceptions and increments parse_failed instead of aborting. E2E confirms all four scenarios now reach status='done'."
+}
