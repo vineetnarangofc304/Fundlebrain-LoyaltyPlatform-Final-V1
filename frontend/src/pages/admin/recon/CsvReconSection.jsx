@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
-import { Upload, FileSearch, Download, RefreshCw, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Upload, FileSearch, Download, RefreshCw, CheckCircle2, AlertTriangle, Wand2 } from "lucide-react";
 import { SectionHeading, KPICard } from "../_shared";
 
 const fmtNum = (v) => (v == null ? "—" : Number(v).toLocaleString("en-IN"));
@@ -47,27 +47,68 @@ function SampleTable({ title, rows }) {
   );
 }
 
-function ReconReport({ job }) {
+function ReconReport({ job, onHeal, healing, healInfo }) {
   const rep = job.report;
   if (!rep) return null;
   const clean = (rep.missing_in_db || 0) === 0 && (rep.amount_mismatches || 0) === 0;
   const backendBase = process.env.REACT_APP_BACKEND_URL;
+  const info = healInfo;
+  const healDone = info && ["completed", "previewed"].includes(info.status);
+  const healRunning = info && !["completed", "previewed", "failed"].includes(info.status);
   return (
     <div className="mt-4" data-testid="recon-csv-report">
-      <div className={`flex items-center gap-2 text-sm p-3 border ${clean ? "bg-emerald-50 border-emerald-200 text-emerald-900" : "bg-amber-50 border-amber-200 text-amber-900"}`}>
+      <div className={`flex flex-wrap items-center gap-2 text-sm p-3 border ${clean ? "bg-emerald-50 border-emerald-200 text-emerald-900" : "bg-amber-50 border-amber-200 text-amber-900"}`}>
         {clean ? <CheckCircle2 className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
         {clean
           ? "CSV fully reconciled — every CSV row exists in the database with matching amounts."
           : `Differences found — ${fmtNum(rep.missing_in_db)} missing in DB, ${fmtNum(rep.amount_mismatches ?? 0)} amount mismatches.`}
-        <a
-          className="ml-auto k-btn k-btn-outline k-btn-sm"
-          href={`${backendBase}/api/recon/jobs/${job.id}/mismatches.csv`}
-          target="_blank" rel="noreferrer"
-          data-testid="recon-download-mismatches"
-        >
-          <Download className="w-3.5 h-3.5" /> Mismatch CSV
-        </a>
+        <div className="ml-auto flex items-center gap-2">
+          {!clean && (rep.missing_in_db || 0) > 0 && job.heal_available && !job.healed && (
+            <button
+              className="k-btn kazo-bg-burgundy text-white k-btn-sm"
+              disabled={!!healing}
+              onClick={() => onHeal?.(job)}
+              data-testid="recon-heal-btn"
+              title="Re-ingest this exact CSV (upsert) to insert the missing rows and recompute points/tiers"
+            >
+              <Wand2 className="w-3.5 h-3.5" /> {healing ? "Queuing…" : `Heal ${fmtNum(rep.missing_in_db)} missing`}
+            </button>
+          )}
+          <a
+            className="k-btn k-btn-outline k-btn-sm"
+            href={`${backendBase}/api/recon/jobs/${job.id}/mismatches.csv`}
+            target="_blank" rel="noreferrer"
+            data-testid="recon-download-mismatches"
+          >
+            <Download className="w-3.5 h-3.5" /> Mismatch CSV
+          </a>
+        </div>
       </div>
+      {info && (
+        <div
+          className={`mt-3 flex items-center gap-2 text-xs p-2.5 border ${
+            healDone ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+              : info.status === "failed" ? "bg-rose-50 border-rose-200 text-rose-800"
+              : "bg-indigo-50 border-indigo-200 text-indigo-800"}`}
+          data-testid="recon-heal-status"
+        >
+          {healRunning ? <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+            : healDone ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+            : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+          <span>
+            {healDone
+              ? `Heal complete — ${fmtNum(info.inserted)} inserted, ${fmtNum(info.updated)} updated, ${fmtNum(info.skipped)} skipped. Points & tiers recomputed for affected customers.`
+              : info.status === "failed"
+                ? `Heal failed: ${info.error || "unknown error"}`
+                : `Heal in progress — re-ingesting the file (${info.status})… you can leave this page; track it on Historical Upload.`}
+          </span>
+        </div>
+      )}
+      {job.healed && !info && (
+        <div className="mt-3 flex items-center gap-2 text-xs text-emerald-700" data-testid="recon-healed-note">
+          <CheckCircle2 className="w-3.5 h-3.5" /> Healed — this file has already been re-ingested to backfill missing rows.
+        </div>
+      )}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
         <KPICard label="CSV rows" value={fmtNum(rep.csv?.rows)} accent="indigo" testid="recon-kpi-csv-rows" />
         <KPICard label="Parse failed" value={fmtNum(rep.csv?.parse_failed)} accent={rep.csv?.parse_failed ? "burgundy" : "slate"} testid="recon-kpi-parse-failed" />
@@ -104,8 +145,11 @@ export default function CsvReconSection() {
   const [activeJob, setActiveJob] = useState(null);
   const [cancelling, setCancelling] = useState({});
   const [uploadNote, setUploadNote] = useState("");
+  const [healing, setHealing] = useState({});      // reconJobId -> bool (queue in flight)
+  const [healInfo, setHealInfo] = useState({});     // reconJobId -> { historicJobId, status, inserted, updated, skipped, error }
   const fileRef = useRef(null);
   const pollRef = useRef(null);
+  const healPollRef = useRef({});
 
   const loadJobs = async () => {
     try {
@@ -116,7 +160,56 @@ export default function CsvReconSection() {
     } catch { /* ignore */ }
   };
 
-  useEffect(() => { loadJobs(); return () => clearInterval(pollRef.current); }, []);
+  useEffect(() => {
+    loadJobs();
+    return () => {
+      clearInterval(pollRef.current);
+      Object.values(healPollRef.current).forEach((iv) => clearInterval(iv));
+    };
+  }, []);
+
+  const pollHealJob = (reconJobId, historicJobId) => {
+    clearInterval(healPollRef.current[reconJobId]);
+    healPollRef.current[reconJobId] = setInterval(async () => {
+      try {
+        const r = await api.get(`/historic-data/jobs/${historicJobId}`);
+        const s = r.data || {};
+        setHealInfo((m) => ({
+          ...m,
+          [reconJobId]: {
+            historicJobId, status: s.status, inserted: s.inserted,
+            updated: s.updated, skipped: s.skipped, error: s.error,
+          },
+        }));
+        if (["completed", "failed", "previewed"].includes(s.status)) {
+          clearInterval(healPollRef.current[reconJobId]);
+          if (s.status === "failed") toast.error(`Heal failed: ${s.error || "unknown error"}`);
+          else toast.success(`Heal complete — ${fmtNum(s.inserted)} inserted, ${fmtNum(s.updated)} updated`);
+        }
+      } catch { /* transient — keep polling */ }
+    }, 3000);
+  };
+
+  const healJob = async (job) => {
+    const miss = fmtNum(job.report?.missing_in_db);
+    if (!window.confirm(
+      `This will re-ingest "${job.filename}" (upsert) to insert the ${miss} missing row(s) into the LIVE database and recompute affected customers' spend, tier and points. Proceed?`
+    )) return;
+    setHealing((s) => ({ ...s, [job.id]: true }));
+    try {
+      const r = await api.post(`/recon/jobs/${job.id}/heal`);
+      const hid = r.data.historic_job_id;
+      toast.success("Heal queued — backfilling missing rows…");
+      setActiveJob((j) => (j && j.id === job.id ? { ...j, healed: true, heal_available: false, heal_historic_job_id: hid } : j));
+      setHealInfo((m) => ({ ...m, [job.id]: { historicJobId: hid, status: "pending_ingest" } }));
+      pollHealJob(job.id, hid);
+      loadJobs();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Heal failed to queue");
+    } finally {
+      setHealing((s) => ({ ...s, [job.id]: false }));
+    }
+  };
 
   const startPolling = (jobId) => {
     clearInterval(pollRef.current);
@@ -285,7 +378,14 @@ export default function CsvReconSection() {
       {activeJob?.status === "failed" && (
         <div className="mt-4 text-sm text-rose-700" data-testid="recon-failed">Failed: {activeJob.error}</div>
       )}
-      {activeJob?.status === "done" && <ReconReport job={activeJob} />}
+      {activeJob?.status === "done" && (
+        <ReconReport
+          job={activeJob}
+          onHeal={healJob}
+          healing={healing[activeJob.id]}
+          healInfo={healInfo[activeJob.id]}
+        />
+      )}
 
       {jobs.length > 0 && (
         <div className="mt-6">
@@ -326,6 +426,22 @@ export default function CsvReconSection() {
                             data-testid={`recon-cancel-${j.id}`}>
                             {cancelling[j.id] ? "Cancelling…" : "Cancel"}
                           </button>
+                        )}
+                        {j.status === "done" && j.heal_available && !j.healed && (
+                          <button className="text-burgundy hover:underline flex items-center gap-1 kazo-text-burgundy"
+                            disabled={!!healing[j.id]}
+                            onClick={async () => {
+                              const r = await api.get(`/recon/jobs/${j.id}`);
+                              await healJob(r.data);
+                            }}
+                            data-testid={`recon-heal-${j.id}`}>
+                            <Wand2 className="w-3 h-3" /> {healing[j.id] ? "…" : "Heal"}
+                          </button>
+                        )}
+                        {j.healed && (
+                          <span className="text-emerald-700 flex items-center gap-1" data-testid={`recon-healed-${j.id}`}>
+                            <CheckCircle2 className="w-3 h-3" /> Healed
+                          </span>
                         )}
                         <button className="text-indigo-700 hover:underline flex items-center gap-1"
                           onClick={async () => {

@@ -32,7 +32,13 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
-### Iteration 85 (Jun 2026) — 🔴🔴 P0 FIX (recurring): Recon CSV stalled at `phase=parsing` (watchdog false-kill + malformed-CSV abort)
+### Iteration 86 (Jun 2026) — 🟢 Recon "one-click Heal" — backfill missing rows straight from the recon report
+User: "yes" + "fully handle it yourself automated" (to the offered enhancement). After a reconciliation flags rows as `missing_in_db`, the admin can now heal them in one click — no re-upload.
+- **Design (reuses the battle-tested historic-ingest pipeline — zero bespoke DB-write code):** on a successful recon with `missing_in_db > 0`, `_run_recon_job` now RETAINS the uploaded CSV chunks and sets `heal_available=True` (otherwise chunks are freed as before). New `POST /api/recon/jobs/{job_id}/heal` (super_admin/brand_admin/crm_manager) RENAMES those chunks to a fresh `historic_ingest_jobs` job (metadata-only `update_many` — instant, low-memory even for hundreds of MB), queues it `pending_ingest` in UPSERT mode, and lets the existing scheduler worker ingest it → inserts missing rows, updates changed, and runs the full points/tier/ledger recompute post-pass. Idempotent, audited (`recon_heal`), single-use (`healed` flag; 2nd heal → 400).
+- **Frontend (`CsvReconSection.jsx`):** "Heal N missing" button in the report banner + per-row in Recent Runs (gated on `heal_available && !healed`), a confirm dialog ("insert N rows into the LIVE DB and recompute…"), and a live heal-progress banner that polls the resulting historic job (`recon-heal-btn` / `recon-heal-status` / `recon-heal-{id}` / `recon-healed-{id}`). The recon report itself is the "preview"; heal is the audited "apply".
+- **Verified (e2e preview, real HTTP, `/tmp/recon_heal_e2e.py`):** recon on 4 bills absent from DB → `missing_in_db=4`, `heal_available=true`; heal → historic job created, scheduler ingested (inserted=4), 2nd heal → 400; re-running recon on the same CSV → `missing_in_db=0` (backfilled); recon job marked `healed`. UI smoke: "Heal 3 missing" button renders in the banner. Test data cleaned up. ⚠️ Redeploy required for production.
+
+
 User: "Recon issue fix". Continuation of the recon reliability work (prior forms: OOM iter-75, client-upload stall iter-76).
 - **Root cause:** the CSV parse runs in a worker thread via `asyncio.to_thread` (so it can't touch the async DB) and emitted **NO heartbeat** during the parse. On a large production file the parse legitimately runs minutes → the `STALE_RECON_MINUTES=8` stale-job watchdog falsely marks the job `failed`. Separately, a malformed row (unterminated quote / oversized field) raised `_csv.Error` from the reader and **aborted the entire parse**.
 - **Fix (`recon_routes.py`, backend-only):**

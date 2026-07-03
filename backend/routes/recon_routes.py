@@ -37,7 +37,7 @@ from database import db, transactions_col, customers_col
 from routes._db_timeout import db_deadline
 from routes.historic_routes import (
     MAX_FILE_BYTES, _map_customer_row, _map_item_row, _map_transaction_row,
-    _norm_mobile, _stitch_and_decode, historic_chunks_col,
+    _norm_mobile, _stitch_and_decode, historic_chunks_col, historic_jobs_col,
 )
 
 logger = logging.getLogger("kazo-fundle.recon")
@@ -217,6 +217,78 @@ async def recon_cancel(job_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True, "job_id": job_id, "status": "failed"}
 
 
+@router.post("/jobs/{job_id}/heal")
+async def recon_heal(job_id: str, user: dict = Depends(get_current_user)):
+    """One-click HEAL: re-ingest the exact CSV this recon ran on (UPSERT mode) so the rows
+    flagged `missing_in_db` are backfilled and each affected customer's spend / tier /
+    cutoff-aware points are recomputed. Reuses the full, battle-tested historic-ingest
+    pipeline (no bespoke write code) via the scheduler-driven worker.
+
+    The recon report already IS the preview (it shows exactly how many rows are missing),
+    so this is the audited 'apply' step. Only offered when missing_in_db > 0."""
+    if user["role"] not in {"super_admin", "brand_admin", "crm_manager"}:
+        raise HTTPException(403, "Only admin / CRM roles can heal reconciliation data")
+    job = await recon_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(404, "Recon job not found")
+    if job.get("status") != "done":
+        raise HTTPException(400, f"Reconciliation must finish before healing (status={job.get('status')})")
+    if job.get("healed"):
+        raise HTTPException(400, "This reconciliation has already been healed.")
+    if not job.get("heal_available"):
+        raise HTTPException(400, "Nothing to heal — this reconciliation found no rows missing from the DB.")
+    chunk_cnt = await historic_chunks_col.count_documents({"job_id": job_id})
+    if chunk_cnt == 0:
+        raise HTTPException(400, "The uploaded file is no longer available to heal — please re-run the reconciliation.")
+
+    dataset = job["dataset"]  # transactions | customers | items — all valid ingest datasets
+    filename = job.get("filename") or "recon.csv"
+    total_chunks = int(job.get("total_chunks") or chunk_cnt)
+    new_id = uuid.uuid4().hex
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Transfer this recon's uploaded chunks to the new historic ingest job (metadata-only
+    # RENAME — no data copy, instant, low-memory even for multi-hundred-MB files), then
+    # queue the job as pending_ingest. The existing scheduler worker stages + ingests it
+    # exactly like a normal Historical Upload (UPSERT → inserts missing, updates changed,
+    # runs the points/tier/ledger recompute post-pass).
+    await historic_chunks_col.update_many({"job_id": job_id}, {"$set": {"job_id": new_id}})
+    agg = await historic_chunks_col.aggregate([
+        {"$match": {"job_id": new_id}},
+        {"$group": {"_id": None, "total": {"$sum": "$size"}}}]).to_list(1)
+    total_bytes = int(agg[0]["total"]) if agg else 0
+
+    await historic_jobs_col.insert_one({
+        "id": new_id, "dataset": dataset, "filename": filename,
+        "size_bytes": total_bytes, "row_count_estimated": 0, "columns_detected": [],
+        "duplicate_mode": "upsert", "dry_run": False, "status": "pending_ingest",
+        "processed": 0, "inserted": 0, "updated": 0, "skipped": 0,
+        "errors_count": 0, "errors_sample": [],
+        "queued_at": now_iso, "queued_finalized_at": now_iso, "heartbeat": now_iso,
+        "queued_by": user["email"], "total_chunks": total_chunks, "chunks_uploaded": total_chunks,
+        "source": "recon_heal", "recon_job_id": job_id,
+    })
+    await recon_jobs_col.update_one(
+        {"id": job_id},
+        {"$set": {"healed": True, "heal_available": False,
+                  "heal_historic_job_id": new_id, "healed_at": now_iso,
+                  "healed_by": user["email"]}})
+    await db["audit_logs"].insert_one({
+        "id": uuid.uuid4().hex, "action": "recon_heal", "entity": "recon_job",
+        "entity_id": job_id, "user_email": user.get("email"), "user_name": user.get("name"),
+        "metadata": {"filename": filename, "dataset": dataset,
+                     "missing_in_db": int((job.get("report") or {}).get("missing_in_db") or 0),
+                     "historic_job_id": new_id},
+        "timestamp": now_iso,
+    })
+    logger.info(f"recon heal queued: recon={job_id} -> ingest={new_id} dataset={dataset}")
+    return {"queued": True, "historic_job_id": new_id, "dataset": dataset,
+            "message": "Heal queued. The same file is being re-ingested (upsert) — missing rows "
+                       "will be inserted and affected customers' spend, tier and points recomputed. "
+                       "Track progress on the Historical Upload page."}
+
+
+
 @router.get("/jobs/{job_id}/mismatches.csv")
 async def recon_mismatch_csv(job_id: str, user: dict = Depends(get_current_user)):
     job = await recon_jobs_col.find_one({"id": job_id}, {"_id": 0, "id": 1})
@@ -249,6 +321,7 @@ async def _fail(job_id: str, reason: str):
 
 async def _run_recon_job(job_id: str):
     tmp_path = None
+    retain_chunks = False  # keep the uploaded CSV so a one-click "heal" can backfill missing rows
     try:
         job = await recon_jobs_col.find_one({"id": job_id}, {"_id": 0})
         if not job:
@@ -299,9 +372,15 @@ async def _run_recon_job(job_id: str):
             else:
                 report = await _recon_items(job_id, tmp_path, deep_scan)
 
+        # A heal is only offered when the recon actually found rows in the CSV that are
+        # absent from the DB — those are what a re-ingest would backfill. Retain the
+        # uploaded chunks so the heal can re-run the exact same file with zero re-upload.
+        missing = int(report.get("missing_in_db") or 0)
+        retain_chunks = missing > 0
         await recon_jobs_col.update_one(
             {"id": job_id},
             {"$set": {"status": "done", "phase": "done", "report": report,
+                      "heal_available": retain_chunks,
                       "heartbeat": datetime.now(timezone.utc).isoformat(),
                       "finished_at": datetime.now(timezone.utc).isoformat()}})
     except _Cancelled:
@@ -310,7 +389,10 @@ async def _run_recon_job(job_id: str):
         logger.exception(f"recon job {job_id} crashed")
         await _fail(job_id, str(e)[:500])
     finally:
-        await historic_chunks_col.delete_many({"job_id": job_id})
+        # Keep the chunks ONLY when a heal is available (missing rows found); otherwise
+        # free the space. On failure / cancel retain_chunks stays False → cleaned up.
+        if not retain_chunks:
+            await historic_chunks_col.delete_many({"job_id": job_id})
         if tmp_path:
             try:
                 os.unlink(tmp_path)
