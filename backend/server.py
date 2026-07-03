@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import Headers
 import os
 import logging
 import time
@@ -271,116 +272,110 @@ async def _persist_api_log(doc: dict):
         logging.getLogger("kazo-fundle").debug(f"api_logs insert failed: {e}")
 
 
-class APILogMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        method = request.method
+class APILogMiddleware:
+    """Pure-ASGI request/response logger for the API monitor.
 
-        # Fast-path: skip non-API, OPTIONS, and noisy/self-logging routes
+    Implemented as a raw ASGI middleware (NOT BaseHTTPMiddleware) on purpose.
+    BaseHTTPMiddleware buffers the request in a _CachedRequest and then replays the
+    buffered `http.request` message to the response's listen_for_disconnect(); for
+    StreamingResponse / FileResponse that raises
+    `RuntimeError: Unexpected message received: http.request` and truncates the streamed
+    body to EMPTY — which made every CSV / XLSX / PDF export (segments audience export,
+    recon mismatch CSV, AI exports) come back 0 bytes / "Internal Server Error". A
+    pure-ASGI middleware wraps receive/send without ever touching the disconnect channel,
+    so streaming downloads pass straight through."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        method = scope.get("method", "")
         if (
             method == "OPTIONS"
             or not path.startswith("/api/")
             or any(path.startswith(p) for p in _LOG_SKIP_PREFIXES)
         ):
-            return await call_next(request)
-
-        # Capture request body (and re-inject so downstream can still read it)
-        raw_req = b""
-        try:
-            raw_req = await request.body()
-            if raw_req:
-                async def _receive():
-                    return {"type": "http.request", "body": raw_req, "more_body": False}
-                request._receive = _receive
-        except Exception:
-            raw_req = b""
+            await self.app(scope, receive, send)
+            return
 
         start = time.perf_counter()
-        actor_email = _decode_actor_email(request)
-        actor_ip = request.client.host if request.client else None
-        error_reason: Optional[str] = None
-        response: Optional[Response] = None
+        req_chunks: list = []
+        req_len = 0
+
+        async def recv_wrapper():
+            nonlocal req_len
+            message = await receive()
+            if message.get("type") == "http.request":
+                body = message.get("body", b"")
+                if body and req_len <= _LOG_MAX_BYTES:
+                    req_chunks.append(body)
+                    req_len += len(body)
+            return message
+
+        state = {"status": 500, "streaming": False, "content_type": "", "resp_len": 0}
+        resp_chunks: list = []
+
+        async def send_wrapper(message):
+            mtype = message.get("type")
+            if mtype == "http.response.start":
+                state["status"] = message.get("status", 200)
+                headers = Headers(raw=message.get("headers", []))
+                state["content_type"] = headers.get("content-type", "").lower()
+                state["streaming"] = any(h in state["content_type"] for h in _LOG_STREAMING_HINTS)
+            elif mtype == "http.response.body" and not state["streaming"]:
+                body = message.get("body", b"")
+                if body and state["resp_len"] <= _LOG_MAX_BYTES:
+                    resp_chunks.append(body)
+                    state["resp_len"] += len(body)
+            await send(message)
+
+        _req = Request(scope)  # header/cookie access only (no receive consumed)
+        actor_email = _decode_actor_email(_req)
+        actor_ip = scope["client"][0] if scope.get("client") else None
 
         try:
-            response = await call_next(request)
+            await self.app(scope, recv_wrapper, send_wrapper)
         except Exception as e:
             elapsed_ms = int((time.perf_counter() - start) * 1000)
-            error_reason = f"{type(e).__name__}: {str(e)[:300]}"
             asyncio.create_task(_persist_api_log({
-                "id": uuid.uuid4().hex,
-                "endpoint": path,
-                "method": method,
-                "status_code": 500,
-                "response_time_ms": elapsed_ms,
-                "customer_mobile": None,
-                "bill_number": None,
-                "store_id": None,
-                "error_reason": error_reason,
-                "request_payload": _decode_body(raw_req),
-                "response_payload": None,
-                "api_key_label": actor_email,
-                "actor_ip": actor_ip,
-                "source": "internal",
+                "id": uuid.uuid4().hex, "endpoint": path, "method": method,
+                "status_code": 500, "response_time_ms": elapsed_ms,
+                "customer_mobile": None, "bill_number": None, "store_id": None,
+                "error_reason": f"{type(e).__name__}: {str(e)[:300]}",
+                "request_payload": _decode_body(b"".join(req_chunks)),
+                "response_payload": None, "api_key_label": actor_email,
+                "actor_ip": actor_ip, "source": "internal",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }))
             raise
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
-
-        # Capture response body — but skip streaming downloads to avoid
-        # blowing memory on large CSV/XLSX exports.
-        content_type = response.headers.get("content-type", "").lower()
-        is_streaming = any(h in content_type for h in _LOG_STREAMING_HINTS)
-
-        response_body_decoded = None
-        if is_streaming:
-            response_body_decoded = {
-                "_streamed": True,
-                "content_type": content_type,
-            }
+        if state["streaming"]:
+            response_body_decoded = {"_streamed": True, "content_type": state["content_type"]}
         else:
-            try:
-                chunks = []
-                async for chunk in response.body_iterator:
-                    chunks.append(chunk)
-                full = b"".join(chunks)
-                response_body_decoded = _decode_body(full)
-                # Re-emit response so the client still receives the body
-                response = Response(
-                    content=full,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    media_type=response.media_type,
-                )
-            except Exception as e:
-                error_reason = f"log_response_read_failed: {type(e).__name__}"
+            response_body_decoded = _decode_body(b"".join(resp_chunks))
 
-        if response.status_code >= 400 and not error_reason:
-            # surface the response's `detail` field as the error_reason for grid display
-            if isinstance(response_body_decoded, dict):
-                d = response_body_decoded.get("detail")
-                if d:
-                    error_reason = str(d)[:300]
+        error_reason = None
+        if state["status"] >= 400 and isinstance(response_body_decoded, dict):
+            d = response_body_decoded.get("detail")
+            if d:
+                error_reason = str(d)[:300]
 
         asyncio.create_task(_persist_api_log({
-            "id": uuid.uuid4().hex,
-            "endpoint": path,
-            "method": method,
-            "status_code": response.status_code,
-            "response_time_ms": elapsed_ms,
-            "customer_mobile": None,
-            "bill_number": None,
-            "store_id": None,
+            "id": uuid.uuid4().hex, "endpoint": path, "method": method,
+            "status_code": state["status"], "response_time_ms": elapsed_ms,
+            "customer_mobile": None, "bill_number": None, "store_id": None,
             "error_reason": error_reason,
-            "request_payload": _decode_body(raw_req),
-            "response_payload": response_body_decoded,
-            "api_key_label": actor_email,
-            "actor_ip": actor_ip,
-            "source": "internal",
+            "request_payload": _decode_body(b"".join(req_chunks)),
+            "response_payload": response_body_decoded, "api_key_label": actor_email,
+            "actor_ip": actor_ip, "source": "internal",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }))
-
-        return response
 
 
 app.add_middleware(APILogMiddleware)

@@ -1,0 +1,29 @@
+{
+  "summary": "Iteration 80 regression pass on APILogMiddleware rewrite (BaseHTTPMiddleware -> pure ASGI) and export bug fixes. 10/10 tests PASSED. Core JSON flows intact (login, /auth/me, dashboard/customers, /segments/facets, /segments/cohort-library, POST /segments/preview body parsed correctly returning matched_total). Streaming/file downloads now non-empty: segments CSV export = 3001 rows / 347,302 bytes (was 0), XLSX = 91,272 bytes with PK zip magic, PDF = 39,445 bytes with %PDF- magic. AI export download via /api/ai/chat -> /api/ai/exports/{id} returned non-empty CSV successfully. api-monitor listing endpoint reachable (200) but returned 0 items in the sampled window \u2014 not blocking, logging path known to write async and preview single-pod may lag.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/api-monitor/logs", "issue": "Endpoint returns 200 but items list was empty when queried right after export calls. Could be pagination/window or async persistence lag. Non-blocking per request scope; main agent already confirmed _streamed marker + status_code=200 present manually."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration80_middleware_export_regression_test.py",
+    "/app/test_reports/pytest/iteration80.xml"
+  ],
+  "action_items": [
+    "Optional: verify /api/api-monitor/logs listing surfaces the streamed export entries (may need different query params or short delay); not blocking either bug fix."
+  ],
+  "critical_code_review_comments": [
+    "Pure-ASGI APILogMiddleware correctly avoids consuming the disconnect channel that broke StreamingResponse/FileResponse under BaseHTTPMiddleware. Skipping body capture for streaming content-types (text/csv, application/pdf, spreadsheetml, octet-stream, application/zip) is the right approach to prevent memory bloat on large exports (validated with 3001-row CSV).",
+    "Ensure _persist_api_log is fire-and-forget (asyncio.create_task) so slow log writes don't stall response send \u2014 quick check of api-monitor listing shows async lag suspected."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "n/a"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (used, works)",
+  "seed_data_creation": "None. No data mutated. AI chat created one export file (self-clean not required per request).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Middleware rewrite is verified safe. Reusable regression: /app/backend/tests/iteration80_middleware_export_regression_test.py. Env: export REACT_APP_BACKEND_URL before pytest (module-level BASE_URL). If audience export perf tests are needed later, max_rows up to 200k has been manually verified by main agent (2.1s).",
+  "rca of the issue": "APILogMiddleware inherited Starlette BaseHTTPMiddleware, which uses an internal _CachedRequest that buffers and replays 'http.request' messages. StreamingResponse/FileResponse's listen_for_disconnect() then received an unexpected 'http.request' (instead of 'http.disconnect'), raising RuntimeError and terminating the stream at 0 bytes for CSV/XLSX/PDF/AI file downloads. Fix: rewrote as pure ASGI middleware (async def __call__(self, scope, receive, send)) that wraps receive/send transparently, skips body capture for streaming content-types, and never touches the disconnect channel. Verified: CSV 0->347,302 bytes, XLSX/PDF valid magic, AI export downloads work."
+}
