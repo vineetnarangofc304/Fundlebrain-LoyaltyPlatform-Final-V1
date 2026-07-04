@@ -47,7 +47,7 @@ function SendSmsPanel({ total, params }) {
     setPreview(null);
     setJob(null);
     try {
-      const r = await api.get("/communications/templates", { params: { channel: "sms" } });
+      const r = await api.get("/templates", { params: { channel: "sms" } });
       const active = (r.data.rows || []).filter((t) => t.status === "active");
       setTemplates(active);
       setTemplateId(active[0]?.id || "");

@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 
 from auth import get_current_user
