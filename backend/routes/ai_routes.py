@@ -9,12 +9,13 @@ import json
 import csv
 import io
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, AsyncIterator
 
 import litellm
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Response
 from emergentintegrations.llm.utils import get_app_identifier, get_integration_proxy_url
 
 from database import db, ai_chats_col
@@ -213,7 +214,10 @@ async def _run_tool_loop(messages: List[Dict[str, Any]], model: str, provider: s
 # ---------------- CSV export download ----------------
 @router.get("/exports/{export_id}")
 async def download_export(export_id: str, user: dict = Depends(get_current_user)):
-    """Download a CSV produced by the Fundle Brain `export_csv` tool."""
+    """Download a CSV produced by the Fundle Brain `export_csv` tool.
+
+    Prefers object storage (pod-agnostic — works on multi-replica production); falls back
+    to the pod-local disk for legacy exports created before the object-storage migration."""
     doc = await db["ai_exports"].find_one({"id": export_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Export not found")
@@ -223,10 +227,21 @@ async def download_export(export_id: str, user: dict = Depends(get_current_user)
             "detail": "Export is still being generated — retry in a few seconds."})
     if doc.get("status") == "failed":
         raise HTTPException(500, f"Export failed: {doc.get('error', 'unknown error')}")
+    fname = doc.get("filename", "export.csv")
+    storage_path = doc.get("storage_path")
+    if storage_path:
+        from routes.exports_routes import _get_object
+        try:
+            content, _ctype = await asyncio.to_thread(_get_object, storage_path)
+        except Exception:
+            raise HTTPException(410, "Export file no longer available — ask Fundle Brain to regenerate it")
+        return Response(content=content, media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    # Legacy: file written to pod-local disk before the object-storage migration.
     path = os.path.join(EXPORT_DIR, f"{export_id}.csv")
     if not os.path.exists(path):
         raise HTTPException(410, "Export file no longer available — ask Fundle Brain to regenerate it")
-    return FileResponse(path, media_type="text/csv", filename=doc.get("filename", "export.csv"))
+    return FileResponse(path, media_type="text/csv", filename=fname)
 
 
 # ---------------- Session listing ----------------

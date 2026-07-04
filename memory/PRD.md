@@ -32,7 +32,13 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
-### Iteration 88 (Jul 3, 2026) — 🔴🔴 P0 FIX (production, recurring): Recon jobs "Stalled — no progress for over 8 min" (uploading / stitching / parsing)
+### Iteration 89 (Jul 3, 2026) — 🔴🔴 P0 FIX (production, multi-pod): Fundle Brain export "Download failed" — AI exports moved to object storage
+After the iteration-87 middleware fix was deployed, segments exports worked but the **Fundle Brain `export_csv` download still failed on production** (June birthday/anniversary CSVs). Root cause (as predicted): `export_csv` wrote the CSV to **pod-local disk** (`/app/backend/exports/ai`); on multi-replica production the download GET hit a DIFFERENT pod → file missing → 410 "Download failed". (Segments export streams from Mongo, so it was pod-agnostic and unaffected.)
+- **Fix:** `_run_export_job` (`ai_data_expert.py`) now streams to a temp file, then uploads to **Emergent object storage** (`kazo-loyalty/ai_exports/{id}.csv`, reusing `exports_routes._put_object`) and stores `storage_path` on the `ai_exports` doc. `download_export` (`ai_routes.py`) now fetches from object storage via `_get_object` and returns a `Response` (with a legacy pod-local-disk fallback for pre-migration exports). Added `import asyncio` + `Response` to `ai_routes.py`.
+- **Verified (preview):** export → `status=ready` + `storage_path` set; HTTP download → 200, 151 rows, valid CSV `text/csv`; segments export regression still 200/1001 rows; backend healthy. ⚠️ **Redeploy required.**
+- **Why this + iter 87 together fully fix exports on multi-pod prod:** segments/recon exports stream from Mongo (pod-agnostic) + pure-ASGI middleware (streaming no longer truncated); AI exports now object storage (pod-agnostic) + same middleware.
+
+
 Read the LIVE production recon jobs (read-only) and found ALL failures were the stale-job watchdog killing jobs. Three distinct causes across phases:
 - **`uploading` (biggest cause):** `POST /api/recon/chunk` only did `$inc chunks_uploaded` and **never refreshed `heartbeat`**. A large historical CSV uploads for longer than `STALE_RECON_MINUTES=8`, so the watchdog marked it "Stalled" *mid-upload* and the next chunk 400'd. **Fix:** chunk endpoint now sets `heartbeat` on every chunk. Verified: heartbeat advances per chunk (…45→…47→…48) and the full chunked upload → done.
 - **`stitching`:** the chunk-staging loop (`_run_recon_job`) set phase once and emitted no heartbeat while writing many chunks to the temp file. **Fix:** heartbeat every 25 chunks; XLSX decode now uses the heartbeat pump (`_parse_with_heartbeat(..., phase="stitching")`, generalized to take a `phase`).

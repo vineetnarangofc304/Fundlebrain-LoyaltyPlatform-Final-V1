@@ -16,6 +16,7 @@ import csv as _csvmod
 import json
 import logging
 import os
+import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -258,15 +259,18 @@ def _csv_cell(v: Any) -> Any:
 
 async def _run_export_job(export_id: str, collection: str,
                           pipeline: List[Dict[str, Any]], max_rows: int) -> None:
-    """Background: stream aggregation results into a CSV file on disk."""
-    path = os.path.join(EXPORT_DIR, f"{export_id}.csv")
+    """Background: stream aggregation results to a temp CSV, then upload it to Emergent
+    object storage so ANY pod can serve the download. Local disk is per-pod, so on a
+    multi-replica production deployment the download often hit a DIFFERENT pod than the one
+    that wrote the file → "Download failed". Object storage is pod-agnostic."""
+    fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"aiexp_{export_id}_")
     try:
         cursor = db[collection].aggregate(
             pipeline, allowDiskUse=True, maxTimeMS=300000, batchSize=2000)
         cols: List[str] = []
         buf: List[Dict[str, Any]] = []
         n = 0
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8-sig") as f:
             writer: Optional[_csvmod.DictWriter] = None
 
             def _flush_buf():
@@ -297,15 +301,28 @@ async def _run_export_job(export_id: str, collection: str,
                     break
             if writer is None:
                 _flush_buf()
+
+        # Upload the finished CSV to object storage (pod-agnostic download).
+        from routes.exports_routes import _put_object, APP_NAME
+        with open(tmp_path, "rb") as rf:
+            data = rf.read()
+        storage_path = f"{APP_NAME}/ai_exports/{export_id}.csv"
+        await asyncio.to_thread(_put_object, storage_path, data, "text/csv")
+
         await db["ai_exports"].update_one({"id": export_id}, {"$set": {
             "status": "ready", "row_count": n, "columns": cols,
-            "size_bytes": os.path.getsize(path),
+            "size_bytes": len(data), "storage_path": storage_path,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }})
     except Exception as e:
         logger.warning(f"export {export_id} failed: {e}")
         await db["ai_exports"].update_one({"id": export_id}, {"$set": {
             "status": "failed", "error": str(e)[:300]}})
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 async def export_csv(collection: str = "", pipeline: Any = None,
