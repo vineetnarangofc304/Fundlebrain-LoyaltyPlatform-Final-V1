@@ -58,6 +58,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "legacy_fraud_report":            {"label": "Fraud Report",            "path": "/legacy-reports/fraud-report",             "filename": "fraud_report"},
     "legacy_missed_calls":            {"label": "Missed Calls",            "path": "/legacy-reports/missed-calls",             "filename": "missed_calls"},
     "legacy_location_wise_customers": {"label": "Location Wise Customers",  "path": "/legacy-reports/location-wise-customers", "filename": "location_wise_customers"},
+    "legacy_occasions":               {"label": "Birthdays & Anniversaries", "path": "/legacy-reports/occasions",             "filename": "occasions"},
 }
 
 # ── object storage (sync requests wrapped in threads) ─────────────────────────

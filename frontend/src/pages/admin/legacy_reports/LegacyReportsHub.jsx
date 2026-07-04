@@ -5,7 +5,7 @@ import { PageHeader } from "../_shared";
 import {
   Users, Receipt, RefreshCw, TrendingUp, Activity, AlertTriangle, FileClock,
   MessageCircle, PhoneIncoming, MapPin, Clock, Ticket, BarChart3, Coins,
-  Send, Megaphone, MessageSquare, Radio,
+  Send, Megaphone, MessageSquare, Radio, Cake,
 } from "lucide-react";
 
 const SECTIONS = [
@@ -53,6 +53,8 @@ const SECTIONS = [
         desc: "Points expiring within N days — per customer with earliest expiry" },
       { to: "/admin/legacy-reports/active-coupons", icon: Ticket, label: "Active Coupon Report",
         desc: "Currently-issued unused coupons — code / customer / expiry filter" },
+      { to: "/admin/legacy-reports/occasions", icon: Cake, label: "Birthdays & Anniversaries",
+        desc: "Monthly birthday / anniversary list — mobile, name, points, last txn (month + year)" },
     ],
   },
   {

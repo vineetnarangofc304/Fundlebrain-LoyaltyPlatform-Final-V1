@@ -98,6 +98,7 @@ import LRMissedCalls from "@/pages/admin/legacy_reports/MissedCalls";
 import LRLocationWise from "@/pages/admin/legacy_reports/LocationWiseCustomers";
 import LRExpiryPoints from "@/pages/admin/legacy_reports/ExpiryPoints";
 import LRActiveCoupons from "@/pages/admin/legacy_reports/ActiveCoupons";
+import LROccasions from "@/pages/admin/legacy_reports/Occasions";
 import StoreOps from "@/pages/store/StoreOps";
 import DemoLanding from "@/pages/public/DemoLanding";
 
@@ -226,6 +227,7 @@ function App() {
             <Route path="legacy-reports/location-wise-customers" element={<ProtectedRoute><LRLocationWise /></ProtectedRoute>} />
             <Route path="legacy-reports/expiry-points" element={<ProtectedRoute><LRExpiryPoints /></ProtectedRoute>} />
             <Route path="legacy-reports/active-coupons" element={<ProtectedRoute><LRActiveCoupons /></ProtectedRoute>} />
+            <Route path="legacy-reports/occasions" element={<ProtectedRoute><LROccasions /></ProtectedRoute>} />
             <Route path="reports/shopper-bills" element={<ProtectedRoute><ShopperBillReport /></ProtectedRoute>} />
             <Route path="reports/store-kpi" element={<ProtectedRoute><StoreKPIReport /></ProtectedRoute>} />
             <Route path="reports/crm-customers" element={<ProtectedRoute><CRMCustomerReport /></ProtectedRoute>} />

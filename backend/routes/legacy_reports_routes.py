@@ -26,6 +26,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import pymongo
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -576,3 +577,77 @@ async def active_coupons_report(
                 "valid_from", "valid_to", "uses_count", "max_uses", "created_at"]
         return _to_csv(rows, cols)
     return {"total": total, "rows": rows}
+
+
+
+# ============================================================
+# 13) Birthdays & Anniversaries — monthly occasion list
+# ============================================================
+@router.get("/occasions")
+async def occasions_report(
+    type: str = "birthday",              # birthday | anniversary
+    month: int = Query(..., ge=1, le=12),
+    year: Optional[str] = None,           # "all"/blank = any year, else a 4-digit year
+    q: Optional[str] = None,
+    tier: Optional[str] = None,
+    sort: str = "points_balance",         # points_balance | last_visit_at | lifetime_spend | name
+    dir: str = "desc",
+    limit: int = Query(100, le=1000),
+    offset: int = 0,
+    export: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """Customers whose birthday / anniversary falls in a given month (optionally a given
+    year). `birthday`/`anniversary` are stored as ISO 'YYYY-MM-DD' strings, so a month
+    match is a substring on '-MM-' (or an anchored '^YYYY-MM-' when a year is chosen).
+    Wrapped in pymongo.timeout so the full-collection scan survives the aggressive prod
+    client timeoutMS (getMores would otherwise be killed → 'operation exceeded time limit')."""
+    field = "anniversary" if type == "anniversary" else "birthday"
+    mm = f"{int(month):02d}"
+    y = (str(year).strip() if year else "")
+    pattern = f"^{y}-{mm}-" if y and y.lower() != "all" else f"-{mm}-"
+
+    fil: Dict[str, Any] = {field: {"$regex": pattern}}
+    if tier:
+        fil["tier"] = tier
+    if q:
+        digits = "".join(ch for ch in q if ch.isdigit())
+        if digits and len(digits) >= 4:
+            fil["mobile"] = {"$regex": digits}
+        else:
+            fil["$or"] = [
+                {"mobile": {"$regex": q, "$options": "i"}},
+                {"name": {"$regex": q, "$options": "i"}},
+            ]
+
+    sort_field = {"points_balance": "points_balance", "last_visit_at": "last_visit_at",
+                  "lifetime_spend": "lifetime_spend", "name": "name"}.get(sort, "points_balance")
+    sort_dir = 1 if str(dir).lower() == "asc" else -1
+    if export == "csv":
+        limit = 20000
+
+    proj = {"_id": 0, "mobile": 1, "name": 1, "points_balance": 1, "last_visit_at": 1,
+            "lifetime_spend": 1, "tier": 1, "birthday": 1, "anniversary": 1,
+            "visit_count": 1, "city": 1, "home_store_id": 1}
+    pipeline = [
+        {"$match": fil},
+        {"$sort": {sort_field: sort_dir}},
+        {"$facet": {
+            "rows": [{"$skip": offset}, {"$limit": limit}, {"$project": proj}],
+            "total": [{"$count": "n"}],
+        }},
+    ]
+    with pymongo.timeout(120):
+        res = await customers_col.aggregate(pipeline, allowDiskUse=True).to_list(1)
+    facet = res[0] if res else {}
+    rows = facet.get("rows", []) or []
+    total = (facet.get("total") or [{}])[0].get("n", 0) if facet.get("total") else 0
+    for r in rows:
+        r["occasion_date"] = r.get(field)
+
+    if export == "csv":
+        cols = ["mobile", "name", "occasion_date", "points_balance", "last_visit_at",
+                "lifetime_spend", "tier", "visit_count", "city", "home_store_id"]
+        return _to_csv(rows, cols)
+    return {"total": total, "rows": rows, "offset": offset, "limit": limit,
+            "occasion": field, "month": month, "year": y or "all"}
