@@ -305,16 +305,18 @@ def build_context_block(att: Dict[str, Any]) -> str:
                 f"--- TEXT START ---\n{(att.get('extracted_text') or '')[:8000]}\n--- TEXT END ---")
     cols = att.get("columns") or []
     mp = att.get("mobile_points") or []
-    pts_line = ""
     if mp:
-        pts_line = (f"This file has a PER-ROW points column: {len(mp)} (mobile -> points) rows detected, "
-                    f"{att.get('points_total')} points total"
-                    + (f", {att.get('dup_mobiles')} duplicate mobiles summed" if att.get('dup_mobiles') else "")
-                    + f". To credit EACH mobile ITS OWN amount, call credit_points_from_file with "
-                      f"attachment_id='{att['id']}'. (Use apply_to_uploaded_report only if the user wants the "
-                      f"SAME amount for everyone.)\n")
+        # PER-ROW points file: deliberately DO NOT dump the rows here. If the model can see the
+        # data it tends to fabricate a fake "credited" summary instead of calling the tool. With
+        # no rows in context, the ONLY way to act is the tool (which resolves customers + balances).
+        return (f"{head} {att.get('row_count')} rows, columns: {cols}. This file has a PER-ROW points "
+                f"column: {len(mp)} (mobile -> points) rows, {att.get('points_total')} points total"
+                + (f", {att.get('dup_mobiles')} duplicate mobiles summed" if att.get('dup_mobiles') else "")
+                + f". The per-row amounts are NOT shown here — to credit each mobile ITS OWN amount you MUST "
+                  f"call credit_points_from_file with attachment_id='{att['id']}' (confirm=false to preview "
+                  f"first). Do NOT claim anything was credited until that tool returns. (Use "
+                  f"apply_to_uploaded_report only if the user wants the SAME amount for everyone.)")
     return (f"{head} {att.get('row_count')} rows, columns: {cols}. "
             f"{len(att.get('mobiles') or [])} mobile numbers detected. "
-            f"{pts_line}"
             f"For a bulk action with the SAME value on every customer, call apply_to_uploaded_report with attachment_id='{att['id']}'.\n"
             f"First rows (preview):\n{_json.dumps(att.get('preview') or [], default=str)[:9000]}")

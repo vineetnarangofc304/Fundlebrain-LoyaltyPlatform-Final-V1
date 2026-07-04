@@ -76,7 +76,8 @@ ON TOP of reads, you have an ACTION layer that WRITES to the live database:
 - retier_customers — re-map customers onto the CONFIGURED slabs by spend (no bonus points)
 - set_customer_tier — set a SPECIFIC tier/slab value (even a legacy/custom one like "kazo insider") on ONE customer OR a FILTERED set (e.g. all customers with lifetime_spend = 0). USE THIS whenever the user names a target slab to set rather than a spend-based re-map.
 - apply_to_uploaded_report — bulk action on every customer in an uploaded CSV/Excel/PDF (SAME value for all)
-- credit_points_from_file — credit a DIFFERENT (per-row) amount to each mobile from an uploaded CSV/XLSX that has a mobile column AND a points column (e.g. 'MOBILE' + 'Points to be Credit'). Adds each row's exact points as a bonus. Use THIS for per-mobile amounts; use apply_to_uploaded_report only when everyone gets the SAME amount.
+- credit_points_from_file — credit a DIFFERENT (per-row) amount to each mobile from an uploaded CSV/XLSX that has a mobile column AND a points column (e.g. 'MOBILE' + 'Points to be Credit'). Adds each row's exact points as a bonus. Use THIS for per-mobile amounts; use apply_to_uploaded_report only when everyone gets the SAME amount. For a LARGE file it runs as a BACKGROUND job (returns a job_id, status 'queued') so it NEVER times out — tell the user it's processing and use credit_job_status to report progress. When the job completes, credit_job_status returns an audit_id you can pass to undo_action.
+- credit_job_status — READ: check a background credit/undo job's status (queued/running/completed), counts, and audit_id.
 - undo_action — REVERSE a prior action by its audit_id (from master_action_log)
 - fix_double_redemptions — REPAIR customers double-charged by the old redemption bug: credits back the duplicate point deduction (where the bill deducted points a 2nd time after the OTP redemption), corrects lifetime_points_redeemed, and voids the duplicate ledger rows. Pass a single `mobile` to fix/test one, or omit it to fix everyone affected.
 - send_campaign / list_campaigns / cancel_campaign — Karix BULK SMS campaigns
@@ -492,7 +493,7 @@ async def require_query_viewer(user: dict = Depends(get_current_user)) -> dict:
 
 _SUGGEST_RE = re.compile(r"```suggested-actions\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 # Read-only tools are never offered as an "Execute" button.
-_NON_EXECUTABLE = {"master_action_log", "list_campaigns"}
+_NON_EXECUTABLE = {"master_action_log", "list_campaigns", "credit_job_status"}
 
 
 def _extract_suggested_actions(reply: str) -> tuple[str, List[Dict[str, Any]]]:
@@ -735,6 +736,26 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
             f"`{fa.get('tool')}` with these arguments in PREVIEW mode now (confirm=false): "
             f"{json.dumps(fa.get('args') or {}, default=str)}. Present the preview as a Markdown "
             f"table, then ask the user to confirm and provide a reason before you apply it.")})
+
+    # Deterministic nudge: an uploaded file with a PER-ROW points column + a credit/add intent
+    # MUST always go through the credit_points_from_file tool (never a narrated fake summary —
+    # the model tends to "read" the rows from context and claim it credited them without calling
+    # the tool). This forces the real preview tool call, exactly like the Execute path above.
+    if not fa and not _looks_like_confirmation(req.message or ""):
+        points_att = next((a for a in attachments if a.get("mobile_points")), None) \
+            or (latest if (latest and latest.get("mobile_points")) else None)
+        if points_att and _has_action_intent(req.message or ""):
+            history.append({"role": "system", "content": (
+                f"The user wants to CREDIT the per-row points from their uploaded file "
+                f"'{points_att.get('filename')}' (attachment_id={points_att['id']}, "
+                f"{len(points_att.get('mobile_points') or [])} mobile->points rows). You MUST call the "
+                f"`credit_points_from_file` tool with attachment_id='{points_att['id']}' and confirm=false "
+                f"RIGHT NOW to generate the preview from the tool. Do NOT write any summary, table, or claim "
+                f"that anything was credited before the tool returns — you have NO other way to credit points "
+                f"and you have NOT credited anything until the tool result comes back. After the preview, ask "
+                f"the user to confirm and give a reason; only then call it again with confirm=true + reason. "
+                f"For a large file the tool returns a background job_id (status 'queued') — report that and "
+                f"use credit_job_status to check progress.")})
 
     # expose the session to action tools (server-side fallback for uploaded reports)
     user["_mb_session"] = session_id

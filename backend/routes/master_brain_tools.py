@@ -14,15 +14,17 @@ Points changes always write a `points_ledger` row (never silent) so they are
 traceable and reversible. Audit entries use action `master_brain.*`.
 """
 import uuid
+import asyncio
 import logging
 import time as _time
+import pymongo
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from pymongo import UpdateOne
 from database import (
     customers_col, points_ledger_col, audit_logs_col, loyalty_config_col,
-    mb_action_snapshots_col, master_campaigns_col,
+    mb_action_snapshots_col, master_campaigns_col, mb_credit_jobs_col,
 )
 
 # Inline apply is bounded to keep the chat request fast; bigger jobs are routed
@@ -554,12 +556,126 @@ async def _tool_apply_to_uploaded_report(attachment_id: str, action: str, points
 
 CAMPAIGN_CAP = 50000
 
+# Per-row credit / large undo processing tuning. Heavy multi-thousand-row writes are
+# run in a BACKGROUND task (decoupled from the 46s chat request) using batched bulk_write,
+# each batch wrapped in pymongo.timeout() so it OVERRIDES the aggressive prod client
+# timeoutMS (~10s) — otherwise the shard connection times out mid-run (the reported bug).
+CREDIT_JOB_DB_DEADLINE = 600
+CREDIT_BATCH = 1000
+CREDIT_INLINE_THRESHOLD = 300   # <= this many rows → do it inline (instant result); else background
+
+
+def _last10(v: Any) -> str:
+    d = "".join(ch for ch in str(v or "") if ch.isdigit())
+    return d[-10:] if len(d) >= 10 else d
+
+
+async def _bulk_find_customers(mobiles: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Resolve many 10-digit mobiles to customer docs in a FEW batched `$in` queries
+    (not one find per mobile). Returns {last10 -> customer}. Matches the several stored
+    mobile formats (str/int, with/without 91 prefix)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    uniq = list(dict.fromkeys(m for m in mobiles if m))
+    proj = {"_id": 0, "id": 1, "mobile": 1, "name": 1,
+            "points_balance": 1, "lifetime_points_earned": 1}
+    for i in range(0, len(uniq), 800):
+        chunk = uniq[i:i + 800]
+        cands: List[Any] = []
+        for m in chunk:
+            cands.append(m)
+            cands.append("91" + m)
+            try:
+                cands.append(int(m))
+                cands.append(int("91" + m))
+            except Exception:
+                pass
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            async for c in customers_col.find({"mobile": {"$in": cands}}, proj):
+                k = _last10(c.get("mobile"))
+                if k and k not in out:
+                    out[k] = c
+    return out
+
+
+async def _credit_pairs(pairs, reason, user, job_id=None):
+    """Core crediting engine (shared by inline + background). Efficient: batched find +
+    bulk_write + insert_many. Returns a result dict; writes audit + snapshot for undo."""
+    email = user.get("email")
+    cust_map = await _bulk_find_customers([p["mobile"] for p in pairs])
+    matched = changed = not_found = skipped_zero = 0
+    total_credited = 0
+    upd_ops: List[Any] = []
+    ledger_docs: List[Dict[str, Any]] = []
+    changes: List[Dict[str, Any]] = []
+    for p in pairs:
+        pts = int(p.get("points") or 0)
+        if pts == 0:
+            skipped_zero += 1
+            continue
+        cust = cust_map.get(_last10(p["mobile"]))
+        if not cust:
+            not_found += 1
+            continue
+        matched += 1
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        lt_before = int(cust.get("lifetime_points_earned") or 0)
+        upd_ops.append(UpdateOne({"id": cid}, {"$inc": {"points_balance": pts,
+                                                        "lifetime_points_earned": pts}}))
+        ledger_docs.append({"id": str(uuid.uuid4()), "customer_mobile": cust.get("mobile"),
+                            "points": pts, "type": "bonus", "kind": "bonus",
+                            "reference_type": "master_brain", "reason": reason,
+                            "created_at": _now_iso(), "created_by": email, "via": "master_brain"})
+        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
+                        "points_before": cur, "points_after": cur + pts,
+                        "lifetime_before": lt_before, "lifetime_after": lt_before + pts})
+        changed += 1
+        total_credited += pts
+
+    done = 0
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+        done += len(upd_ops[i:i + CREDIT_BATCH])
+        if job_id:
+            await mb_credit_jobs_col.update_one({"id": job_id},
+                {"$set": {"processed": done, "changed": changed}})
+    for i in range(0, len(ledger_docs), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+
+    audit_id = await _log_master(user, "upload_credit_points", "customers", job_id or "inline", reason,
+                                 {"rows": len(pairs), "matched": matched, "changed": changed,
+                                  "not_found": not_found, "skipped_zero": skipped_zero,
+                                  "total_points_credited": total_credited})
+    await _record_snapshot(audit_id, "upload_credit_points", changes)
+    return {"audit_id": audit_id, "matched": matched, "changed": changed,
+            "not_found": not_found, "skipped_zero": skipped_zero,
+            "total_points_credited": total_credited}
+
+
+async def _run_credit_job(job_id: str, pairs: List[Dict[str, Any]], reason: str,
+                          user: Dict[str, Any]) -> None:
+    """Background worker: credits per-row points to thousands of customers without
+    blocking (or timing out) the chat request."""
+    try:
+        await mb_credit_jobs_col.update_one({"id": job_id},
+            {"$set": {"status": "running", "started_at": _now_iso()}})
+        r = await _credit_pairs(pairs, reason, user, job_id=job_id)
+        await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "completed", "completed_at": _now_iso(), **r}})
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"credit job {job_id} failed")
+        await mb_credit_jobs_col.update_one({"id": job_id},
+            {"$set": {"status": "failed", "error": str(e), "completed_at": _now_iso()}})
+
 
 async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "",
                                         confirm: bool = False, user=None) -> Dict[str, Any]:
     """Credit a DIFFERENT (per-row) number of points to each mobile listed in an uploaded
     CSV/XLSX that has a mobile column AND a points column. Points are added as BONUS
-    (points_balance + lifetime_points_earned); tier is spend-based so it is unaffected."""
+    (points_balance + lifetime_points_earned); tier is spend-based so it is unaffected.
+    Large files (> a few hundred rows) run in a BACKGROUND job so the chat never times out."""
     err = _require_master(user)
     if err:
         return err
@@ -585,9 +701,10 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
             "rows": len(pairs), "total_points": total_points, "awards_bonus": True,
             "dup_mobiles": att.get("dup_mobiles") or 0}
     if not confirm:
+        sample_map = await _bulk_find_customers([p["mobile"] for p in pairs[:8]])
         sample = []
         for p in pairs[:8]:
-            c = await _find_customer(p["mobile"])
+            c = sample_map.get(_last10(p["mobile"]))
             sample.append({"mobile": p["mobile"], "points_to_add": int(p.get("points") or 0),
                            "found": bool(c), "name": (c or {}).get("name"),
                            "balance_before": (c or {}).get("points_balance")})
@@ -600,43 +717,57 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
     if rerr:
         return rerr
     if len(pairs) > INLINE_CAP:
-        return {"error": f"{len(pairs)} rows exceeds the inline cap ({INLINE_CAP}). Split the file and run it in parts."}
+        return {"error": f"{len(pairs)} rows exceeds the cap ({INLINE_CAP}). Split the file and run it in parts."}
 
-    matched = changed = not_found = skipped_zero = 0
-    total_credited = 0
-    changes: List[Dict[str, Any]] = []
-    for p in pairs:
-        pts = int(p.get("points") or 0)
-        if pts == 0:
-            skipped_zero += 1
-            continue
-        cust = await _find_customer(p["mobile"])
-        if not cust:
-            not_found += 1
-            continue
-        matched += 1
-        cid = cust["id"]
-        cur = int(cust.get("points_balance") or 0)
-        lt_before = int(cust.get("lifetime_points_earned") or 0)
-        await customers_col.update_one({"id": cid}, {"$inc": {"points_balance": pts,
-                                                              "lifetime_points_earned": pts}})
-        await _ledger(cust.get("mobile"), pts, "bonus", reason, user)
-        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
-                        "points_before": cur, "points_after": cur + pts,
-                        "lifetime_before": lt_before, "lifetime_after": lt_before + pts})
-        changed += 1
-        total_credited += pts
-    audit_id = await _log_master(user, "upload_credit_points", "customers", att["id"], reason,
-                                 {"file": att.get("filename"), "rows": len(pairs),
-                                  "matched": matched, "changed": changed, "not_found": not_found,
-                                  "skipped_zero": skipped_zero, "total_points_credited": total_credited})
-    await _record_snapshot(audit_id, "upload_credit_points", changes)
-    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
-            "matched_customers": matched, "changed": changed, "not_found": not_found,
-            "skipped_zero": skipped_zero, "total_points_credited": total_credited,
-            "message": f"Credited points from '{att.get('filename')}': {changed} customers credited "
-                       f"{total_credited} points total ({matched} matched, {not_found} not found"
-                       + (f", {skipped_zero} zero-value rows skipped" if skipped_zero else "") + ")."}
+    # Small file → run inline (efficient batched) and return the applied result immediately.
+    if len(pairs) <= CREDIT_INLINE_THRESHOLD:
+        r = await _credit_pairs(pairs, reason, user)
+        return {"ok": True, "applied": True, **plan, "audit_id": r["audit_id"],
+                "matched_customers": r["matched"], "changed": r["changed"],
+                "not_found": r["not_found"], "skipped_zero": r["skipped_zero"],
+                "total_points_credited": r["total_points_credited"],
+                "message": f"Credited points from '{att.get('filename')}': {r['changed']} customers credited "
+                           f"{r['total_points_credited']} points total ({r['matched']} matched, "
+                           f"{r['not_found']} not found"
+                           + (f", {r['skipped_zero']} zero-value rows skipped" if r['skipped_zero'] else "") + ")."}
+
+    # Large file → BACKGROUND job (never blocks / times out the chat).
+    job_id = uuid.uuid4().hex
+    await mb_credit_jobs_col.insert_one({
+        "id": job_id, "kind": "credit", "file": att.get("filename"), "rows": len(pairs),
+        "total_points": total_points, "status": "queued", "processed": 0, "changed": 0,
+        "reason": reason, "queued_at": _now_iso(), "queued_by": user.get("email"),
+        "user_id": user.get("id"),
+    })
+    u_min = {"id": user.get("id"), "email": user.get("email"), "name": user.get("name"),
+             "is_master_admin": True}
+    asyncio.create_task(_run_credit_job(job_id, pairs, reason, u_min))
+    return {"ok": True, "queued": True, "job_id": job_id, **plan, "status": "queued",
+            "message": (f"Queued crediting **{len(pairs)} customers** ({total_points} points total) from "
+                        f"'{att.get('filename')}' in the BACKGROUND — this runs safely in batches and will "
+                        f"NOT time out. Tell the user it's processing and they can ask "
+                        f"\"status of the credit job\" (or you call credit_job_status with job_id='{job_id}') "
+                        f"to see progress; when complete you'll have an audit_id to undo it if needed.")}
+
+
+async def _tool_credit_job_status(job_id: str = "", user=None) -> Dict[str, Any]:
+    """READ. Check the progress/result of a background points-credit (or large-undo) job."""
+    err = _require_master(user)
+    if err:
+        return err
+    if job_id:
+        j = await mb_credit_jobs_col.find_one({"id": job_id}, {"_id": 0})
+    else:
+        j = await mb_credit_jobs_col.find_one(
+            {"user_id": user.get("id")}, {"_id": 0}, sort=[("queued_at", -1)])
+    if not j:
+        return {"error": "No background credit/undo job found for this account."}
+    return {"job_id": j["id"], "kind": j.get("kind", "credit"), "file": j.get("file"),
+            "status": j.get("status"), "rows": j.get("rows"), "processed": j.get("processed"),
+            "changed": j.get("changed"), "matched": j.get("matched"),
+            "not_found": j.get("not_found"), "skipped_zero": j.get("skipped_zero"),
+            "total_points_credited": j.get("total_points_credited"),
+            "audit_id": j.get("audit_id"), "error": j.get("error")}
 
 
 async def _record_snapshot(audit_id: str, action: str, changes: List[Dict[str, Any]]) -> None:
@@ -659,26 +790,76 @@ def _camp_params(c: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 # ============================================================
 # 7) UNDO a previous Master Brain action (reverse via snapshot)
 # ============================================================
-async def _apply_undo_change(ch: Dict[str, Any], action: str, reason: str, user: Dict[str, Any]) -> None:
-    cid = ch.get("cust_id")
-    if cid:
-        q: Dict[str, Any] = {"id": cid}
-    else:
-        strs, ints = _mobile_candidates(ch.get("mobile"))
-        q = {"mobile": {"$in": strs + ints}}
-    if ch.get("points_before") is not None:
-        before = int(ch.get("points_before") or 0)
-        after = int(ch.get("points_after") or 0)
-        delta = before - after  # inverse of the original change
-        inc: Dict[str, Any] = {"points_balance": delta}
-        if ch.get("lifetime_before") is not None:
-            inc["lifetime_points_earned"] = int(ch.get("lifetime_before") or 0) - int(ch.get("lifetime_after") or 0)
-        await customers_col.update_one(q, {"$inc": inc})
-        if ch.get("mobile"):
-            await _ledger(ch.get("mobile"), delta, "adjust", f"UNDO {action} — {reason}", user)
-    if "tier_before" in ch:
-        await customers_col.update_one(q, {"$set": {"tier": ch.get("tier_before"),
-                                                    "tier_updated_at": _now_iso()}})
+async def _reverse_changes_bulk(changes: List[Dict[str, Any]], action: str, reason: str,
+                                user: Dict[str, Any], job_id: str = None) -> int:
+    """Reverse a snapshot's changes efficiently: batched bulk_write ($inc points back /
+    $set prior tier) + insert_many compensating ledger. Each batch is wrapped in
+    pymongo.timeout so it survives the aggressive prod client timeoutMS."""
+    email = user.get("email")
+    upd_ops: List[Any] = []
+    ledger_docs: List[Dict[str, Any]] = []
+    for ch in changes:
+        cid = ch.get("cust_id")
+        if cid:
+            q: Dict[str, Any] = {"id": cid}
+        else:
+            strs, ints = _mobile_candidates(ch.get("mobile"))
+            q = {"mobile": {"$in": strs + ints}}
+        upd: Dict[str, Any] = {}
+        if ch.get("points_before") is not None:
+            delta = int(ch.get("points_before") or 0) - int(ch.get("points_after") or 0)
+            inc = {"points_balance": delta}
+            if ch.get("lifetime_before") is not None:
+                inc["lifetime_points_earned"] = int(ch.get("lifetime_before") or 0) - int(ch.get("lifetime_after") or 0)
+            upd["$inc"] = inc
+            if ch.get("mobile") and delta:
+                ledger_docs.append({"id": str(uuid.uuid4()), "customer_mobile": ch.get("mobile"),
+                                    "points": delta, "type": "adjust", "kind": "adjust",
+                                    "reference_type": "master_brain",
+                                    "reason": f"UNDO {action} — {reason}", "created_at": _now_iso(),
+                                    "created_by": email, "via": "master_brain"})
+        if "tier_before" in ch:
+            upd["$set"] = {"tier": ch.get("tier_before"), "tier_updated_at": _now_iso()}
+        if upd:
+            upd_ops.append(UpdateOne(q, upd))
+    done = 0
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+        done += len(upd_ops[i:i + CREDIT_BATCH])
+        if job_id:
+            await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {"processed": done}})
+    for i in range(0, len(ledger_docs), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+    return len(upd_ops)
+
+
+async def _finalize_undo(audit_id: str, act: str, entity: str, reason: str,
+                         reversed_count: int, user: Dict[str, Any]) -> str:
+    new_audit = await _log_master(user, "undo", entity or "customers", audit_id, reason,
+                                  {"undid_action": act, "undid_audit_id": audit_id,
+                                   "changes_reversed": reversed_count})
+    await audit_logs_col.update_one({"id": audit_id}, {"$set": {
+        "undone": True, "undone_at": _now_iso(), "undone_by": user.get("email"),
+        "undo_reason": reason, "undo_audit_id": new_audit}})
+    await mb_action_snapshots_col.update_one({"audit_id": audit_id}, {"$set": {"undone": True}})
+    return new_audit
+
+
+async def _run_undo_job(job_id: str, audit_id: str, changes: List[Dict[str, Any]], act: str,
+                        entity: str, reason: str, user: Dict[str, Any]) -> None:
+    try:
+        await mb_credit_jobs_col.update_one({"id": job_id},
+            {"$set": {"status": "running", "started_at": _now_iso()}})
+        n = await _reverse_changes_bulk(changes, act, reason, user, job_id=job_id)
+        new_audit = await _finalize_undo(audit_id, act, entity, reason, n, user)
+        await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "completed", "completed_at": _now_iso(), "changed": n, "audit_id": new_audit}})
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"undo job {job_id} failed")
+        await mb_credit_jobs_col.update_one({"id": job_id},
+            {"$set": {"status": "failed", "error": str(e), "completed_at": _now_iso()}})
 
 
 async def _tool_undo_action(audit_id: str, reason: str = "", confirm: bool = False, user=None) -> Dict[str, Any]:
@@ -709,19 +890,28 @@ async def _tool_undo_action(audit_id: str, reason: str = "", confirm: bool = Fal
     rerr = _need_reason(reason)
     if rerr:
         return rerr
-    reversed_count = 0
-    for ch in changes:
-        await _apply_undo_change(ch, act, reason, user)
-        reversed_count += 1
-    new_audit = await _log_master(user, "undo", doc.get("entity") or "customers", audit_id, reason,
-                                  {"undid_action": act, "undid_audit_id": audit_id,
-                                   "changes_reversed": reversed_count})
-    await audit_logs_col.update_one({"id": audit_id}, {"$set": {
-        "undone": True, "undone_at": _now_iso(), "undone_by": user.get("email"),
-        "undo_reason": reason, "undo_audit_id": new_audit}})
-    await mb_action_snapshots_col.update_one({"audit_id": audit_id}, {"$set": {"undone": True}})
-    return {"ok": True, "applied": True, "audit_id": new_audit, **plan,
-            "message": f"Undid '{act}' — {reversed_count} change(s) rolled back and logged as an undo."}
+
+    entity = doc.get("entity") or "customers"
+    # Small reversal → inline (batched, fast). Large → background job (never times out).
+    if len(changes) <= CREDIT_INLINE_THRESHOLD:
+        reversed_count = await _reverse_changes_bulk(changes, act, reason, user)
+        new_audit = await _finalize_undo(audit_id, act, entity, reason, reversed_count, user)
+        return {"ok": True, "applied": True, "audit_id": new_audit, **plan,
+                "message": f"Undid '{act}' — {reversed_count} change(s) rolled back and logged as an undo."}
+
+    job_id = uuid.uuid4().hex
+    await mb_credit_jobs_col.insert_one({
+        "id": job_id, "kind": "undo", "file": f"undo:{act}", "rows": len(changes),
+        "status": "queued", "processed": 0, "reason": reason, "queued_at": _now_iso(),
+        "queued_by": user.get("email"), "user_id": user.get("id"), "target_audit_id": audit_id,
+    })
+    u_min = {"id": user.get("id"), "email": user.get("email"), "name": user.get("name"),
+             "is_master_admin": True}
+    asyncio.create_task(_run_undo_job(job_id, audit_id, changes, act, entity, reason, u_min))
+    return {"ok": True, "queued": True, "job_id": job_id, **plan, "status": "queued",
+            "message": (f"Queued undo of **{len(changes)} change(s)** in the BACKGROUND — it runs in batches "
+                        f"and will NOT time out. Tell the user it's processing; they can ask "
+                        f"\"status of the undo job\" (or you call credit_job_status with job_id='{job_id}').")}
 
 
 # ============================================================
@@ -1536,6 +1726,7 @@ MASTER_TOOL_HANDLERS = {
     "master_action_log": _tool_master_action_log,
     "apply_to_uploaded_report": _tool_apply_to_uploaded_report,
     "credit_points_from_file": _tool_credit_points_from_file,
+    "credit_job_status": _tool_credit_job_status,
     "undo_action": _tool_undo_action,
     "send_campaign": _tool_send_campaign,
     "list_campaigns": _tool_list_campaigns,
@@ -1564,5 +1755,13 @@ MASTER_READ_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                         "one customer."),
         "parameters": {"type": "object", "properties": {
             "mobile": {"type": "string", "description": "Optional 10-digit mobile to scope the audit."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "credit_job_status",
+        "description": ("READ. Check the progress/result of a background points-credit or large-undo "
+                        "job by job_id (omit for the latest). Use it when the user asks about the status "
+                        "of a queued credit/undo run."),
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string", "description": "The background job id (omit for the latest)"},
         }}}},
 ]
