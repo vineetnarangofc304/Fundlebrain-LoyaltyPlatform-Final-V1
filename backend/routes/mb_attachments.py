@@ -19,6 +19,7 @@ MAX_IMAGE_BYTES = 8_000_000
 MAX_REPORT_BYTES = 6_000_000
 DATASET_ROW_CAP = 20000  # full rows persisted per report so it becomes a searchable dataset
 MOBILE_HEADER_HINTS = ("mobile", "phone", "msisdn", "contact", "whatsapp", "number")
+POINTS_HEADER_HINTS = ("point", "credit", "pts")
 _MOBILE_RE = re.compile(r"(?<!\d)(\d{10})(?!\d)")
 
 
@@ -39,29 +40,30 @@ def _norm_mobile(v: Any) -> Optional[str]:
     return None
 
 
-def _detect_mobiles(headers: List[str], rows: List[List[Any]]) -> List[str]:
+def _mobile_col_index(headers: List[str], rows: List[List[Any]]) -> Optional[int]:
     if not headers:
-        return []
+        return None
     # 1) header hint
-    col_idx = None
     for i, h in enumerate(headers):
         if any(hint in str(h).lower() for hint in MOBILE_HEADER_HINTS):
-            col_idx = i
-            break
+            return i
     # 2) else the column whose values look most like mobiles
-    if col_idx is None and rows:
+    if rows:
         best, best_score = None, 0.0
-        ncols = len(headers)
-        for i in range(ncols):
+        for i in range(len(headers)):
             vals = [r[i] for r in rows[:200] if i < len(r)]
             if not vals:
                 continue
-            hits = sum(1 for v in vals if _norm_mobile(v))
-            score = hits / max(len(vals), 1)
+            score = sum(1 for v in vals if _norm_mobile(v)) / max(len(vals), 1)
             if score > best_score:
                 best, best_score = i, score
         if best is not None and best_score >= 0.6:
-            col_idx = best
+            return best
+    return None
+
+
+def _detect_mobiles(headers: List[str], rows: List[List[Any]]) -> List[str]:
+    col_idx = _mobile_col_index(headers, rows)
     mobiles: List[str] = []
     if col_idx is not None:
         seen = set()
@@ -72,6 +74,76 @@ def _detect_mobiles(headers: List[str], rows: List[List[Any]]) -> List[str]:
                     seen.add(m)
                     mobiles.append(m)
     return mobiles
+
+
+def _to_int_points(v: Any) -> Optional[int]:
+    s = str(v).strip().replace(",", "")
+    if not s:
+        return None
+    try:
+        f = float(s)
+    except Exception:
+        return None
+    if f != f:  # NaN
+        return None
+    return int(round(f))
+
+
+def _points_col_index(headers: List[str], rows: List[List[Any]], mobile_idx: Optional[int]) -> Optional[int]:
+    if not headers:
+        return None
+    # 1) header hint (never the mobile column)
+    for i, h in enumerate(headers):
+        if i == mobile_idx:
+            continue
+        if any(hint in str(h).lower() for hint in POINTS_HEADER_HINTS):
+            return i
+    # 2) else a numeric column (not mobile) whose values are integer-like
+    if rows:
+        best, best_score = None, 0.0
+        for i in range(len(headers)):
+            if i == mobile_idx:
+                continue
+            vals = [r[i] for r in rows[:200] if i < len(r) and str(r[i]).strip() != ""]
+            if not vals:
+                continue
+            score = sum(1 for v in vals if _to_int_points(v) is not None) / max(len(vals), 1)
+            if score > best_score:
+                best, best_score = i, score
+        if best is not None and best_score >= 0.8:
+            return best
+    return None
+
+
+def _detect_points_pairs(headers: List[str], rows: List[List[Any]]):
+    """Return (mobile_points, dup_count). `mobile_points` is a list of
+    {"mobile": <10-digit>, "points": <int>} read from a per-row points column;
+    duplicate mobiles are SUMMED. Empty list when no points column is present."""
+    if not headers or not rows:
+        return [], 0
+    m_idx = _mobile_col_index(headers, rows)
+    if m_idx is None:
+        return [], 0
+    p_idx = _points_col_index(headers, rows, m_idx)
+    if p_idx is None:
+        return [], 0
+    agg: Dict[str, int] = {}
+    order: List[str] = []
+    dups = 0
+    for r in rows:
+        if m_idx >= len(r) or p_idx >= len(r):
+            continue
+        m = _norm_mobile(r[m_idx])
+        pts = _to_int_points(r[p_idx])
+        if not m or pts is None:
+            continue
+        if m in agg:
+            dups += 1
+            agg[m] += pts
+        else:
+            agg[m] = pts
+            order.append(m)
+    return [{"mobile": m, "points": agg[m]} for m in order], dups
 
 
 def _parse_csv(raw: bytes) -> Dict[str, Any]:
@@ -151,15 +223,20 @@ async def ingest(raw: bytes, filename: str, user: Dict[str, Any],
         parsed = _parse_csv(raw) if ext == "csv" else _parse_xlsx(raw)
         headers, rows = parsed["columns"], parsed["rows"]
         mobiles = _detect_mobiles(headers, rows)
+        mobile_points, dup_mobiles = _detect_points_pairs(headers, rows)
+        points_total = sum(int(p["points"]) for p in mobile_points)
         preview = [dict(zip(headers, [str(c) for c in r])) for r in rows[:30]]
         full_rows = [dict(zip(headers, [str(c) for c in r])) for r in rows[:DATASET_ROW_CAP]]
         doc.update({"kind": "report", "report_type": ext, "columns": headers,
                     "row_count": len(rows), "preview": preview,
                     "rows": full_rows, "rows_truncated": len(rows) > DATASET_ROW_CAP,
-                    "mobiles": mobiles})
+                    "mobiles": mobiles, "mobile_points": mobile_points,
+                    "points_total": points_total, "dup_mobiles": dup_mobiles})
         summary = {"id": doc["id"], "kind": "report", "filename": filename,
                    "columns": headers, "row_count": len(rows),
-                   "mobiles_detected": len(mobiles)}
+                   "mobiles_detected": len(mobiles),
+                   "points_rows_detected": len(mobile_points),
+                   "points_total": points_total}
 
     elif ext == "pdf":
         if len(raw) > MAX_REPORT_BYTES:
@@ -207,9 +284,13 @@ async def latest_session_report(session_id: Optional[str], user: Dict[str, Any])
 def light_report_context(att: Dict[str, Any]) -> str:
     """A small reminder (just the id + shape) so the attachment stays referenceable
     across turns (e.g. preview -> confirm) without resending the whole preview."""
+    mp = att.get("mobile_points") or []
+    pts_hint = (f" It has a PER-ROW points column ({len(mp)} rows, {att.get('points_total')} points total) — "
+                f"to credit each mobile its own amount call credit_points_from_file with attachment_id='{att['id']}'."
+                if mp else "")
     return (f"[An uploaded report is still active for this conversation: '{att.get('filename')}' "
-            f"(attachment_id={att['id']}), {len(att.get('mobiles') or [])} mobiles detected. "
-            f"To take a bulk action on it, call apply_to_uploaded_report with attachment_id='{att['id']}'.]")
+            f"(attachment_id={att['id']}), {len(att.get('mobiles') or [])} mobiles detected.{pts_hint} "
+            f"For a bulk action with the SAME value for all rows, call apply_to_uploaded_report with attachment_id='{att['id']}'.]")
 
 
 def build_context_block(att: Dict[str, Any]) -> str:
@@ -223,7 +304,17 @@ def build_context_block(att: Dict[str, Any]) -> str:
                 f"{len(att.get('mobiles') or [])} mobile numbers detected.\n"
                 f"--- TEXT START ---\n{(att.get('extracted_text') or '')[:8000]}\n--- TEXT END ---")
     cols = att.get("columns") or []
+    mp = att.get("mobile_points") or []
+    pts_line = ""
+    if mp:
+        pts_line = (f"This file has a PER-ROW points column: {len(mp)} (mobile -> points) rows detected, "
+                    f"{att.get('points_total')} points total"
+                    + (f", {att.get('dup_mobiles')} duplicate mobiles summed" if att.get('dup_mobiles') else "")
+                    + f". To credit EACH mobile ITS OWN amount, call credit_points_from_file with "
+                      f"attachment_id='{att['id']}'. (Use apply_to_uploaded_report only if the user wants the "
+                      f"SAME amount for everyone.)\n")
     return (f"{head} {att.get('row_count')} rows, columns: {cols}. "
             f"{len(att.get('mobiles') or [])} mobile numbers detected. "
-            f"To take an action on these customers, call apply_to_uploaded_report with attachment_id='{att['id']}'.\n"
+            f"{pts_line}"
+            f"For a bulk action with the SAME value on every customer, call apply_to_uploaded_report with attachment_id='{att['id']}'.\n"
             f"First rows (preview):\n{_json.dumps(att.get('preview') or [], default=str)[:9000]}")

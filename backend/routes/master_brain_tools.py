@@ -555,6 +555,90 @@ async def _tool_apply_to_uploaded_report(attachment_id: str, action: str, points
 CAMPAIGN_CAP = 50000
 
 
+async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "",
+                                        confirm: bool = False, user=None) -> Dict[str, Any]:
+    """Credit a DIFFERENT (per-row) number of points to each mobile listed in an uploaded
+    CSV/XLSX that has a mobile column AND a points column. Points are added as BONUS
+    (points_balance + lifetime_points_earned); tier is spend-based so it is unaffected."""
+    err = _require_master(user)
+    if err:
+        return err
+    from database import mb_attachments_col
+    att = None
+    if attachment_id:
+        att = await mb_attachments_col.find_one(
+            {"id": attachment_id, "user_id": user.get("id")}, {"_id": 0})
+    if not att:
+        q: Dict[str, Any] = {"user_id": user.get("id"), "kind": "report"}
+        if user.get("_mb_session"):
+            q["session_id"] = user["_mb_session"]
+        att = await mb_attachments_col.find_one(q, {"_id": 0}, sort=[("created_at", -1)])
+    if not att:
+        return {"error": "No uploaded report found for this conversation. Please attach the points file again."}
+    pairs = att.get("mobile_points") or []
+    if not pairs:
+        return {"error": "No per-row points were detected in that file. It needs BOTH a mobile column and a "
+                         "points column (e.g. 'MOBILE' and 'Points to be Credit'). If every number should get "
+                         "the SAME amount, use apply_to_uploaded_report with grant_points instead."}
+    total_points = sum(int(p.get("points") or 0) for p in pairs)
+    plan = {"action": "credit_points_from_file", "file": att.get("filename"),
+            "rows": len(pairs), "total_points": total_points, "awards_bonus": True,
+            "dup_mobiles": att.get("dup_mobiles") or 0}
+    if not confirm:
+        sample = []
+        for p in pairs[:8]:
+            c = await _find_customer(p["mobile"])
+            sample.append({"mobile": p["mobile"], "points_to_add": int(p.get("points") or 0),
+                           "found": bool(c), "name": (c or {}).get("name"),
+                           "balance_before": (c or {}).get("points_balance")})
+        plan["preview"] = True
+        plan["sample"] = sample
+        plan["confirmation_required"] = ("Confirm with the user + capture a reason, then call again with "
+                                          "confirm=true. Credits each mobile ITS OWN points value from the file.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    if len(pairs) > INLINE_CAP:
+        return {"error": f"{len(pairs)} rows exceeds the inline cap ({INLINE_CAP}). Split the file and run it in parts."}
+
+    matched = changed = not_found = skipped_zero = 0
+    total_credited = 0
+    changes: List[Dict[str, Any]] = []
+    for p in pairs:
+        pts = int(p.get("points") or 0)
+        if pts == 0:
+            skipped_zero += 1
+            continue
+        cust = await _find_customer(p["mobile"])
+        if not cust:
+            not_found += 1
+            continue
+        matched += 1
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        lt_before = int(cust.get("lifetime_points_earned") or 0)
+        await customers_col.update_one({"id": cid}, {"$inc": {"points_balance": pts,
+                                                              "lifetime_points_earned": pts}})
+        await _ledger(cust.get("mobile"), pts, "bonus", reason, user)
+        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
+                        "points_before": cur, "points_after": cur + pts,
+                        "lifetime_before": lt_before, "lifetime_after": lt_before + pts})
+        changed += 1
+        total_credited += pts
+    audit_id = await _log_master(user, "upload_credit_points", "customers", att["id"], reason,
+                                 {"file": att.get("filename"), "rows": len(pairs),
+                                  "matched": matched, "changed": changed, "not_found": not_found,
+                                  "skipped_zero": skipped_zero, "total_points_credited": total_credited})
+    await _record_snapshot(audit_id, "upload_credit_points", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "matched_customers": matched, "changed": changed, "not_found": not_found,
+            "skipped_zero": skipped_zero, "total_points_credited": total_credited,
+            "message": f"Credited points from '{att.get('filename')}': {changed} customers credited "
+                       f"{total_credited} points total ({matched} matched, {not_found} not found"
+                       + (f", {skipped_zero} zero-value rows skipped" if skipped_zero else "") + ")."}
+
+
 async def _record_snapshot(audit_id: str, action: str, changes: List[Dict[str, Any]]) -> None:
     """Persist a reversible before/after snapshot so the action can be undone later."""
     if not audit_id or not changes:
@@ -1339,6 +1423,22 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "confirm": {"type": "boolean", "default": False},
         }, "required": ["attachment_id", "action"]}}},
     {"type": "function", "function": {
+        "name": "credit_points_from_file",
+        "description": "MUTATION (Master Admin). Credit a DIFFERENT number of points to EACH mobile listed in an "
+                       "UPLOADED CSV/XLSX that has a mobile column AND a per-row points column (e.g. headers 'MOBILE' "
+                       "and 'Points to be Credit'). Reads the exact points value from each row and adds it to that "
+                       "customer's balance as BONUS points (also increments lifetime_points_earned; tier is "
+                       "spend-based so it is NOT changed). USE THIS whenever the file specifies a per-mobile amount. "
+                       "(If EVERY number should get the SAME amount, use apply_to_uploaded_report with grant_points "
+                       "instead.) ALWAYS confirm=false first to preview (row count, total points, and a sample of "
+                       "mobile->points with current balances); then after the user approves + gives a reason, "
+                       "confirm=true + reason. Audit-logged, writes a ledger row per customer, and is UNDOABLE.",
+        "parameters": {"type": "object", "properties": {
+            "attachment_id": {"type": "string", "description": "id of the uploaded points file (from the context block)"},
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }}}},
+    {"type": "function", "function": {
         "name": "set_customer_tier",
         "description": "MUTATION (Master Admin). Set a SPECIFIC tier/slab value on a customer or a FILTERED set "
                        "of customers — including an arbitrary/legacy slab the spend-bands wouldn't assign (e.g. set "
@@ -1435,6 +1535,7 @@ MASTER_TOOL_HANDLERS = {
     "set_customer_tier": _tool_set_customer_tier,
     "master_action_log": _tool_master_action_log,
     "apply_to_uploaded_report": _tool_apply_to_uploaded_report,
+    "credit_points_from_file": _tool_credit_points_from_file,
     "undo_action": _tool_undo_action,
     "send_campaign": _tool_send_campaign,
     "list_campaigns": _tool_list_campaigns,
