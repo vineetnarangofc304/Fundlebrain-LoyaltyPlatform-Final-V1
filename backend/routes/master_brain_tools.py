@@ -639,10 +639,12 @@ async def _credit_pairs(pairs, reason, user, job_id=None):
         done += len(upd_ops[i:i + CREDIT_BATCH])
         if job_id:
             await mb_credit_jobs_col.update_one({"id": job_id},
-                {"$set": {"processed": done, "changed": changed}})
+                {"$set": {"processed": done, "changed": changed, "heartbeat": _now_iso()}})
     for i in range(0, len(ledger_docs), CREDIT_BATCH):
         with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
             await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+        if job_id:
+            await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {"heartbeat": _now_iso()}})
 
     audit_id = await _log_master(user, "upload_credit_points", "customers", job_id or "inline", reason,
                                  {"rows": len(pairs), "matched": matched, "changed": changed,
@@ -654,20 +656,84 @@ async def _credit_pairs(pairs, reason, user, job_id=None):
             "total_points_credited": total_credited}
 
 
-async def _run_credit_job(job_id: str, pairs: List[Dict[str, Any]], reason: str,
-                          user: Dict[str, Any]) -> None:
-    """Background worker: credits per-row points to thousands of customers without
-    blocking (or timing out) the chat request."""
-    try:
-        await mb_credit_jobs_col.update_one({"id": job_id},
-            {"$set": {"status": "running", "started_at": _now_iso()}})
-        r = await _credit_pairs(pairs, reason, user, job_id=job_id)
+async def _execute_credit_job(job: Dict[str, Any]) -> None:
+    """Run a claimed credit job to completion (called by the scheduler worker)."""
+    job_id = job["id"]
+    pairs = job.get("pairs") or []
+    if not pairs:
         await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {
-            "status": "completed", "completed_at": _now_iso(), **r}})
+            "status": "failed", "completed_at": _now_iso(),
+            "error": "This job was queued before the reliability fix and could not be resumed "
+                     "(no data stored). Please re-upload the file and run it again."}})
+        return
+    user = {"id": job.get("user_id"), "email": job.get("queued_by"),
+            "name": job.get("queued_by_name") or job.get("queued_by"), "is_master_admin": True}
+    r = await _credit_pairs(pairs, job.get("reason") or "", user, job_id=job_id)
+    await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {
+        "status": "completed", "completed_at": _now_iso(), "heartbeat": _now_iso(), **r}})
+
+
+async def _execute_undo_job(job: Dict[str, Any]) -> None:
+    """Run a claimed large-undo job to completion (called by the scheduler worker)."""
+    job_id = job["id"]
+    changes = job.get("changes") or []
+    audit_id = job.get("target_audit_id")
+    act = job.get("undo_action") or "action"
+    entity = job.get("entity") or "customers"
+    reason = job.get("reason") or ""
+    user = {"id": job.get("user_id"), "email": job.get("queued_by"),
+            "name": job.get("queued_by_name") or job.get("queued_by"), "is_master_admin": True}
+    n = await _reverse_changes_bulk(changes, act, reason, user, job_id=job_id)
+    new_audit = await _finalize_undo(audit_id, act, entity, reason, n, user)
+    await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {
+        "status": "completed", "completed_at": _now_iso(), "heartbeat": _now_iso(),
+        "changed": n, "audit_id": new_audit}})
+
+
+async def process_pending_credit_jobs() -> None:
+    """Scheduler tick (every 15s) — resilient across pods, exactly like the historic ingest
+    worker. (1) recovers stale 'running' (and legacy 'queued') jobs, (2) atomically claims ONE
+    pending job, (3) runs it to completion. Survives pod restarts because the job + its data
+    live in MongoDB, not in an in-memory asyncio task."""
+    from pymongo import ReturnDocument
+    iso_now = _now_iso()
+    stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=8)).isoformat()
+    MAX_RECOVERIES = 4
+
+    # (1) recover jobs stuck 'running'/'queued' with a stale or missing heartbeat
+    stuck = await mb_credit_jobs_col.find(
+        {"status": {"$in": ["running", "queued"]},
+         "$or": [{"heartbeat": {"$lt": stale_cutoff}}, {"heartbeat": {"$exists": False}}],
+         "queued_at": {"$lt": stale_cutoff}},
+        {"_id": 0, "id": 1, "recovery_count": 1}).to_list(50)
+    for sj in stuck:
+        rc = int(sj.get("recovery_count") or 0)
+        if rc >= MAX_RECOVERIES:
+            await mb_credit_jobs_col.update_one({"id": sj["id"]}, {"$set": {
+                "status": "failed", "completed_at": iso_now,
+                "error": f"Stalled — recovered {rc}× without completing. Please re-run."}})
+        else:
+            await mb_credit_jobs_col.update_one({"id": sj["id"]}, {"$set": {
+                "status": "pending", "heartbeat": iso_now}, "$inc": {"recovery_count": 1}})
+            logger.warning(f"Recovered stale MB credit job {sj['id']} (recovery #{rc + 1})")
+
+    # (2) claim one pending job atomically
+    job = await mb_credit_jobs_col.find_one_and_update(
+        {"status": "pending"},
+        {"$set": {"status": "running", "claimed_at": iso_now, "heartbeat": iso_now, "started_at": iso_now}},
+        sort=[("queued_at", 1)], return_document=ReturnDocument.AFTER)
+    if not job:
+        return
+    logger.info(f"Claimed MB {job.get('kind', 'credit')} job {job['id']} ({job.get('rows')} rows)")
+    try:
+        if job.get("kind") == "undo":
+            await _execute_undo_job(job)
+        else:
+            await _execute_credit_job(job)
     except Exception as e:  # noqa: BLE001
-        logger.exception(f"credit job {job_id} failed")
-        await mb_credit_jobs_col.update_one({"id": job_id},
-            {"$set": {"status": "failed", "error": str(e), "completed_at": _now_iso()}})
+        logger.exception(f"MB credit/undo job {job['id']} failed")
+        await mb_credit_jobs_col.update_one({"id": job["id"]}, {"$set": {
+            "status": "failed", "error": str(e), "completed_at": _now_iso()}})
 
 
 async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "",
@@ -731,23 +797,21 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
                            f"{r['not_found']} not found"
                            + (f", {r['skipped_zero']} zero-value rows skipped" if r['skipped_zero'] else "") + ")."}
 
-    # Large file → BACKGROUND job (never blocks / times out the chat).
+    # Large file → resilient BACKGROUND job processed by the scheduler worker (survives pod
+    # restarts; NEVER blocks/times out the chat). Persist the pairs on the job so any pod can run it.
     job_id = uuid.uuid4().hex
     await mb_credit_jobs_col.insert_one({
         "id": job_id, "kind": "credit", "file": att.get("filename"), "rows": len(pairs),
-        "total_points": total_points, "status": "queued", "processed": 0, "changed": 0,
-        "reason": reason, "queued_at": _now_iso(), "queued_by": user.get("email"),
-        "user_id": user.get("id"),
+        "total_points": total_points, "status": "pending", "processed": 0, "changed": 0,
+        "pairs": pairs, "reason": reason, "queued_at": _now_iso(), "heartbeat": _now_iso(),
+        "queued_by": user.get("email"), "queued_by_name": user.get("name"), "user_id": user.get("id"),
     })
-    u_min = {"id": user.get("id"), "email": user.get("email"), "name": user.get("name"),
-             "is_master_admin": True}
-    asyncio.create_task(_run_credit_job(job_id, pairs, reason, u_min))
     return {"ok": True, "queued": True, "job_id": job_id, **plan, "status": "queued",
             "message": (f"Queued crediting **{len(pairs)} customers** ({total_points} points total) from "
-                        f"'{att.get('filename')}' in the BACKGROUND — this runs safely in batches and will "
-                        f"NOT time out. Tell the user it's processing and they can ask "
-                        f"\"status of the credit job\" (or you call credit_job_status with job_id='{job_id}') "
-                        f"to see progress; when complete you'll have an audit_id to undo it if needed.")}
+                        f"'{att.get('filename')}' — it runs in the background on a resilient worker (safe "
+                        f"batches, survives restarts) and will NOT time out. Tell the user it's processing "
+                        f"and they can ask \"status of the credit job\" (or you call credit_job_status with "
+                        f"job_id='{job_id}') to see progress; when complete you'll have an audit_id to undo it.")}
 
 
 async def _tool_credit_job_status(job_id: str = "", user=None) -> Dict[str, Any]:
@@ -828,7 +892,8 @@ async def _reverse_changes_bulk(changes: List[Dict[str, Any]], action: str, reas
             await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
         done += len(upd_ops[i:i + CREDIT_BATCH])
         if job_id:
-            await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {"processed": done}})
+            await mb_credit_jobs_col.update_one({"id": job_id},
+                {"$set": {"processed": done, "heartbeat": _now_iso()}})
     for i in range(0, len(ledger_docs), CREDIT_BATCH):
         with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
             await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
@@ -845,21 +910,6 @@ async def _finalize_undo(audit_id: str, act: str, entity: str, reason: str,
         "undo_reason": reason, "undo_audit_id": new_audit}})
     await mb_action_snapshots_col.update_one({"audit_id": audit_id}, {"$set": {"undone": True}})
     return new_audit
-
-
-async def _run_undo_job(job_id: str, audit_id: str, changes: List[Dict[str, Any]], act: str,
-                        entity: str, reason: str, user: Dict[str, Any]) -> None:
-    try:
-        await mb_credit_jobs_col.update_one({"id": job_id},
-            {"$set": {"status": "running", "started_at": _now_iso()}})
-        n = await _reverse_changes_bulk(changes, act, reason, user, job_id=job_id)
-        new_audit = await _finalize_undo(audit_id, act, entity, reason, n, user)
-        await mb_credit_jobs_col.update_one({"id": job_id}, {"$set": {
-            "status": "completed", "completed_at": _now_iso(), "changed": n, "audit_id": new_audit}})
-    except Exception as e:  # noqa: BLE001
-        logger.exception(f"undo job {job_id} failed")
-        await mb_credit_jobs_col.update_one({"id": job_id},
-            {"$set": {"status": "failed", "error": str(e), "completed_at": _now_iso()}})
 
 
 async def _tool_undo_action(audit_id: str, reason: str = "", confirm: bool = False, user=None) -> Dict[str, Any]:
@@ -902,16 +952,17 @@ async def _tool_undo_action(audit_id: str, reason: str = "", confirm: bool = Fal
     job_id = uuid.uuid4().hex
     await mb_credit_jobs_col.insert_one({
         "id": job_id, "kind": "undo", "file": f"undo:{act}", "rows": len(changes),
-        "status": "queued", "processed": 0, "reason": reason, "queued_at": _now_iso(),
-        "queued_by": user.get("email"), "user_id": user.get("id"), "target_audit_id": audit_id,
+        "status": "pending", "processed": 0, "reason": reason, "queued_at": _now_iso(),
+        "heartbeat": _now_iso(), "queued_by": user.get("email"),
+        "queued_by_name": user.get("name"), "user_id": user.get("id"),
+        "target_audit_id": audit_id, "undo_action": act, "entity": entity,
+        "changes": changes,
     })
-    u_min = {"id": user.get("id"), "email": user.get("email"), "name": user.get("name"),
-             "is_master_admin": True}
-    asyncio.create_task(_run_undo_job(job_id, audit_id, changes, act, entity, reason, u_min))
     return {"ok": True, "queued": True, "job_id": job_id, **plan, "status": "queued",
-            "message": (f"Queued undo of **{len(changes)} change(s)** in the BACKGROUND — it runs in batches "
-                        f"and will NOT time out. Tell the user it's processing; they can ask "
-                        f"\"status of the undo job\" (or you call credit_job_status with job_id='{job_id}').")}
+            "message": (f"Queued undo of **{len(changes)} change(s)** on the resilient background worker — "
+                        f"it runs in batches, survives restarts and will NOT time out. Tell the user it's "
+                        f"processing; they can ask \"status of the undo job\" (or you call credit_job_status "
+                        f"with job_id='{job_id}').")}
 
 
 # ============================================================
