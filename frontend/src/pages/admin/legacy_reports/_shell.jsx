@@ -22,6 +22,7 @@ export function LegacyReportShell({
   paginate = true, // server-side limit/offset pagination
   pageSize = 50,
   testid,
+  actions,         // optional: ({ total, params }) => ReactNode, rendered next to CSV
 }) {
   const { params, setParams } = paramsState;
   const [rows, setRows] = useState([]);
@@ -86,6 +87,7 @@ export function LegacyReportShell({
               <button onClick={exportCsv} className="k-btn k-btn-outline" data-testid={`${testid}-export`}>
                 <Download className="w-3.5 h-3.5" /> CSV
               </button>
+              {actions && actions({ total, params })}
             </div>
           </div>
         )}

@@ -10,6 +10,7 @@ import uuid
 import re
 import asyncio
 import logging
+import pymongo
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
 import httpx
@@ -673,11 +674,17 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
         t = await templates_col.find_one({"id": template_id}, {"_id": 0})
         if not t:
             raise RuntimeError("Template missing")
-        cursor = customers_col.find(audience_filter or {},
-            {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
-              "points_balance": 1, "city": 1}).limit(min(limit, 50000))
+        # Materialise the audience up-front inside a generous DB deadline (overrides the
+        # aggressive prod client timeoutMS). Sending SMS is slow, so we must NOT hold a live
+        # cursor across the send loop — its getMores would exceed the deadline mid-run and
+        # fail with "operation exceeded time limit".
+        with pymongo.timeout(300):
+            recipients = await customers_col.find(
+                audience_filter or {},
+                {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
+                 "points_balance": 1, "city": 1}).limit(min(limit, 50000)).to_list(min(limit, 50000))
         sent, failed, processed = 0, 0, 0
-        async for c in cursor:
+        for c in recipients:
             processed += 1
             params = _params_for_customer(c)
             try:

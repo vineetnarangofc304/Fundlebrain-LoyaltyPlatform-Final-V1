@@ -23,12 +23,16 @@ Every endpoint supports:
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
+import uuid
 import pymongo
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -583,6 +587,30 @@ async def active_coupons_report(
 # ============================================================
 # 13) Birthdays & Anniversaries — monthly occasion list
 # ============================================================
+def _occasion_filter(type: str, month: int, year: Optional[str],
+                     q: Optional[str] = None, tier: Optional[str] = None) -> Dict[str, Any]:
+    """Build the customers filter for a birthday/anniversary month (+ optional year/tier/search).
+    `birthday`/`anniversary` are ISO 'YYYY-MM-DD' strings → match the month via '-MM-'
+    (or anchored '^YYYY-MM-' when a specific year is chosen)."""
+    field = "anniversary" if type == "anniversary" else "birthday"
+    mm = f"{int(month):02d}"
+    y = (str(year).strip() if year else "")
+    pattern = f"^{y}-{mm}-" if y and y.lower() != "all" else f"-{mm}-"
+    fil: Dict[str, Any] = {field: {"$regex": pattern}}
+    if tier:
+        fil["tier"] = tier
+    if q:
+        digits = "".join(ch for ch in q if ch.isdigit())
+        if digits and len(digits) >= 4:
+            fil["mobile"] = {"$regex": digits}
+        else:
+            fil["$or"] = [
+                {"mobile": {"$regex": q, "$options": "i"}},
+                {"name": {"$regex": q, "$options": "i"}},
+            ]
+    return fil
+
+
 @router.get("/occasions")
 async def occasions_report(
     type: str = "birthday",              # birthday | anniversary
@@ -603,22 +631,7 @@ async def occasions_report(
     Wrapped in pymongo.timeout so the full-collection scan survives the aggressive prod
     client timeoutMS (getMores would otherwise be killed → 'operation exceeded time limit')."""
     field = "anniversary" if type == "anniversary" else "birthday"
-    mm = f"{int(month):02d}"
-    y = (str(year).strip() if year else "")
-    pattern = f"^{y}-{mm}-" if y and y.lower() != "all" else f"-{mm}-"
-
-    fil: Dict[str, Any] = {field: {"$regex": pattern}}
-    if tier:
-        fil["tier"] = tier
-    if q:
-        digits = "".join(ch for ch in q if ch.isdigit())
-        if digits and len(digits) >= 4:
-            fil["mobile"] = {"$regex": digits}
-        else:
-            fil["$or"] = [
-                {"mobile": {"$regex": q, "$options": "i"}},
-                {"name": {"$regex": q, "$options": "i"}},
-            ]
+    fil = _occasion_filter(type, month, year, q, tier)
 
     sort_field = {"points_balance": "points_balance", "last_visit_at": "last_visit_at",
                   "lifetime_spend": "lifetime_spend", "name": "name"}.get(sort, "points_balance")
@@ -650,4 +663,55 @@ async def occasions_report(
                 "lifetime_spend", "tier", "visit_count", "city", "home_store_id"]
         return _to_csv(rows, cols)
     return {"total": total, "rows": rows, "offset": offset, "limit": limit,
-            "occasion": field, "month": month, "year": y or "all"}
+            "occasion": field, "month": month, "year": (year or "all")}
+
+
+class OccasionSendIn(BaseModel):
+    type: str = "birthday"
+    month: int
+    year: Optional[str] = None
+    tier: Optional[str] = None
+    template_id: str
+    dry_run: bool = True
+    limit: int = 5000
+
+
+@router.post("/occasions/send-sms")
+async def occasions_send_sms(body: OccasionSendIn, user: dict = Depends(get_current_user)):
+    """Send a bulk SMS (via the configured Karix gateway) to everyone whose birthday /
+    anniversary falls in the selected month — reuses the proven communications bulk-send
+    worker + job tracking. dry_run=True returns an audience preview without sending."""
+    if user["role"] not in {"super_admin", "brand_admin", "marketing_manager"}:
+        raise HTTPException(403, "Only marketing_manager / brand_admin / super_admin can send campaigns")
+    from routes.communications_routes import templates_col, bulk_jobs_col, _run_bulk_send_job
+    t = await templates_col.find_one({"id": body.template_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Template not found")
+    if t.get("channel") != "sms":
+        raise HTTPException(400, "Please pick an SMS template")
+    if t.get("status") != "active":
+        raise HTTPException(400, "Template must be active before sending")
+
+    fil = _occasion_filter(body.type, body.month, body.year, None, body.tier)
+    with pymongo.timeout(120):
+        total = await customers_col.count_documents(fil)
+
+    if body.dry_run:
+        with pymongo.timeout(120):
+            sample = await customers_col.find(
+                fil, {"_id": 0, "mobile": 1, "name": 1}).limit(3).to_list(3)
+        return {"dry_run": True, "audience_size_total": total,
+                "audience_size_capped": min(total, body.limit),
+                "sample": sample, "template_name": t.get("name")}
+
+    job_id = uuid.uuid4().hex
+    await bulk_jobs_col.insert_one({
+        "id": job_id, "template_id": body.template_id, "template_name": t.get("name"),
+        "channel": "sms", "audience_filter": fil, "audience_size_total": total,
+        "limit": body.limit, "status": "queued", "processed": 0, "sent": 0, "failed": 0,
+        "queued_at": datetime.now(timezone.utc).isoformat(), "queued_by": user["email"],
+        "source": "occasions_report",
+    })
+    asyncio.create_task(_run_bulk_send_job(job_id, body.template_id, fil, body.limit))
+    return {"dry_run": False, "job_id": job_id, "status": "queued",
+            "audience_size_total": total, "limit": body.limit}
