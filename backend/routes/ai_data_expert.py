@@ -22,6 +22,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import pymongo
+
 from database import db, customers_col, transactions_col, stores_col
 
 logger = logging.getLogger("kazo-fundle.ai_data_expert")
@@ -29,6 +31,9 @@ logger = logging.getLogger("kazo-fundle.ai_data_expert")
 EXPORT_DIR = "/app/backend/exports/ai"
 os.makedirs(EXPORT_DIR, exist_ok=True)
 MAX_EXPORT_ROWS = 1_000_000
+# Override the aggressive production Mongo client `timeoutMS` for the long-running export
+# scan (otherwise large-collection getMores die with "operation exceeded time limit").
+EXPORT_DB_DEADLINE_SECONDS = 1800
 
 # ---------------------------------------------------------------- context ----
 _CTX_CACHE: Dict[str, Any] = {"ts": 0.0, "text": ""}
@@ -265,42 +270,47 @@ async def _run_export_job(export_id: str, collection: str,
     that wrote the file → "Download failed". Object storage is pod-agnostic."""
     fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"aiexp_{export_id}_")
     try:
-        cursor = db[collection].aggregate(
-            pipeline, allowDiskUse=True, maxTimeMS=300000, batchSize=2000)
         cols: List[str] = []
-        buf: List[Dict[str, Any]] = []
         n = 0
-        with os.fdopen(fd, "w", newline="", encoding="utf-8-sig") as f:
-            writer: Optional[_csvmod.DictWriter] = None
+        # Wrap the whole scan in pymongo.timeout to OVERRIDE the aggressive production
+        # client timeoutMS — without it, large-collection getMores fail with
+        # "Executor error during getMore :: operation exceeded time limit" and the export
+        # is marked failed within seconds (download then 500s → "Download failed").
+        with pymongo.timeout(EXPORT_DB_DEADLINE_SECONDS):
+            cursor = db[collection].aggregate(
+                pipeline, allowDiskUse=True, batchSize=2000)
+            buf: List[Dict[str, Any]] = []
+            with os.fdopen(fd, "w", newline="", encoding="utf-8-sig") as f:
+                writer: Optional[_csvmod.DictWriter] = None
 
-            def _flush_buf():
-                nonlocal writer, cols
-                seen: List[str] = []
-                for r in buf:
-                    for k in r:
-                        if k not in seen:
-                            seen.append(k)
-                cols = seen
-                writer = _csvmod.DictWriter(f, fieldnames=cols, extrasaction="ignore")
-                writer.writeheader()
-                writer.writerows(buf)
-                buf.clear()
+                def _flush_buf():
+                    nonlocal writer, cols
+                    seen: List[str] = []
+                    for r in buf:
+                        for k in r:
+                            if k not in seen:
+                                seen.append(k)
+                    cols = seen
+                    writer = _csvmod.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+                    writer.writeheader()
+                    writer.writerows(buf)
+                    buf.clear()
 
-            async for doc in cursor:
-                if not isinstance(doc.get("_id"), (str, int, float, type(None))):
-                    doc["_id"] = str(doc.get("_id"))
-                row = {k: _csv_cell(v) for k, v in doc.items()}
+                async for doc in cursor:
+                    if not isinstance(doc.get("_id"), (str, int, float, type(None))):
+                        doc["_id"] = str(doc.get("_id"))
+                    row = {k: _csv_cell(v) for k, v in doc.items()}
+                    if writer is None:
+                        buf.append(row)
+                        if len(buf) >= 500:
+                            _flush_buf()
+                    else:
+                        writer.writerow(row)
+                    n += 1
+                    if n >= max_rows:
+                        break
                 if writer is None:
-                    buf.append(row)
-                    if len(buf) >= 500:
-                        _flush_buf()
-                else:
-                    writer.writerow(row)
-                n += 1
-                if n >= max_rows:
-                    break
-            if writer is None:
-                _flush_buf()
+                    _flush_buf()
 
         # Upload the finished CSV to object storage (pod-agnostic download).
         from routes.exports_routes import _put_object, APP_NAME
