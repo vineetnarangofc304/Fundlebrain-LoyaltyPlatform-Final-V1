@@ -1,0 +1,24 @@
+{
+  "summary": "Master Brain credit_points_from_file INLINE end-to-end verified. Preview + confirm two-turn flow in a single session works; confirm turn returns applied result IMMEDIATELY (~9s incl. LLM) with no 'queued'/'background' language. Per-row per-customer credit applied correctly, duplicate mobiles summed, not-found reported without creating a customer, undo restores exact balances/lifetime, and the removed credit_job_status tool is gone from the schemas.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_mb_credit_points_from_file.py",
+    "/app/test_reports/pytest/iteration81.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "master_brain_tools.py is ~1600 lines — consider splitting per-tool modules (each `_tool_*` + shared helpers) since it now hosts read+action+campaign tools; hurts readability & test isolation.",
+    "credit_points_from_file returns audit_id inside result_preview only as a string (500-char truncation in _run_tool_loop) — long tool results may be lost from the trace. Consider persisting full tool results (or ensuring key fields like audit_id are always in the reply) for auditability of long chats.",
+    "mb_credit_jobs_col and CREDIT_JOB_DB_DEADLINE constant remain even though the background worker is removed — dead-code / minor confusion (the collection is still updated inside _credit_pairs / _reverse_changes_bulk via `if job_id`, which is never truthy from callers now). Safe to remove.",
+    "scheduler.py: mb_credit_worker was removed; grep confirms no residual references, good."
+  ],
+  "updated_files": ["/app/backend/tests/test_mb_credit_points_from_file.py"],
+  "success_rate": {"backend": "100%", "frontend": "N/A"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (from /app/memory/test_credentials.md).",
+  "seed_data_creation": "Inserted 4 throwaway customers ids MBQA_9990060001..MBQA_9990060004 (mobiles 9990060001-4, base points_balance=1000, lifetime_points_earned=1000). Mobile 9990060005 intentionally NOT inserted (not-found case). All seed data, points_ledger rows, mb_action_snapshots, and audit_logs are cleaned up in the module-scope fixture teardown.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Test file is idempotent: it cleans up its own customers/ledger/audit/attachments in the fixture. Under LLM-key exhaustion the chat endpoint returns a reply containing 'AI usage budget exhausted' — re-run once. The reason string on the ledger may not include trailing punctuation because the model normalises the reason it passes to the tool; assertions use regex $regex 'QA test credit'.",
+  "rca of the issue": "Not applicable — this iteration validates the fix (v4: fully inline). Verified: (1) chat endpoint returns before 45s (measured 7-9s on confirm), (2) audit_log metadata contains matched=4/changed=4/not_found=1/total_points_credited=1160, (3) per-customer DB deltas match the file's per-row amounts exactly and the duplicate mobile 9990060001 got 111+50=161, (4) undo restores balance & lifetime to 1000 for all 4 customers, (5) credit_job_status is absent from MASTER_TOOL_SCHEMAS."
+}

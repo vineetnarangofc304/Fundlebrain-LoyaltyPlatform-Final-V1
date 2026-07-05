@@ -97,20 +97,9 @@ def start_scheduler():
                    coalesce=True,
                    misfire_grace_time=3600)
 
-    # Master Brain per-row points-credit / large-undo worker — resilient across pods
-    # (jobs live in MongoDB, not in an in-memory asyncio task). Picks up pending jobs every 15s.
-    from routes.master_brain_tools import process_pending_credit_jobs
-    sched.add_job(process_pending_credit_jobs,
-                   IntervalTrigger(seconds=15),
-                   id="mb_credit_worker",
-                   replace_existing=True,
-                   max_instances=1,
-                   coalesce=True,
-                   misfire_grace_time=30)
-
     sched.start()
     _scheduler = sched
-    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | MB credit worker every 15s | auto-campaigns daily 10:00 IST")
+    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST")
     return sched
 
 
