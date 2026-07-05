@@ -50,6 +50,10 @@ MB_DEADLINE_SECONDS = 26
 # call OVERRIDES that so each aggregation can complete, while the outer 26s/46s caps still bound
 # the whole run. (Same pattern used by the dashboards' db_deadline and the recon engine.)
 MB_TOOL_DB_DEADLINE = 25
+# A CONFIRMED mutation's apply (heavy ledger scan + batched writes) needs a much larger DB
+# budget than a read — the deterministic-confirm path runs it fully un-capped, this is only the
+# fallback for a single-turn confirmed mutation that still goes through the LLM loop.
+MB_MUTATION_DB_DEADLINE = 55
 # Analysis/read questions get the Fundle read tools PLUS the read-only Master audits (e.g.
 # the fast duplicate-redemption audit). The full action set is added only on write intent.
 READ_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_READ_TOOL_SCHEMAS
@@ -188,8 +192,14 @@ async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, 
     try:
         # Give every tool a generous, per-call DB deadline that OVERRIDES the aggressive
         # production Atlas client `timeoutMS` (~10s) — otherwise heavy analytics aggregations
-        # die mid-flight and the model reports a "timeout / data unavailable".
-        with pymongo.timeout(MB_TOOL_DB_DEADLINE):
+        # die mid-flight and the model reports a "timeout / data unavailable". A CONFIRMED
+        # mutation (the actual apply, e.g. reverse/credit over a large ledger) gets a much
+        # larger budget so it never gets capped mid-write — nested pymongo.timeout only shortens,
+        # so the tool's own 600s wrap needs this outer value to be big enough.
+        deadline = (MB_MUTATION_DB_DEADLINE
+                    if (name in _MUTATION_TOOLS and (args or {}).get("confirm"))
+                    else MB_TOOL_DB_DEADLINE)
+        with pymongo.timeout(deadline):
             if handler:
                 result = await handler(**(args or {}), user=user)
                 # A master ACTION tool may have mutated data — drop cached platform stats so a
@@ -288,6 +298,114 @@ def _session_has_pending_action(existing: Optional[Dict[str, Any]]) -> bool:
         if m.get("role") == "assistant" and _PREVIEW_HINT_RE.search(content):
             return True
     return False
+
+
+# ============================================================
+# DETERMINISTIC CONFIRM — apply a previously-previewed action WITHOUT the LLM
+# ------------------------------------------------------------
+# Root cause of the recurring "execution failed / System Timeout / loses track" reports:
+# the CONFIRM turn ran through the LLM tool-loop, so the apply needed 2 slow LLM round-trips
+# PLUS the tool call was wrapped in _master_execute_tool's 25s pymongo.timeout (which caps the
+# tool's own 600s budget — heavy mutations on prod exceeded 25s and errored). The direct action
+# endpoints don't have either problem, which is why they work. So when the user confirms a
+# pending preview, we execute the SAME tool DIRECTLY (full DB budget, no LLM), then format the
+# tool's REAL result deterministically — fast, reliable, and immune to fabrication/lose-track.
+_MUTATION_TOOLS = {
+    "grant_bonus_points", "adjust_points", "fix_negative_balances", "retier_customers",
+    "set_customer_tier", "apply_to_uploaded_report", "credit_points_from_file",
+    "reverse_duplicate_bonus_credits", "fix_double_redemptions", "send_campaign",
+    "undo_action", "cancel_campaign",
+}
+_HAS_MOBILE_RE = re.compile(r"\b[6-9]\d{9}\b")
+_REASON_LABEL_RE = re.compile(r"reason\s*[:=]\s*", re.IGNORECASE)
+_LEAD_CONFIRM_RE = re.compile(
+    r"^\s*(?:yes|yep|yeah|yup|sure|ok(?:ay)?|confirm(?:ed)?|go\s+ahead|proceed|do\s+it|"
+    r"apply(?:\s+it|\s+now)?|please(?:\s+do)?|approve[d]?|execute|make\s+it\s+so)"
+    r"\b[\s,.:;!-]*", re.IGNORECASE)
+
+
+def _extract_reason(message: str) -> str:
+    """Pull the audit reason out of the user's confirmation message. Prefers an explicit
+    'reason: …' label, else strips a leading confirmation word ('yes, …'), else uses the
+    whole message. Never returns empty (audit reasons are mandatory)."""
+    t = (message or "").strip()
+    m = _REASON_LABEL_RE.search(t)
+    if m and t[m.end():].strip():
+        return t[m.end():].strip()[:400]
+    stripped = _LEAD_CONFIRM_RE.sub("", t).strip()
+    return (stripped or t or "Confirmed via Master Brain chat")[:400]
+
+
+def _pending_from_trace(trace: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """After a normal turn, capture the LAST mutation tool that was PREVIEWED (confirm falsy,
+    no apply, no error) so the next 'yes' can apply it deterministically."""
+    for t in reversed(trace or []):
+        tool = t.get("tool")
+        if tool not in _MUTATION_TOOLS:
+            continue
+        args = dict(t.get("args") or {})
+        if args.get("confirm"):
+            continue
+        rp = str(t.get("result_preview") or "")
+        if "'applied': True" in rp or '"applied": true' in rp or "'error'" in rp or '"error"' in rp:
+            continue
+        args.pop("confirm", None)
+        args.pop("reason", None)
+        return {"tool": tool, "args": args}
+    return None
+
+
+def _confirmation_targets_new(message: str, pend: Dict[str, Any]) -> bool:
+    """Guard: if the 'confirmation' actually names a NEW mobile not in the pending action,
+    treat it as a fresh command (don't apply the stale pending preview)."""
+    args_blob = json.dumps(pend.get("args") or {}, default=str)
+    for mob in _HAS_MOBILE_RE.findall(message or ""):
+        if mob not in args_blob:
+            return True
+    return False
+
+
+def _format_applied(tool: str, result: Dict[str, Any]) -> str:
+    """Render the REAL tool result of a confirmed apply as clean Markdown (no LLM)."""
+    if not isinstance(result, dict):
+        return str(result)
+    if result.get("error"):
+        extra = ""
+        if result.get("blocked"):
+            extra = (" If you intended to run it AGAIN on purpose, reply **'force it'** with a reason.")
+        return f"⚠️ **Action not applied.** {result['error']}{extra}"
+    label = tool.replace("_", " ").title()
+    lines = [f"### ✅ Applied — {label}", "", result.get("message") or "Action applied successfully."]
+    aid = result.get("audit_id")
+    if aid:
+        undoable = result.get("undoable") is not False and result.get("undo") is not False
+        lines += ["", f"**Audit ID:** `{aid}` — logged to the Master Brain Action Log"
+                  + (" (undoable via *Undo* in the Action Log)." if undoable else ".")]
+    return "\n".join(lines)
+
+
+async def _apply_pending_action(pend: Dict[str, Any], message: str,
+                                user: Dict[str, Any]) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Execute the previously-previewed action DIRECTLY (full DB budget, no LLM round-trips,
+    NOT wrapped in the 25s per-tool cap) and return (deterministic message, raw result)."""
+    tool = pend.get("tool")
+    handler = MASTER_TOOL_HANDLERS.get(tool)
+    if not handler:
+        return None, None
+    args = dict(pend.get("args") or {})
+    args["confirm"] = True
+    args["reason"] = _extract_reason(message)
+    if tool == "credit_points_from_file" and re.search(r"\bforce\b", message or "", re.IGNORECASE):
+        args["force"] = True
+    try:
+        result = await handler(**args, user=user)
+        clear_stats_cache()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("MB deterministic apply failed for %s", tool)
+        return ((f"⚠️ I couldn't apply the **{tool.replace('_', ' ')}** action just now ({e}). "
+                 f"Please retry, or run it from the dedicated action panel."), None)
+    return _format_applied(tool, result), result
+
 
 
 def _compact_trace(trace: List[Dict[str, Any]]) -> str:
@@ -742,6 +860,51 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
                          or (_looks_like_confirmation(req.message or "")
                              and _session_has_pending_action(existing)))
 
+    # ---- DETERMINISTIC CONFIRM FAST-PATH (no LLM) ----
+    # If the user is confirming a previously-previewed action, apply the SAME tool directly
+    # (full DB budget, no LLM round-trips) and return its REAL result. This is the reliable
+    # execution path — it can't time out on LLM latency, can't "lose track", and can't fabricate.
+    pend = (existing or {}).get("pending_action") if existing else None
+    if (pend and not req.force_action and not req.attachment_ids
+            and _looks_like_confirmation(req.message or "")
+            and not _confirmation_targets_new(req.message or "", pend)):
+        user["_mb_session"] = session_id
+        det_apply, det_raw = await _apply_pending_action(pend, req.message or "", user)
+        if det_apply is not None:
+            now = datetime.now(timezone.utc).isoformat()
+            trace = [{"tool": pend.get("tool"),
+                      "args": {**(pend.get("args") or {}), "confirm": True},
+                      "result_preview": (str(det_raw)[:500] if det_raw is not None
+                                         else "applied via deterministic confirm")}]
+            reply, suggested_actions = _extract_suggested_actions(det_apply)
+            user_msg = {"role": "user", "content": req.message, "timestamp": now, "attachments": []}
+            bot_msg = {"role": "assistant", "content": reply, "timestamp": now,
+                       "tool_trace": trace, "suggested_actions": suggested_actions}
+            if existing:
+                await ai_chats_col.update_one({"id": session_id},
+                    {"$push": {"messages": {"$each": [user_msg, bot_msg]}},
+                     "$set": {"updated_at": now, "pending_action": None}})
+            else:
+                await ai_chats_col.insert_one({
+                    "id": session_id, "user_id": user["id"], "surface": "master",
+                    "title": (req.message or "")[:60], "messages": [user_msg, bot_msg],
+                    "created_at": now, "updated_at": now, "model": "deterministic-confirm",
+                    "pending_action": None})
+            await log_audit(user, "master_brain_chat", "master_brain_session", session_id,
+                            {"q": (req.message or "")[:200], "tools_used": [pend.get("tool")],
+                             "confirmed_apply": True})
+            try:
+                await mb_query_log_col.insert_one({
+                    "id": uuid.uuid4().hex, "user_id": user["id"], "user_email": user.get("email"),
+                    "user_name": user.get("name"), "session_id": session_id,
+                    "query": (req.message or "")[:2000], "reply_preview": (reply or "")[:600],
+                    "tools_used": [pend.get("tool")], "attachments": [], "created_at": now})
+            except Exception:
+                pass
+            return {"session_id": session_id, "reply": reply,
+                    "tools_used": [pend.get("tool")], "tool_trace": trace,
+                    "suggested_actions": suggested_actions}
+
     history: List[Dict[str, Any]] = await _seeded_history(user, read_only=False)
     if existing:
         for m in (existing.get("messages") or [])[-12:]:
@@ -852,6 +1015,9 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
 
     reply, suggested_actions = _extract_suggested_actions(reply)
 
+    # Capture a just-previewed mutation so the next 'yes' applies it via the deterministic path.
+    pending_action = _pending_from_trace(trace)
+
     now = datetime.now(timezone.utc).isoformat()
     stored_text = req.message + (f"  ·  📎 {', '.join(a['filename'] for a in att_chips)}" if att_chips else "")
     user_msg = {"role": "user", "content": stored_text, "timestamp": now, "attachments": att_chips}
@@ -859,12 +1025,13 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
                "suggested_actions": suggested_actions}
     if existing:
         await ai_chats_col.update_one({"id": session_id},
-            {"$push": {"messages": {"$each": [user_msg, bot_msg]}}, "$set": {"updated_at": now}})
+            {"$push": {"messages": {"$each": [user_msg, bot_msg]}},
+             "$set": {"updated_at": now, "pending_action": pending_action}})
     else:
         await ai_chats_col.insert_one({
             "id": session_id, "user_id": user["id"], "surface": "master",
             "title": (req.message or att_chips[0]["filename"] if att_chips else req.message)[:60],
-            "messages": [user_msg, bot_msg],
+            "messages": [user_msg, bot_msg], "pending_action": pending_action,
             "created_at": now, "updated_at": now, "model": f"{provider}/{model}"})
 
     await log_audit(user, "master_brain_chat", "master_brain_session", session_id,
