@@ -93,6 +93,9 @@ async def _log_master(user: Dict[str, Any], action: str, entity: str, entity_id:
         "reason": reason,
         "metadata": metadata,
         "source": "master_brain",
+        # The chat session this action came from (when run via chat) so the Action Log can
+        # deep-link back into the conversation. None for direct-endpoint (panel) actions.
+        "session_id": (user or {}).get("_mb_session"),
         "timestamp": _now_iso(),
     })
     return doc_id

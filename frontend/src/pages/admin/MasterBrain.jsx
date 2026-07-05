@@ -6,6 +6,10 @@ import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock,
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
+// Remembers the last-open Master Brain chat so leaving & returning restores it (per user).
+const LS_ACTIVE_SESSION = "mb_active_session";
+
+
 const fmtTime = (iso) => {
   if (!iso) return "—";
   try {
@@ -92,6 +96,11 @@ export default function MasterBrain() {
     if (!isMaster) return;
     api.get("/master-brain/sessions").then((r) => setSessions(r.data)).catch(() => {});
     api.get("/master-brain/suggested-prompts").then((r) => setSuggested(r.data)).catch(() => {});
+    // Restore the chat the user was last in (survives navigating away & back).
+    let saved = null;
+    try { saved = localStorage.getItem(LS_ACTIVE_SESSION); } catch { /* ignore */ }
+    if (saved) openSession(saved);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMaster]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
@@ -177,11 +186,23 @@ export default function MasterBrain() {
   };
 
   const openSession = async (id) => {
+    if (!id) return;
+    setTab("chat");
     setSessionId(id);
-    const r = await api.get(`/master-brain/sessions/${id}`);
-    setMessages(r.data.messages);
+    try { localStorage.setItem(LS_ACTIVE_SESSION, id); } catch { /* ignore */ }
+    try {
+      const r = await api.get(`/master-brain/sessions/${id}`);
+      setMessages(r.data.messages || []);
+    } catch {
+      // session was deleted / not found — fall back to a fresh chat
+      try { localStorage.removeItem(LS_ACTIVE_SESSION); } catch { /* ignore */ }
+      setSessionId(null); setMessages([]);
+    }
   };
-  const newChat = () => { setSessionId(null); setMessages([]); setInput(""); setAttachments([]); };
+  const newChat = () => {
+    setSessionId(null); setMessages([]); setInput(""); setAttachments([]);
+    try { localStorage.removeItem(LS_ACTIVE_SESSION); } catch { /* ignore */ }
+  };
 
   const handleUpload = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -263,6 +284,7 @@ export default function MasterBrain() {
       }]);
       if (!sessionId) {
         setSessionId(r.data.session_id);
+        try { localStorage.setItem(LS_ACTIVE_SESSION, r.data.session_id); } catch { /* ignore */ }
         const sr = await api.get("/master-brain/sessions");
         setSessions(sr.data);
       }
@@ -330,21 +352,33 @@ export default function MasterBrain() {
           </div>
           <div className="bg-white border border-black/10 overflow-x-auto">
             <table className="data-table">
-              <thead><tr><th>When (IST)</th><th>Who</th><th>Action</th><th>Reason</th><th>Details</th><th>Undo</th></tr></thead>
+              <thead><tr><th>When (IST)</th><th>Who</th><th>Action</th><th>Reason</th><th>Details</th><th>Chat</th><th>Undo</th></tr></thead>
               <tbody>
-                {log.length === 0 && <tr><td colSpan={6} className="text-center text-neutral-500 py-8">No actions logged yet.</td></tr>}
+                {log.length === 0 && <tr><td colSpan={7} className="text-center text-neutral-500 py-8">No actions logged yet.</td></tr>}
                 {log.map((a) => (
-                  <tr key={a.id} data-testid={`mb-log-${a.id}`} className={a.undone ? "opacity-60" : ""}>
+                  <tr key={a.id} data-testid={`mb-log-${a.id}`}
+                      className={`${a.undone ? "opacity-60" : ""} ${a.session_id ? "cursor-pointer hover:bg-red-50/50" : ""}`}
+                      title={a.session_id ? "Open the chat where this action was taken" : ""}
+                      onClick={() => a.session_id && openSession(a.session_id)}>
                     <td className="text-xs whitespace-nowrap">{fmtTime(a.timestamp)}</td>
                     <td className="text-xs">{a.user_name || a.user_email || "—"}</td>
                     <td><span className="pill pill-neutral">{(a.action || "").replace("master_brain.", "")}</span></td>
                     <td className="text-xs max-w-[280px]">{a.reason || "—"}</td>
                     <td className="text-xs font-mono">{detailFrom(a.metadata)}</td>
                     <td className="text-xs whitespace-nowrap">
+                      {a.session_id ? (
+                        <button className="k-btn k-btn-outline k-btn-sm"
+                                onClick={(e) => { e.stopPropagation(); openSession(a.session_id); }}
+                                data-testid={`mb-log-open-chat-${a.id}`}>
+                          <ScrollText className="w-3.5 h-3.5" /> Open chat
+                        </button>
+                      ) : <span className="text-neutral-400">—</span>}
+                    </td>
+                    <td className="text-xs whitespace-nowrap">
                       {a.undone ? (
                         <span className="pill pill-neutral" data-testid={`mb-undone-${a.id}`}>Undone</span>
                       ) : a.undoable ? (
-                        <button className="k-btn k-btn-outline k-btn-sm" onClick={() => { setUndoTarget(a); setUndoReason(""); }} data-testid={`mb-undo-btn-${a.id}`}>
+                        <button className="k-btn k-btn-outline k-btn-sm" onClick={(e) => { e.stopPropagation(); setUndoTarget(a); setUndoReason(""); }} data-testid={`mb-undo-btn-${a.id}`}>
                           <Undo2 className="w-3.5 h-3.5" /> Undo
                         </button>
                       ) : <span className="text-neutral-400">—</span>}
