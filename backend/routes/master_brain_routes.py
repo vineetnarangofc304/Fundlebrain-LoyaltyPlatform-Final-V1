@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any, List
 import litellm
 import pymongo
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from database import (
@@ -39,6 +40,9 @@ import logging
 logger = logging.getLogger("kazo-fundle.master-brain")
 
 MAX_TOOL_ITERATIONS = 12
+# Keeps detached streaming worker tasks alive (so a confirmed mutation finishes even if the
+# client disconnects) and prevents them being garbage-collected mid-flight.
+_BG_STREAM_TASKS: set = set()
 # Hard wall-clock cap for the tool-gathering loop. The K8s ingress returns a 502 at ~60s, so
 # we MUST finish the loop AND the final synthesis well under that. Loop ≤ this + one ~15s
 # synthesis call stays comfortably under 60s. The loop runs on FAST Sonnet so it rarely
@@ -1051,6 +1055,273 @@ async def chat(req: AIChatRequest, user: dict = Depends(require_master_admin)):
     return {"session_id": session_id, "reply": reply,
             "tools_used": [t["tool"] for t in trace], "tool_trace": trace,
             "suggested_actions": suggested_actions}
+
+
+# ============================================================
+# STREAMING (agentic) chat — live progress via Server-Sent Events
+# ------------------------------------------------------------
+# The blocking /chat request could exceed the ~60s ingress read-timeout on prod → the browser
+# showed "Sorry, I encountered a problem". This SSE endpoint streams progress continuously
+# (thinking → tool running → rows done → answer), so the connection NEVER idles into a timeout
+# and the user SEES exactly what Master Brain is doing — like a real agent. Errors are streamed
+# as a clear inline message, never a raw 500.
+_READ_TOOL_NAMES = {"run_aggregation", "customer_lookup", "get_data_dictionary",
+                    "audit_negative_balances", "audit_double_redemptions",
+                    "master_action_log", "list_campaigns"}
+
+
+def _tool_start_text(name: str) -> str:
+    pretty = (name or "").replace("_", " ")
+    if name in _READ_TOOL_NAMES:
+        return f"Querying the live database — {pretty}…"
+    return f"Executing {pretty}…"
+
+
+def _tool_summary(name: str, result: Dict[str, Any]) -> str:
+    if not isinstance(result, dict):
+        return str(result)[:300]
+    if result.get("error"):
+        return f"⚠️ {result['error']}"
+    if result.get("message"):
+        return str(result["message"])[:600]
+    order = [("matched", "matched"), ("changed", "credited"),
+             ("customers_credited", "customers credited"), ("total_points_credited", "points"),
+             ("points_credited", "points"), ("customers_reversed", "customers corrected"),
+             ("points_reversed", "excess points removed"), ("not_found", "not found"),
+             ("customers_affected", "customers affected"), ("total_excess_points", "excess pts"),
+             ("duplicate_rows", "duplicate rows"), ("count", "rows")]
+    bits = [f"{result[k]:,} {lbl}" for k, lbl in order if isinstance(result.get(k), (int, float))]
+    if result.get("preview") or result.get("confirmation_required"):
+        return "Preview ready — " + (", ".join(bits) if bits else "review & confirm below.")
+    return ", ".join(bits) if bits else "Done."
+
+
+def _friendly_error(e: Exception) -> str:
+    blob = f"{type(e).__name__}: {e}".lower()
+    if "budget" in blob:
+        return _BUDGET_MSG
+    return ("I hit a snag on that step — but I did NOT leave anything half-done (every change is "
+            "applied atomically and logged). Tell me to continue or retry and I'll pick up from here.")
+
+
+def _last_user_q(messages: List[Dict[str, Any]]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                return c
+            if isinstance(c, list):
+                return next((p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text"), "")
+    return ""
+
+
+async def _persist_turn(session_id, user, existing, stored_user_text, att_chips, reply, trace,
+                        suggested_actions, pending_action, model_label):
+    now = datetime.now(timezone.utc).isoformat()
+    user_msg = {"role": "user", "content": stored_user_text, "timestamp": now, "attachments": att_chips}
+    bot_msg = {"role": "assistant", "content": reply, "timestamp": now, "tool_trace": trace,
+               "suggested_actions": suggested_actions}
+    if existing:
+        await ai_chats_col.update_one({"id": session_id},
+            {"$push": {"messages": {"$each": [user_msg, bot_msg]}},
+             "$set": {"updated_at": now, "pending_action": pending_action}})
+    else:
+        await ai_chats_col.insert_one({
+            "id": session_id, "user_id": user["id"], "surface": "master",
+            "title": (stored_user_text or "Master Brain")[:60], "messages": [user_msg, bot_msg],
+            "pending_action": pending_action, "created_at": now, "updated_at": now, "model": model_label})
+    await log_audit(user, "master_brain_chat", "master_brain_session", session_id,
+                    {"q": (stored_user_text or "")[:200], "tools_used": [t["tool"] for t in trace],
+                     "attachments": [a["filename"] for a in att_chips]})
+    try:
+        await mb_query_log_col.insert_one({
+            "id": uuid.uuid4().hex, "user_id": user["id"], "user_email": user.get("email"),
+            "user_name": user.get("name"), "session_id": session_id,
+            "query": (stored_user_text or "")[:2000], "reply_preview": (reply or "")[:600],
+            "tools_used": [t["tool"] for t in trace],
+            "attachments": [a["filename"] for a in att_chips], "created_at": now})
+    except Exception:
+        pass
+
+
+async def _run_stream_loop(messages, model, provider, user, tools, emit, trace) -> str:
+    """Like _run_tool_loop but emits live events and has NO hard wall-clock cap (the SSE
+    heartbeats keep the connection alive, so heavy execution can take the time it needs)."""
+    for _ in range(MAX_TOOL_ITERATIONS):
+        await emit({"type": "status", "text": "Analysing…"})
+        params = _build_completion_params(messages, model, provider, tools=tools)
+        try:
+            resp = await _completion(params)
+        except _BudgetExceeded:
+            return _BUDGET_MSG
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"MB stream completion failed ({type(e).__name__}: {e})")
+            try:
+                return await _final_synthesis("", _last_user_q(messages), trace, model, provider)
+            except Exception:  # noqa: BLE001
+                return ("I gathered the data but couldn't compose the final summary — ask me to continue.")
+        msg = resp.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if tool_calls:
+            messages.append({
+                "role": "assistant", "content": msg.content or "",
+                "tool_calls": [{"id": tc.id, "type": "function",
+                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                               for tc in tool_calls]})
+            for tc in tool_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except Exception:
+                    args = {}
+                await emit({"type": "tool_start", "tool": name, "text": _tool_start_text(name)})
+                result = await _master_execute_tool(name, args, user=user)
+                trace.append({"tool": name, "args": args, "result_preview": str(result)[:500]})
+                await emit({"type": "tool_done", "tool": name, "text": _tool_summary(name, result)})
+                messages.append({"role": "tool", "tool_call_id": tc.id, "name": name,
+                                 "content": json.dumps(result, default=str)[:18000]})
+            continue
+        return msg.content or ""
+    try:
+        return await _final_synthesis("", _last_user_q(messages), trace, model, provider)
+    except Exception:  # noqa: BLE001
+        return "This is a very broad request — narrow it (a store, tier, or date range) and I'll finish it."
+
+
+async def _streaming_turn(req: AIChatRequest, user: dict, emit) -> None:
+    if not EMERGENT_LLM_KEY:
+        await emit({"type": "error", "text": "AI key not configured"})
+        return
+    session_id = req.session_id or uuid.uuid4().hex
+    await emit({"type": "session", "session_id": session_id})
+    existing = await ai_chats_col.find_one(
+        {"id": session_id, "user_id": user["id"], "surface": "master"}, {"_id": 0})
+    await emit({"type": "status", "text": "Thinking…"})
+
+    # progress hook — long mutations stream row-level progress ("1,240 / 7,664 done")
+    async def _progress(done, total, label="rows"):
+        await emit({"type": "tool_progress", "done": int(done), "total": int(total),
+                    "text": f"{int(done):,} / {int(total):,} {label}…"})
+    user["_mb_session"] = session_id
+    user["_mb_progress"] = _progress
+
+    # ---- DETERMINISTIC CONFIRM (instant apply, full DB budget, no LLM) ----
+    pend = (existing or {}).get("pending_action") if existing else None
+    if (pend and not req.force_action and not req.attachment_ids
+            and _looks_like_confirmation(req.message or "")
+            and not _confirmation_targets_new(req.message or "", pend)):
+        tool = pend.get("tool")
+        await emit({"type": "tool_start", "tool": tool,
+                    "text": f"Executing {tool.replace('_', ' ')} — applying your confirmed action…"})
+        det_apply, det_raw = await _apply_pending_action(pend, req.message or "", user)
+        if det_apply is not None:
+            await emit({"type": "tool_done", "tool": tool, "text": _tool_summary(tool, det_raw or {})})
+            reply, suggested_actions = _extract_suggested_actions(det_apply)
+            trace = [{"tool": tool, "args": {**(pend.get("args") or {}), "confirm": True},
+                      "result_preview": (str(det_raw)[:500] if det_raw is not None else "applied")}]
+            await _persist_turn(session_id, user, existing, req.message or "", [], reply, trace,
+                                suggested_actions, None, "deterministic-confirm")
+            await emit({"type": "done", "session_id": session_id, "reply": reply,
+                        "tools_used": [tool], "tool_trace": trace, "suggested_actions": suggested_actions})
+            return
+
+    # ---- build history + attachments ----
+    history = await _seeded_history(user, read_only=False)
+    if existing:
+        for m in (existing.get("messages") or [])[-12:]:
+            if m["role"] in {"user", "assistant"} and m.get("content"):
+                history.append({"role": m["role"], "content": m["content"]})
+    await MBA.bind_session(req.attachment_ids or [], user, session_id)
+    attachments = await MBA.load_for_chat(req.attachment_ids or [], user)
+    if attachments:
+        await emit({"type": "status", "text": "Reading your file…"})
+    text = req.message or ""
+    image_parts, att_chips = [], []
+    for att in attachments:
+        att_chips.append({"id": att["id"], "kind": att.get("kind"), "filename": att.get("filename")})
+        if att.get("kind") == "image":
+            image_parts.append({"type": "image_url",
+                                "image_url": {"url": f"data:{att.get('mime')};base64,{att.get('image_base64')}"}})
+        else:
+            block = MBA.build_context_block(att)
+            if block:
+                text += "\n\n" + block
+    latest = await MBA.latest_session_report(session_id, user)
+    if latest and latest["id"] not in (req.attachment_ids or []):
+        text += "\n\n" + MBA.light_report_context(latest)
+    user_content = ([{"type": "text", "text": text}] + image_parts) if image_parts else text
+    history.append({"role": "user", "content": user_content})
+
+    fa = req.force_action or None
+    if fa and fa.get("tool") in MASTER_TOOL_HANDLERS:
+        history.append({"role": "system", "content": (
+            f"The user clicked Execute on a recommended action. Call the tool "
+            f"`{fa.get('tool')}` with these arguments in PREVIEW mode now (confirm=false): "
+            f"{json.dumps(fa.get('args') or {}, default=str)}. Present the preview as a Markdown "
+            f"table, then ask the user to confirm and provide a reason before you apply it.")})
+    if not fa and not _looks_like_confirmation(req.message or ""):
+        points_att = next((a for a in attachments if a.get("mobile_points")), None) \
+            or (latest if (latest and latest.get("mobile_points")) else None)
+        if points_att and _has_action_intent(req.message or ""):
+            history.append({"role": "system", "content": (
+                f"The user wants to CREDIT the per-row points from their uploaded file "
+                f"'{points_att.get('filename')}' (attachment_id={points_att['id']}, "
+                f"{len(points_att.get('mobile_points') or [])} mobile->points rows). You MUST call the "
+                f"`credit_points_from_file` tool with attachment_id='{points_att['id']}' and confirm=false "
+                f"RIGHT NOW to generate the preview. Do NOT claim anything was credited before the tool "
+                f"returns. After the preview, ask the user to confirm + give a reason; only then apply.")})
+
+    provider, model = _resolve_model(req.model, default=("anthropic", "claude-sonnet-4-6"))
+    trace: List[Dict[str, Any]] = []
+    reply = await _run_stream_loop(history, model, provider, user, ALL_TOOL_SCHEMAS, emit, trace)
+    reply, suggested_actions = _extract_suggested_actions(reply)
+    pending_action = _pending_from_trace(trace)
+    stored_text = (req.message or "") + (f"  ·  📎 {', '.join(a['filename'] for a in att_chips)}" if att_chips else "")
+    await _persist_turn(session_id, user, existing, stored_text, att_chips, reply, trace,
+                        suggested_actions, pending_action, f"{provider}/{model}")
+    await emit({"type": "done", "session_id": session_id, "reply": reply,
+                "tools_used": [t["tool"] for t in trace], "tool_trace": trace,
+                "suggested_actions": suggested_actions})
+
+
+@router.post("/chat/stream")
+async def chat_stream(req: AIChatRequest, user: dict = Depends(require_master_admin)):
+    """Agentic streaming chat: emits live SSE events (thinking / tool running / rows done /
+    final answer). Never blocks past the ingress timeout; errors stream as a clear message."""
+    async def event_source():
+        q: asyncio.Queue = asyncio.Queue()
+
+        async def emit(evt):
+            await q.put(evt)
+
+        async def worker():
+            try:
+                await _streaming_turn(req, user, emit)
+            except Exception as e:  # noqa: BLE001 — never surface a raw 500 to the stream
+                logger.exception("MB streaming turn crashed")
+                await emit({"type": "error", "text": _friendly_error(e)})
+            finally:
+                await emit({"type": "__end__"})
+
+        # Run the turn as a detached task: even if the client disconnects, a confirmed
+        # mutation still completes + persists (never leaves data half-applied).
+        task = asyncio.create_task(worker())
+        _BG_STREAM_TASKS.add(task)
+        task.add_done_callback(_BG_STREAM_TASKS.discard)
+        yield ": open\n\n"
+        while True:
+            try:
+                evt = await asyncio.wait_for(q.get(), timeout=10)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"       # keep-alive so the proxy never idles into a timeout
+                continue
+            if evt.get("type") == "__end__":
+                break
+            yield f"data: {json.dumps(evt, default=str)}\n\n"
+
+    return StreamingResponse(event_source(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache, no-transform",
+                                      "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
 
 @router.get("/query-log")

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import api from "@/lib/api";
+import api, { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "./_shared";
-import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History, Zap, Coins, AlertTriangle } from "lucide-react";
+import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History, Zap, Coins, AlertTriangle, CheckCircle2, Cpu } from "lucide-react";
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
@@ -269,29 +269,78 @@ export default function MasterBrain() {
     if ((!msg.trim() && attachments.length === 0 && !forceAction) || loading) return;
     const atts = attachments;
     setLoading(true);
-    setMessages((m) => [...m, { role: "user", content: msg, attachments: atts, timestamp: new Date().toISOString() }]);
+    const liveId = `live_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    setMessages((m) => [
+      ...m,
+      { role: "user", content: msg, attachments: atts, timestamp: new Date().toISOString() },
+      { role: "assistant", live: true, liveId, status: "Thinking…", activity: [], content: "", tool_trace: [], suggested_actions: [], timestamp: new Date().toISOString() },
+    ]);
     setInput("");
     setAttachments([]);
+
+    const patchLive = (patch) => setMessages((m) => m.map((x) =>
+      (x.liveId === liveId ? { ...x, ...(typeof patch === "function" ? patch(x) : patch) } : x)));
+
+    let finalized = false;
     try {
-      const r = await api.post("/master-brain/chat", {
-        session_id: sessionId, message: msg, attachment_ids: atts.map((a) => a.id),
-        force_action: forceAction || undefined,
+      const res = await fetch(`${API_URL}/master-brain/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("kazo_token")}` },
+        body: JSON.stringify({ session_id: sessionId, message: msg, attachment_ids: atts.map((a) => a.id), force_action: forceAction || undefined }),
       });
-      setMessages((m) => [...m, {
-        role: "assistant", content: r.data.reply, tool_trace: r.data.tool_trace || [],
-        suggested_actions: r.data.suggested_actions || [],
-        timestamp: new Date().toISOString(),
-      }]);
-      if (!sessionId) {
-        setSessionId(r.data.session_id);
-        try { localStorage.setItem(LS_ACTIVE_SESSION, r.data.session_id); } catch { /* ignore */ }
-        const sr = await api.get("/master-brain/sessions");
-        setSessions(sr.data);
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const chunks = buf.split("\n\n");
+        buf = chunks.pop();
+        for (const chunk of chunks) {
+          const dataLine = chunk.split("\n").find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          const payload = dataLine.slice(5).trim();
+          if (!payload) continue;
+          let evt; try { evt = JSON.parse(payload); } catch { continue; }
+          if (evt.type === "session") {
+            if (!sessionId && evt.session_id) {
+              setSessionId(evt.session_id);
+              try { localStorage.setItem(LS_ACTIVE_SESSION, evt.session_id); } catch { /* ignore */ }
+            }
+          } else if (evt.type === "status") {
+            patchLive({ status: evt.text });
+          } else if (evt.type === "tool_start") {
+            patchLive((x) => ({ status: evt.text, activity: [...(x.activity || []), { kind: "run", tool: evt.tool, text: evt.text }] }));
+          } else if (evt.type === "tool_progress") {
+            patchLive((x) => {
+              const act = [...(x.activity || [])];
+              for (let k = act.length - 1; k >= 0; k--) { if (act[k].kind === "run") { act[k] = { ...act[k], progress: evt.text }; break; } }
+              return { activity: act, status: evt.text };
+            });
+          } else if (evt.type === "tool_done") {
+            patchLive((x) => ({ activity: [...(x.activity || []), { kind: "done", tool: evt.tool, text: evt.text }] }));
+          } else if (evt.type === "done") {
+            finalized = true;
+            patchLive({ live: false, status: null, activity: undefined, content: evt.reply, tool_trace: evt.tool_trace || [], suggested_actions: evt.suggested_actions || [] });
+            if (!sessionId && evt.session_id) {
+              setSessionId(evt.session_id);
+              try { localStorage.setItem(LS_ACTIVE_SESSION, evt.session_id); } catch { /* ignore */ }
+            }
+            api.get("/master-brain/sessions").then((r) => setSessions(r.data)).catch(() => {});
+            if (tab === "log") loadLog();
+          } else if (evt.type === "error") {
+            finalized = true;
+            patchLive({ live: false, status: null, activity: undefined, content: evt.text });
+          }
+        }
       }
-      if (tab === "log") loadLog();
+      if (!finalized) {
+        patchLive({ live: false, status: null, activity: undefined, content: "The response ended early. Your data is safe — tell me to continue and I'll pick up from here." });
+      }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Master Brain error");
-      setMessages((m) => [...m, { role: "assistant", content: "Sorry, I encountered an error. Please try again.", timestamp: new Date().toISOString() }]);
+      patchLive({ live: false, status: null, activity: undefined, content: "Sorry, the connection dropped. Nothing was left half-done — ask me to continue or retry." });
     } finally {
       setLoading(false);
     }
@@ -623,6 +672,29 @@ export default function MasterBrain() {
                   <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} fade-up`}>
                     <div className={`max-w-2xl ${m.role === "user" ? "kazo-bg-black text-white whitespace-pre-wrap" : "bg-white border border-black/10"} p-4 leading-relaxed text-sm`}>
                       {m.role === "assistant" && <div className="text-[10px] uppercase tracking-widest text-red-600 mb-2 flex items-center gap-1"><ShieldAlert className="w-3 h-3" /> MASTER BRAIN</div>}
+                      {m.role === "assistant" && m.live && (
+                        <div className="space-y-2 mb-1" data-testid={`mb-live-${i}`}>
+                          <div className="flex items-center gap-2 text-sm text-neutral-800">
+                            <Loader2 className="w-4 h-4 animate-spin text-red-600" />
+                            <span className="font-medium" data-testid={`mb-live-status-${i}`}>{m.status || "Working…"}</span>
+                          </div>
+                          {(m.activity || []).length > 0 && (
+                            <div className="space-y-1.5 border-l-2 border-red-200 pl-3 ml-1">
+                              {m.activity.map((act, ai) => (
+                                <div key={ai} className="flex items-start gap-2 text-xs" data-testid={`mb-live-act-${i}-${ai}`}>
+                                  {act.kind === "done"
+                                    ? <CheckCircle2 className="w-3.5 h-3.5 text-green-600 mt-0.5 shrink-0" />
+                                    : <Cpu className="w-3.5 h-3.5 text-red-500 mt-0.5 shrink-0 animate-pulse" />}
+                                  <div className="min-w-0">
+                                    <div className="text-neutral-700 leading-snug">{act.text}</div>
+                                    {act.progress && <div className="text-[11px] text-red-700 font-mono mt-0.5">{act.progress}</div>}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                       {m.tool_trace && m.tool_trace.length > 0 && (
                         <div className="mb-2 -mt-1 flex flex-wrap gap-1.5" data-testid={`mb-tool-trace-${i}`}>
                           {m.tool_trace.map((t, j) => (
@@ -641,7 +713,7 @@ export default function MasterBrain() {
                           ))}
                         </div>
                       )}
-                      {m.role === "assistant" ? <MarkdownMessage content={m.content} /> : m.content}
+                      {m.role === "assistant" ? (m.content ? <MarkdownMessage content={m.content} /> : null) : m.content}
                       {m.role === "assistant" && m.suggested_actions && m.suggested_actions.length > 0 && (
                         <div className="mt-3 border-t border-black/10 pt-3 space-y-2" data-testid={`mb-suggestions-${i}`}>
                           <div className="text-[10px] uppercase tracking-widest text-red-600 flex items-center gap-1"><Zap className="w-3 h-3" /> Execute a recommendation</div>
@@ -663,9 +735,6 @@ export default function MasterBrain() {
                     </div>
                   </div>
                 ))}
-                {loading && (
-                  <div className="flex justify-start"><div className="bg-white border border-black/10 p-4 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Thinking & checking the database…</div></div>
-                )}
                 <div ref={bottomRef} />
               </div>
             </div>

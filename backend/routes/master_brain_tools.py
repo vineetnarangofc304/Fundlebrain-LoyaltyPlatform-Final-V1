@@ -641,6 +641,8 @@ async def _credit_pairs(pairs, reason, user, job_id=None):
         total_credited += pts
 
     done = 0
+    total_ops = len(upd_ops)
+    prog = (user or {}).get("_mb_progress")
     for i in range(0, len(upd_ops), CREDIT_BATCH):
         with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
             await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
@@ -648,6 +650,9 @@ async def _credit_pairs(pairs, reason, user, job_id=None):
         if job_id:
             await mb_credit_jobs_col.update_one({"id": job_id},
                 {"$set": {"processed": done, "changed": changed, "heartbeat": _now_iso()}})
+        if prog:
+            try: await prog(done, total_ops, "customers credited")
+            except Exception: pass
     for i in range(0, len(ledger_docs), CREDIT_BATCH):
         with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
             await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
@@ -883,6 +888,10 @@ async def _tool_reverse_duplicate_bonus_credits(filter_reason: str = "", since: 
     for i in range(0, len(upd_ops), CREDIT_BATCH):
         with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
             await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+        _p = (user or {}).get("_mb_progress")
+        if _p:
+            try: await _p(min(i + CREDIT_BATCH, len(upd_ops)), len(upd_ops), "customers corrected")
+            except Exception: pass
     for i in range(0, len(ledger_docs), CREDIT_BATCH):
         with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
             await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)

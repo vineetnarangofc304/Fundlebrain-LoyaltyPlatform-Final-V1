@@ -224,7 +224,7 @@ _LOG_SKIP_PREFIXES = (
 )
 _LOG_MAX_BYTES = 50_000
 _LOG_STREAMING_HINTS = ("text/csv", "application/pdf", "spreadsheetml",
-                        "octet-stream", "application/zip")
+                        "octet-stream", "application/zip", "text/event-stream")
 
 
 def _decode_actor_email(request: Request) -> Optional[str]:
