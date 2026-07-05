@@ -707,11 +707,15 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
     plan = {"action": "credit_points_from_file", "file": att.get("filename"),
             "rows": len(pairs), "total_points": total_points, "awards_bonus": True,
             "dup_mobiles": att.get("dup_mobiles") or 0}
+    when_disp = None
     if prior:
+        _t = _parse_iso(prior.get("created_at"))
+        when_disp = _t.strftime("%d %b %Y, %H:%M UTC") if _t else str(prior.get("created_at"))
         plan["already_credited"] = {
-            "when": prior.get("created_at"), "by": prior.get("created_by"),
+            "when": when_disp, "when_iso": prior.get("created_at"), "by": prior.get("created_by"),
             "audit_id": prior.get("audit_id"), "customers_credited": prior.get("changed"),
-            "points_credited": prior.get("total_points_credited")}
+            "points_credited": prior.get("total_points_credited"),
+            "note": "Show 'when' EXACTLY as given — do not reformat or recompute the date."}
     if not confirm:
         sample_map = await _bulk_find_customers([p["mobile"] for p in pairs[:8]])
         sample = []
@@ -724,7 +728,7 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
         plan["sample"] = sample
         if prior and not force:
             plan["warning"] = ("⚠️ This EXACT file (same mobiles + points) was ALREADY credited on "
-                               f"{prior.get('created_at')} by {prior.get('created_by')} "
+                               f"{when_disp} by {prior.get('created_by')} "
                                f"({prior.get('changed')} customers, {prior.get('total_points_credited')} points, "
                                f"audit {prior.get('audit_id')}). Crediting again would DOUBLE their points. "
                                "Only proceed if the user EXPLICITLY confirms they want to credit it a SECOND "
@@ -740,7 +744,7 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
     # IDEMPOTENCY BLOCK: refuse a duplicate credit of the same file unless explicitly forced.
     if prior and not force:
         return {"error": "ALREADY_CREDITED", "blocked": True, **plan,
-                "message": (f"🛑 NOT credited — this exact file was already credited on {prior.get('created_at')} "
+                "message": (f"🛑 NOT credited — this exact file was already credited on {when_disp} "
                             f"by {prior.get('created_by')} ({prior.get('changed')} customers, "
                             f"{prior.get('total_points_credited')} points; audit {prior.get('audit_id')}). "
                             "I blocked it to prevent double-crediting. If you truly intend to credit these "
