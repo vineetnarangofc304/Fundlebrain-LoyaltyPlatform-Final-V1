@@ -15,6 +15,7 @@ traceable and reversible. Audit entries use action `master_brain.*`.
 """
 import uuid
 import asyncio
+import hashlib
 import logging
 import time as _time
 import pymongo
@@ -25,6 +26,7 @@ from pymongo import UpdateOne
 from database import (
     customers_col, points_ledger_col, audit_logs_col, loyalty_config_col,
     mb_action_snapshots_col, master_campaigns_col, mb_credit_jobs_col,
+    mb_credit_receipts_col,
 )
 
 # Inline apply is bounded to keep the chat request fast; bigger jobs are routed
@@ -659,13 +661,23 @@ async def _credit_pairs(pairs, reason, user, job_id=None):
             "total_points_credited": total_credited}
 
 
+def _credit_signature(pairs: List[Dict[str, Any]]) -> str:
+    """Stable content hash of the (mobile, points) set — identifies the SAME credit file
+    regardless of upload id, so an accidental re-run can be detected and blocked."""
+    body = ";".join(f"{p.get('mobile')}:{int(p.get('points') or 0)}"
+                    for p in sorted(pairs, key=lambda x: str(x.get("mobile"))))
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
 async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "",
-                                        confirm: bool = False, user=None) -> Dict[str, Any]:
+                                        confirm: bool = False, force: bool = False,
+                                        user=None) -> Dict[str, Any]:
     """Credit a DIFFERENT (per-row) number of points to each mobile listed in an uploaded
     CSV/XLSX that has a mobile column AND a points column. Points are added as BONUS
     (points_balance + lifetime_points_earned); tier is spend-based so it is unaffected.
     Runs INLINE with an efficient indexed bulk lookup + bulk_write, so even several thousand
-    rows finish in a couple of seconds and results are returned immediately."""
+    rows finish in a couple of seconds and results are returned immediately. IDEMPOTENT: the
+    same file (same mobiles+points) cannot be credited twice within 30 days unless force=true."""
     err = _require_master(user)
     if err:
         return err
@@ -687,9 +699,19 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
                          "points column (e.g. 'MOBILE' and 'Points to be Credit'). If every number should get "
                          "the SAME amount, use apply_to_uploaded_report with grant_points instead."}
     total_points = sum(int(p.get("points") or 0) for p in pairs)
+    sig = _credit_signature(pairs)
+    # Idempotency: has this exact file already been credited recently?
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    prior = await mb_credit_receipts_col.find_one(
+        {"signature": sig, "created_at": {"$gte": since}}, {"_id": 0}, sort=[("created_at", -1)])
     plan = {"action": "credit_points_from_file", "file": att.get("filename"),
             "rows": len(pairs), "total_points": total_points, "awards_bonus": True,
             "dup_mobiles": att.get("dup_mobiles") or 0}
+    if prior:
+        plan["already_credited"] = {
+            "when": prior.get("created_at"), "by": prior.get("created_by"),
+            "audit_id": prior.get("audit_id"), "customers_credited": prior.get("changed"),
+            "points_credited": prior.get("total_points_credited")}
     if not confirm:
         sample_map = await _bulk_find_customers([p["mobile"] for p in pairs[:8]])
         sample = []
@@ -700,6 +722,13 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
                            "balance_before": (c or {}).get("points_balance")})
         plan["preview"] = True
         plan["sample"] = sample
+        if prior and not force:
+            plan["warning"] = ("⚠️ This EXACT file (same mobiles + points) was ALREADY credited on "
+                               f"{prior.get('created_at')} by {prior.get('created_by')} "
+                               f"({prior.get('changed')} customers, {prior.get('total_points_credited')} points, "
+                               f"audit {prior.get('audit_id')}). Crediting again would DOUBLE their points. "
+                               "Only proceed if the user EXPLICITLY confirms they want to credit it a SECOND "
+                               "time — in which case call again with confirm=true AND force=true.")
         plan["confirmation_required"] = ("Confirm with the user + capture a reason, then call again with "
                                           "confirm=true. Credits each mobile ITS OWN points value from the file.")
         return plan
@@ -708,18 +737,159 @@ async def _tool_credit_points_from_file(attachment_id: str = "", reason: str = "
         return rerr
     if len(pairs) > INLINE_CAP:
         return {"error": f"{len(pairs)} rows exceeds the cap ({INLINE_CAP}). Split the file and run it in parts."}
+    # IDEMPOTENCY BLOCK: refuse a duplicate credit of the same file unless explicitly forced.
+    if prior and not force:
+        return {"error": "ALREADY_CREDITED", "blocked": True, **plan,
+                "message": (f"🛑 NOT credited — this exact file was already credited on {prior.get('created_at')} "
+                            f"by {prior.get('created_by')} ({prior.get('changed')} customers, "
+                            f"{prior.get('total_points_credited')} points; audit {prior.get('audit_id')}). "
+                            "I blocked it to prevent double-crediting. If you truly intend to credit these "
+                            "customers a SECOND time, say 'yes, credit again (force)' and I'll proceed.")}
 
     # Run INLINE (efficient batched: indexed bulk find + bulk_write + insert_many). Even a
     # 7-8k row file finishes in ~2-5s, so we return the applied result immediately — no queue.
     r = await _credit_pairs(pairs, reason, user)
+    await mb_credit_receipts_col.insert_one({
+        "id": str(uuid.uuid4()), "signature": sig, "attachment_id": att.get("id"),
+        "filename": att.get("filename"), "audit_id": r["audit_id"], "changed": r["changed"],
+        "matched": r["matched"], "total_points_credited": r["total_points_credited"],
+        "reason": reason, "created_at": _now_iso(), "created_by": user.get("email"),
+        "forced": bool(force)})
     return {"ok": True, "applied": True, **plan, "audit_id": r["audit_id"],
             "matched_customers": r["matched"], "changed": r["changed"],
             "not_found": r["not_found"], "skipped_zero": r["skipped_zero"],
-            "total_points_credited": r["total_points_credited"],
+            "total_points_credited": r["total_points_credited"], "was_forced_recredit": bool(prior),
             "message": f"Credited points from '{att.get('filename')}': {r['changed']} customers credited "
                        f"{r['total_points_credited']} points total ({r['matched']} matched, "
                        f"{r['not_found']} not found"
-                       + (f", {r['skipped_zero']} zero-value rows skipped" if r['skipped_zero'] else "") + ")."}
+                       + (f", {r['skipped_zero']} zero-value rows skipped" if r['skipped_zero'] else "")
+                       + (" [FORCED re-credit]" if prior and force else "") + ")."}
+
+
+def _parse_iso(ts: Any):
+    try:
+        return datetime.fromisoformat(str(ts))
+    except Exception:
+        return None
+
+
+async def _tool_reverse_duplicate_bonus_credits(filter_reason: str = "", since: str = "",
+                                                 window_hours: int = 72, reason: str = "",
+                                                 confirm: bool = False, user=None) -> Dict[str, Any]:
+    """REMEDIATION (Master Admin). Find customers who received the SAME Master-Brain BONUS credit
+    MORE THAN ONCE (accidental re-runs => stacked `$inc`) and reverse the SURPLUS, keeping exactly
+    ONE copy each. Groups master_brain bonus ledger rows by (mobile, points, reason); within a
+    group, rows created within `window_hours` of the first are treated as duplicates. On apply it
+    deducts the excess from points_balance + lifetime_points_earned and writes ONE compensating
+    negative adjustment per customer (originals kept for audit). Preview first (confirm=false),
+    then confirm=true + reason. Audit-logged, snapshotted, UNDOABLE."""
+    err = _require_master(user)
+    if err:
+        return err
+    match: Dict[str, Any] = {"type": "bonus", "reference_type": "master_brain"}
+    if filter_reason:
+        match["reason"] = filter_reason
+    since_iso = since or (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    match["created_at"] = {"$gte": since_iso}
+    pipeline = [
+        {"$match": match},
+        {"$group": {"_id": {"m": "$customer_mobile", "p": "$points", "r": "$reason"},
+                    "rows": {"$push": {"created_at": "$created_at"}},
+                    "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    groups: List[Dict[str, Any]] = []
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        async for g in points_ledger_col.aggregate(pipeline, allowDiskUse=True):
+            groups.append(g)
+
+    per_customer: Dict[str, Dict[str, Any]] = {}
+    total_excess_points = 0
+    total_dupe_rows = 0
+    for g in groups:
+        m = g["_id"]["m"]
+        pts = int(g["_id"]["p"] or 0)
+        rows = sorted(g["rows"], key=lambda r: r.get("created_at") or "")
+        t0 = _parse_iso(rows[0].get("created_at"))
+        dupes = 0
+        for r in rows[1:]:
+            tr = _parse_iso(r.get("created_at"))
+            if (t0 is None or tr is None) or (tr - t0).total_seconds() <= window_hours * 3600:
+                dupes += 1
+        if dupes <= 0 or pts == 0:
+            continue
+        ex = pts * dupes
+        c = per_customer.setdefault(m, {"excess_points": 0, "dupe_rows": 0})
+        c["excess_points"] += ex
+        c["dupe_rows"] += dupes
+        total_excess_points += ex
+        total_dupe_rows += dupes
+
+    plan = {"action": "reverse_duplicate_bonus_credits",
+            "filter_reason": filter_reason or "(all master_brain bonus)",
+            "since": since_iso, "window_hours": window_hours,
+            "customers_affected": len(per_customer),
+            "duplicate_rows": total_dupe_rows,
+            "total_excess_points": total_excess_points}
+    if not confirm:
+        plan["preview"] = True
+        plan["sample"] = [{"mobile": m, "excess_points": c["excess_points"],
+                           "duplicate_extra_rows": c["dupe_rows"]}
+                          for m, c in list(per_customer.items())[:10]]
+        if not per_customer:
+            plan["note"] = "No duplicate master_brain bonus credits found in this scope."
+        plan["confirmation_required"] = ("Confirm with the user + capture a reason, then call again with "
+                                          "confirm=true. Reverses only the SURPLUS credits (keeps ONE each).")
+        return plan
+    if not per_customer:
+        return {"ok": True, "applied": True, **plan,
+                "message": "No duplicate master_brain bonus credits found in that scope — nothing to reverse."}
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+
+    cust_map = await _bulk_find_customers(list(per_customer.keys()))
+    upd_ops: List[Any] = []
+    ledger_docs: List[Dict[str, Any]] = []
+    changes: List[Dict[str, Any]] = []
+    reversed_points = 0
+    for m, c in per_customer.items():
+        cust = cust_map.get(_last10(m))
+        if not cust:
+            continue
+        ex = int(c["excess_points"])
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        lt = int(cust.get("lifetime_points_earned") or 0)
+        upd_ops.append(UpdateOne({"id": cid}, {"$inc": {"points_balance": -ex,
+                                                        "lifetime_points_earned": -ex}}))
+        ledger_docs.append({"id": str(uuid.uuid4()), "customer_mobile": cust.get("mobile"),
+                            "points": -ex, "type": "adjust", "kind": "adjust",
+                            "reference_type": "master_brain",
+                            "reason": f"Reversal of {c['dupe_rows']} duplicate bonus credit(s) — {reason}",
+                            "created_at": _now_iso(), "created_by": user.get("email"), "via": "master_brain"})
+        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
+                        "points_before": cur, "points_after": cur - ex,
+                        "lifetime_before": lt, "lifetime_after": lt - ex})
+        reversed_points += ex
+
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    for i in range(0, len(ledger_docs), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+    audit_id = await _log_master(user, "reverse_duplicate_credits", "customers", "bulk", reason,
+                                 {"customers_affected": len(changes), "duplicate_rows": total_dupe_rows,
+                                  "total_excess_points": reversed_points, "filter_reason": filter_reason,
+                                  "since": since_iso})
+    await _record_snapshot(audit_id, "reverse_duplicate_credits", changes)
+    return {"ok": True, "applied": True, **plan, "audit_id": audit_id,
+            "customers_reversed": len(changes), "points_reversed": reversed_points,
+            "message": (f"Reversed duplicate bonus credits: {len(changes)} customers, removed "
+                        f"{reversed_points} excess points across {total_dupe_rows} duplicate rows "
+                        f"(kept ONE credit each). A correcting adjustment was logged per customer. "
+                        f"Audit {audit_id} — this is undoable.")}
 
 
 async def _record_snapshot(audit_id: str, action: str, changes: List[Dict[str, Any]]) -> None:
@@ -1545,9 +1715,32 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                        "(If EVERY number should get the SAME amount, use apply_to_uploaded_report with grant_points "
                        "instead.) ALWAYS confirm=false first to preview (row count, total points, and a sample of "
                        "mobile->points with current balances); then after the user approves + gives a reason, "
-                       "confirm=true + reason. Audit-logged, writes a ledger row per customer, and is UNDOABLE.",
+                       "confirm=true + reason. Audit-logged, writes a ledger row per customer, and is UNDOABLE. "
+                       "IDEMPOTENT: crediting the SAME file twice is BLOCKED (returns already_credited / a warning) "
+                       "to prevent double-crediting; only if the user EXPLICITLY wants to credit it AGAIN, pass "
+                       "force=true together with confirm=true.",
         "parameters": {"type": "object", "properties": {
             "attachment_id": {"type": "string", "description": "id of the uploaded points file (from the context block)"},
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+            "force": {"type": "boolean", "default": False,
+                      "description": "Set true (with confirm=true) ONLY to intentionally credit a file that was already credited before."},
+        }}}},
+    {"type": "function", "function": {
+        "name": "reverse_duplicate_bonus_credits",
+        "description": "REMEDIATION (Master Admin). Detect and REVERSE customers who were BONUS-credited the SAME "
+                       "amount MORE THAN ONCE via Master Brain (accidental re-runs stacking points), keeping exactly "
+                       "ONE credit each. Use this to CLEAN UP double/triple/quadruple crediting. It groups "
+                       "master_brain bonus ledger rows by (mobile, points, reason); rows within `window_hours` of the "
+                       "first are treated as duplicates. On apply it deducts the excess from balance + "
+                       "lifetime_points_earned and logs a correcting adjustment per customer. ALWAYS confirm=false "
+                       "first to preview the number of affected customers + total excess points; then confirm=true + "
+                       "reason. Scope it with `filter_reason` (the exact credit reason to clean) and/or `since` (ISO "
+                       "datetime) to be precise. Audit-logged, snapshotted, UNDOABLE.",
+        "parameters": {"type": "object", "properties": {
+            "filter_reason": {"type": "string", "description": "Only clean bonus rows with this exact reason (recommended for precision)."},
+            "since": {"type": "string", "description": "ISO datetime; only consider credits created at/after this (defaults to last 30 days)."},
+            "window_hours": {"type": "integer", "default": 72, "description": "Rows within this many hours of the first are counted as duplicates."},
             "reason": {"type": "string"},
             "confirm": {"type": "boolean", "default": False},
         }}}},
@@ -1649,6 +1842,7 @@ MASTER_TOOL_HANDLERS = {
     "master_action_log": _tool_master_action_log,
     "apply_to_uploaded_report": _tool_apply_to_uploaded_report,
     "credit_points_from_file": _tool_credit_points_from_file,
+    "reverse_duplicate_bonus_credits": _tool_reverse_duplicate_bonus_credits,
     "undo_action": _tool_undo_action,
     "send_campaign": _tool_send_campaign,
     "list_campaigns": _tool_list_campaigns,

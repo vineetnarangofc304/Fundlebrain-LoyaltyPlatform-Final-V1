@@ -1,0 +1,32 @@
+{
+  "summary": "Verified all 3 production-incident fixes for Master Brain credit_points_from_file via the live chat endpoint: (1) IDEMPOTENCY — same-file re-credit is blocked, customer balances did NOT increase a second time; (2) FORCE OVERRIDE — explicit 'force it' request causes force=true tool call and balances stack; (3) reverse_duplicate_bonus_credits — cleans up seeded 4x-duplicate ledger (116 -> 29) with correct compensating negative adjust row, original ledger rows preserved, and undo restores balance to 116; (4) ANTI-FABRICATION — asked 'how many were over-credited?' → AI called reverse_duplicate_bonus_credits (preview) and reported the REAL scan (2 customers / 4 rows / 137 pts), no invented '34/27/11576' figures. Also confirmed schema has force:boolean and no credit_job_status tool. 5/5 tests pass in 83s.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/master-brain/chat (credit_points_from_file preview when prior receipt exists)", "issue": "AI-rendered warning table showed a plausible-but-mis-formatted 'Previously credited on 2026-07-05 at 09:20 UTC' — the receipt.created_at is stored as an ISO timestamp; the model reformatted it and the resulting human date does not match the receipt (formatted from now-ish). Not a correctness issue (audit_id, points_credited, customers_credited are correct and the block worked), but worth normalising the receipt.created_at display in the plan or explicitly telling the model not to re-format dates."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_mb_idempotency_and_remediation.py",
+    "/app/test_reports/pytest/iteration82.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "master_brain_tools.py is still ~1876 lines and continues to grow — the incident-fix work added _tool_reverse_duplicate_bonus_credits (~117 lines) into the same file. Please split per-tool modules (credit, reverse, undo, campaign, read) — carried over from iter 81.",
+    "_tool_credit_points_from_file: `prior` receipt lookup uses signature+created_at>=30d-ago; if signature collides across DIFFERENT master admins/tenants, one admin's receipt would block another. Consider scoping the receipt lookup by created_by (or tenant) for multi-admin safety, OR document that this is intentionally global for the KAZO single-tenant deploy.",
+    "reverse_duplicate_bonus_credits window_hours default = 72 but the receipt-block window is 30 days — these two windows can disagree (a duplicate credited 4 days apart is blocked by receipts but its ledger duplicates would not be grouped by reverse). Consider aligning defaults or documenting the difference.",
+    "The receipt document lacks a TTL index / rotation — mb_credit_receipts will grow unboundedly. Add a TTL index on created_at (e.g. 90 days) since the guard only cares about the last 30 days.",
+    "The anti-fabrication rule is prompt-only (no post-hoc check). Model complied in this run, but a lightweight backend guard (e.g. if AI reply contains large numeric tables and tools_used is empty, append a disclaimer) would be safer defence-in-depth."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_mb_idempotency_and_remediation.py"
+  ],
+  "success_rate": {"backend": "100% (5/5)", "frontend": "N/A"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (from /app/memory/test_credentials.md).",
+  "seed_data_creation": "Throwaway customers ids MBQA82_9990080001..3 (base 100 pts) and MBQA82_9990080011 (inflated to 116). For the remediation test, 4 identical points_ledger 'bonus' rows (29 pts, reason='bonus top up campaign TEST82') were inserted directly on 9990080011. All customers, ledger rows, mb_credit_receipts (filename qa82_credit.csv), attachments, audit_logs (reason regex QA82) and mb_action_snapshots are cleaned up in the module-scope fixture teardown.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New permanent regression file: /app/backend/tests/test_mb_idempotency_and_remediation.py (5 tests, ~85s). It is self-cleaning and does NOT touch real customers (uses 9990080XXX). If LLM budget is exhausted the chat endpoint returns 'AI usage budget exhausted' — re-run once. Iter 81 test file (test_mb_credit_points_from_file.py) remains valid for the earlier inline-credit fix.",
+  "rca of the issue": "N/A — this iteration validates the incident fixes. Root cause of the original bug (per code): _credit_pairs uses $inc for points_balance/lifetime_points_earned; a re-run therefore stacked identical credits. Fix (verified): _credit_signature (sha256 of sorted 'mobile:points' pairs) is stored in mb_credit_receipts_col on every successful credit; on a subsequent call the tool short-circuits with error='ALREADY_CREDITED' & blocked=True unless force=true. Remediation tool aggregates points_ledger by (mobile, points, reason) within window_hours, deducts (count-1)*points from balance+lifetime and writes ONE negative 'adjust' ledger row (originals kept). Undo goes through the standard snapshot mechanism."
+}
