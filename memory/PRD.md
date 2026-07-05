@@ -33,6 +33,13 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Iteration 98 (Jul 5, 2026) — 🟢 NEW: "Bulk Credits" admin panel (history + one-click reverse-duplicates)
+Built the requested admin UI on top of iter-97's tools so admins get a clear audit trail and self-serve cleanup without the chat.
+- **Backend (`master_brain_routes.py`, master-admin gated):** `GET /master-brain/credit-receipts` (lists `mb_credit_receipts` — file, when, by, customers credited, points credited, reason, forced flag); `POST /master-brain/reverse-duplicate-credits/preview` and `/apply` (thin wrappers over `_tool_reverse_duplicate_bonus_credits`).
+- **Frontend (`MasterBrain.jsx`):** new "Bulk Credits" tab (Coins icon) with a receipts table + per-file **"Reverse duplicates"** button → modal that scans (spinner) and shows a real preview card (customers affected / extra credits / excess points), requires a reason, then applies (result toast + reload). "No duplicates found" state handled. All elements have data-testids (mb-credits, mb-receipt-*, mb-reverse-btn-*, mb-reverse-modal, mb-reverse-preview, mb-reverse-reason, mb-reverse-confirm).
+- **Verified (preview):** endpoints return correctly; screenshot shows the tab + receipt row rendering; the reverse modal showed the seeded 4× scenario as 1 customer / 3 extra / 87 excess; the apply endpoint corrected the balance 116→29. Demo data cleaned up. ⚠️ **Redeploy required** to use it on production (great for running the actual cleanup of the incident there).
+
+
 ### Iteration 97 (Jul 5, 2026) — 🔴 P0: prod 4× over-credit + hallucinated report → idempotency guard, reverse-duplicates cleanup, anti-fabrication
 Prod incident (screenshots): the SAME customer had 4 identical BONUS ledger rows (e.g. +29 at 07:48/07:49/07:50/07:53) — points credited ~4×. Query log showed the credit was RE-RUN repeatedly ("yes" 09:07, "go ahead reason bonus top up campaign" 09:15) because it looked stuck; `$inc` credits aren't idempotent → stacked. Separately, Master Brain HALLUCINATED a fake damage report ("34 customers / 27 over-credited / 11,576 excess") and later admitted "my previous response was entirely fabricated."
 - **Fix 1 — Idempotency guard:** every successful credit writes a receipt (`mb_credit_receipts_col`) keyed by a `_credit_signature` = sha256 of the sorted `mobile:points` set. A repeat credit of the SAME file within 30 days returns `{error:'ALREADY_CREDITED', blocked:true}` and does NOT credit; overridable only with the new explicit `force=true` (with confirm). Blocks the exact "re-ran it 4 times" vector.

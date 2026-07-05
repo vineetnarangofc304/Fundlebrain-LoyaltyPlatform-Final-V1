@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "./_shared";
-import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History, Zap } from "lucide-react";
+import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History, Zap, Coins, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
@@ -60,6 +60,14 @@ export default function MasterBrain() {
   const [undoReason, setUndoReason] = useState("");
   const [undoing, setUndoing] = useState(false);
 
+  // Bulk points-credit history + duplicate-reversal
+  const [receipts, setReceipts] = useState([]);
+  const [revTarget, setRevTarget] = useState(null);   // the receipt being cleaned
+  const [revPreview, setRevPreview] = useState(null);  // { customers_affected, duplicate_rows, total_excess_points }
+  const [revReason, setRevReason] = useState("");
+  const [revLoading, setRevLoading] = useState(false);
+  const [revApplying, setRevApplying] = useState(false);
+
   // campaigns
   const [campaigns, setCampaigns] = useState([]);
 
@@ -108,6 +116,34 @@ export default function MasterBrain() {
     try { const r = await api.get("/master-brain/datasets"); setDatasets(r.data.datasets || []); }
     catch { /* ignore */ }
   };
+  const loadReceipts = async () => {
+    try { const r = await api.get("/master-brain/credit-receipts"); setReceipts(r.data.receipts || []); }
+    catch { /* ignore */ }
+  };
+  const openReverse = async (rc) => {
+    setRevTarget(rc); setRevPreview(null); setRevReason(""); setRevLoading(true);
+    try {
+      const r = await api.post("/master-brain/reverse-duplicate-credits/preview", { filter_reason: rc.reason || "" });
+      setRevPreview(r.data);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't scan for duplicates.");
+      setRevTarget(null);
+    } finally { setRevLoading(false); }
+  };
+  const confirmReverse = async () => {
+    if (!revReason.trim()) return;
+    setRevApplying(true);
+    try {
+      const r = await api.post("/master-brain/reverse-duplicate-credits/apply", {
+        filter_reason: revTarget.reason || "", reason: revReason,
+      });
+      toast.success(r.data.message || "Duplicate credits reversed.");
+      setRevTarget(null); setRevPreview(null); setRevReason("");
+      loadReceipts();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Reversal failed.");
+    } finally { setRevApplying(false); }
+  };
   const loadQueryLog = async () => {
     try {
       const r = await api.get("/master-brain/query-log", { params: { user_email: qlUser, q: qlSearch, days: 30 } });
@@ -119,6 +155,7 @@ export default function MasterBrain() {
   useEffect(() => { if (tab === "log" && isMaster) loadLog(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "campaigns" && isMaster) loadCampaigns(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "datasets" && isMaster) loadDatasets(); }, [tab, isMaster]);
+  useEffect(() => { if (tab === "credits" && isMaster) loadReceipts(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "querylog" && canAccess) loadQueryLog(); }, [tab, canAccess]);
   // A query-only overseer (no write rights) lands straight on the Query Log.
   useEffect(() => { if (!isMaster && isQueryAdmin) setTab("querylog"); }, [isMaster, isQueryAdmin]);
@@ -272,6 +309,7 @@ export default function MasterBrain() {
             {isMaster && <TabBtn id="chat">Chat</TabBtn>}
             {isMaster && <TabBtn id="log" icon={ScrollText}>Action Log</TabBtn>}
             {isMaster && <TabBtn id="campaigns" icon={Megaphone}>Campaigns</TabBtn>}
+            {isMaster && <TabBtn id="credits" icon={Coins}>Bulk Credits</TabBtn>}
             {isMaster && <TabBtn id="datasets" icon={Database}>Datasets</TabBtn>}
             <TabBtn id="querylog" icon={History}>Query Log</TabBtn>
             {tab === "chat" && <button className="k-btn k-btn-outline k-btn-sm" onClick={newChat} data-testid="mb-new-chat">New chat</button>}
@@ -343,6 +381,39 @@ export default function MasterBrain() {
                       {["queued", "running"].includes(c.status) && !c.cancel_requested && (
                         <button className="k-btn k-btn-outline k-btn-sm" onClick={() => cancelCampaign(c)} data-testid={`mb-campaign-cancel-${c.id}`}>Cancel</button>
                       )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- BULK CREDITS ---------------- */}
+      {tab === "credits" && (
+        <div className="p-4" data-testid="mb-credits">
+          <div className="flex justify-between items-center mb-2">
+            <p className="text-xs text-neutral-600">Every bulk points-credit file run through Master Brain. Re-running the same file is auto-blocked to prevent double-crediting. Use <b>Reverse duplicates</b> if a file was ever credited more than once.</p>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={loadReceipts} data-testid="mb-credits-refresh"><RefreshCw className="w-4 h-4" /> Refresh</button>
+          </div>
+          <div className="bg-white border border-black/10 overflow-x-auto">
+            <table className="data-table">
+              <thead><tr><th>When (IST)</th><th>File</th><th>Customers credited</th><th>Points credited</th><th>Reason</th><th>By</th><th></th></tr></thead>
+              <tbody>
+                {receipts.length === 0 && <tr><td colSpan={7} className="text-center text-neutral-500 py-8">No bulk credits run yet.</td></tr>}
+                {receipts.map((rc) => (
+                  <tr key={rc.id} data-testid={`mb-receipt-${rc.id}`}>
+                    <td className="text-xs whitespace-nowrap">{fmtTime(rc.created_at)}</td>
+                    <td className="text-xs max-w-[220px] truncate">{rc.filename || "—"}{rc.forced && <span className="pill pill-neutral ml-1">forced</span>}</td>
+                    <td className="text-xs font-mono">{rc.changed ?? "—"}</td>
+                    <td className="text-xs font-mono">{(rc.total_points_credited ?? 0).toLocaleString()}</td>
+                    <td className="text-xs max-w-[220px] truncate">{rc.reason || "—"}</td>
+                    <td className="text-xs">{rc.created_by || "—"}</td>
+                    <td className="text-xs whitespace-nowrap">
+                      <button className="k-btn k-btn-outline k-btn-sm" onClick={() => openReverse(rc)} data-testid={`mb-reverse-btn-${rc.id}`}>
+                        <Undo2 className="w-3.5 h-3.5" /> Reverse duplicates
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -601,6 +672,63 @@ export default function MasterBrain() {
                   <button className="k-btn kazo-bg-burgundy shrink-0" onClick={() => send()} disabled={loading || (!input.trim() && attachments.length === 0)} data-testid="mb-send-btn"><Send className="w-4 h-4" /></button>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- REVERSE DUPLICATES MODAL ---------------- */}
+      {revTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" data-testid="mb-reverse-modal">
+          <div className="bg-white border border-black/10 max-w-md w-full p-6">
+            <div className="flex items-center gap-2 mb-2 text-red-700"><AlertTriangle className="w-5 h-5" /><span className="font-display text-lg">Reverse duplicate credits</span></div>
+            <p className="text-sm text-neutral-600 mb-1">Scanning credits with reason:</p>
+            <div className="text-sm bg-neutral-50 border border-black/10 p-3 mb-3">
+              <div className="truncate"><b>{revTarget.reason || "—"}</b></div>
+              <div className="text-xs text-neutral-500 mt-1">File: {revTarget.filename || "—"}</div>
+            </div>
+
+            {revLoading && (
+              <div className="flex items-center gap-2 text-sm text-neutral-600 py-4" data-testid="mb-reverse-loading"><Loader2 className="w-4 h-4 animate-spin" /> Scanning for duplicate credits…</div>
+            )}
+
+            {!revLoading && revPreview && (
+              <>
+                {(revPreview.customers_affected || 0) === 0 ? (
+                  <div className="text-sm bg-green-50 border border-green-200 text-green-800 p-3 mb-4" data-testid="mb-reverse-none">
+                    ✓ No duplicate credits found for this reason — nothing to reverse.
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-3 gap-2 mb-3" data-testid="mb-reverse-preview">
+                      <div className="bg-neutral-50 border border-black/10 p-2 text-center">
+                        <div className="text-lg font-display">{revPreview.customers_affected}</div>
+                        <div className="text-[10px] uppercase tracking-widest text-neutral-500">Customers</div>
+                      </div>
+                      <div className="bg-neutral-50 border border-black/10 p-2 text-center">
+                        <div className="text-lg font-display">{revPreview.duplicate_rows}</div>
+                        <div className="text-[10px] uppercase tracking-widest text-neutral-500">Extra credits</div>
+                      </div>
+                      <div className="bg-red-50 border border-red-200 p-2 text-center">
+                        <div className="text-lg font-display text-red-700">{(revPreview.total_excess_points || 0).toLocaleString()}</div>
+                        <div className="text-[10px] uppercase tracking-widest text-red-600">Excess points</div>
+                      </div>
+                    </div>
+                    <p className="text-xs text-neutral-600 mb-2">This deducts the excess and keeps exactly <b>one</b> credit per customer. A correcting adjustment is logged for each, and the whole action is undoable.</p>
+                    <label className="text-xs uppercase tracking-widest text-neutral-500">Reason (required)</label>
+                    <textarea className="k-input w-full mt-1 mb-4" rows={2} value={revReason} onChange={(e) => setRevReason(e.target.value)} placeholder="e.g. Cleanup — file was accidentally credited 4×." data-testid="mb-reverse-reason" />
+                  </>
+                )}
+              </>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button className="k-btn k-btn-outline" onClick={() => { setRevTarget(null); setRevPreview(null); setRevReason(""); }} data-testid="mb-reverse-cancel">Close</button>
+              {!revLoading && revPreview && (revPreview.customers_affected || 0) > 0 && (
+                <button className="k-btn kazo-bg-burgundy" onClick={confirmReverse} disabled={revApplying || !revReason.trim()} data-testid="mb-reverse-confirm">
+                  {revApplying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Undo2 className="w-4 h-4" />} Reverse now
+                </button>
+              )}
             </div>
           </div>
         </div>

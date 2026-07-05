@@ -29,7 +29,7 @@ from routes.ai_routes import _build_completion_params, _resolve_model, EMERGENT_
 from routes.ai_tools import TOOL_SCHEMAS, execute_tool, clear_stats_cache
 from routes.master_brain_tools import (
     MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, MASTER_READ_TOOL_SCHEMAS,
-    _tool_undo_action, _tool_cancel_campaign,
+    _tool_undo_action, _tool_cancel_campaign, _tool_reverse_duplicate_bonus_credits,
 )
 from routes import mb_attachments as MBA
 
@@ -589,6 +589,44 @@ class UndoIn(BaseModel):
 @router.post("/undo/{audit_id}")
 async def undo_action(audit_id: str, body: UndoIn, user: dict = Depends(require_master_admin)):
     res = await _tool_undo_action(audit_id, reason=body.reason, confirm=True, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@router.get("/credit-receipts")
+async def credit_receipts(limit: int = 100, user: dict = Depends(require_master_admin)):
+    """History of bulk points-credit files run through Master Brain (for the admin UI panel)."""
+    from database import mb_credit_receipts_col
+    rows = await mb_credit_receipts_col.find({}, {"_id": 0}) \
+        .sort("created_at", -1).limit(min(limit, 300)).to_list(300)
+    return {"count": len(rows), "receipts": rows}
+
+
+class ReverseDupsIn(BaseModel):
+    filter_reason: str = ""
+    since: str = ""
+    window_hours: int = 72
+    reason: str = ""
+
+
+@router.post("/reverse-duplicate-credits/preview")
+async def reverse_dups_preview(body: ReverseDupsIn, user: dict = Depends(require_master_admin)):
+    res = await _tool_reverse_duplicate_bonus_credits(
+        filter_reason=body.filter_reason, since=body.since,
+        window_hours=body.window_hours, confirm=False, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@router.post("/reverse-duplicate-credits/apply")
+async def reverse_dups_apply(body: ReverseDupsIn, user: dict = Depends(require_master_admin)):
+    if not (body.reason or "").strip():
+        raise HTTPException(400, "A reason is required to reverse duplicate credits.")
+    res = await _tool_reverse_duplicate_bonus_credits(
+        filter_reason=body.filter_reason, since=body.since, window_hours=body.window_hours,
+        reason=body.reason, confirm=True, user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])
     return res
