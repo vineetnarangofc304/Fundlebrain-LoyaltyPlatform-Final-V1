@@ -58,6 +58,9 @@ MB_TOOL_DB_DEADLINE = 25
 # budget than a read — the deterministic-confirm path runs it fully un-capped, this is only the
 # fallback for a single-turn confirmed mutation that still goes through the LLM loop.
 MB_MUTATION_DB_DEADLINE = 55
+# Streaming path: SSE heartbeats keep the connection alive, so reads/aggregations get a big
+# DB budget instead of the 25s cap that made full customer/ledger scans "time out".
+MB_STREAM_DB_DEADLINE = 90
 # Analysis/read questions get the Fundle read tools PLUS the read-only Master audits (e.g.
 # the fast duplicate-redemption audit). The full action set is added only on write intent.
 READ_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_READ_TOOL_SCHEMAS
@@ -90,6 +93,7 @@ ON TOP of reads, you have an ACTION layer that WRITES to the live database:
 - undo_action — REVERSE a prior action by its audit_id (from master_action_log)
 - reverse_duplicate_bonus_credits — CLEAN UP double/triple crediting: finds customers BONUS-credited the same amount more than once (accidental re-runs) and reverses the surplus, keeping ONE each. Preview→confirm→reason; scope with filter_reason/since; undoable.
 - fix_double_redemptions — REPAIR customers double-charged by the old redemption bug: credits back the duplicate point deduction (where the bill deducted points a 2nd time after the OTP redemption), corrects lifetime_points_redeemed, and voids the duplicate ledger rows. Pass a single `mobile` to fix/test one, or omit it to fix everyone affected.
+- bulk_update_customers — YOUR general `db.customers.updateMany(...)`. Bulk-set ANY field(s) on a filtered set of customers in one guarded, audited, UNDOABLE op. Use it for ANY customers-collection field fix that the specific tools above don't cover — e.g. resetting `lifetime_points_earned`/`lifetime_points_redeemed`, normalising a value, back-filling a flag. `set` values may be literals OR a field reference like "$points_balance" (copies another field, runs as an aggregation-pipeline $set). NEVER tell the user to ask engineering/DB admin to run updateMany — RUN IT YOURSELF: preview (confirm=false) → show matched count + before/after sample → confirm=true + reason. Protected fields _id/id/mobile can't be set.
 - send_campaign / list_campaigns / cancel_campaign — Karix BULK SMS campaigns
 - master_action_log — read the audit trail
 - (plus the L1 support write tools: deactivate / reactivate / unsubscribe / resubscribe / reverse a coupon or points redemption)
@@ -104,6 +108,7 @@ WRITE/ACTION protocol — non-negotiable (this is what makes you safe):
 5. After applying, report what changed, the count, and that it was logged to the Master Brain action log (name + reason + timestamp).
 6. If the request is AMBIGUOUS for a WRITE (which customers? which slab? how many points?), ASK a short clarifying question and CONFIRM your understanding BEFORE previewing — never guess on a write.
 7. If a tool errors (permission / too large / no reason), relay it plainly. If NO existing tool fits, state what IS possible and offer the closest path (e.g. "I can set tier='kazo insider' on every customer with lifetime_spend = 0 via set_customer_tier — shall I preview that?") — do NOT just say "I can't".
+8. NEVER punt a customers-collection data fix to "the engineering team" or hand the user a raw `db.customers.updateMany(...)` to run elsewhere. If it's a field update on customers, YOU execute it with `bulk_update_customers` (preview → confirm → apply). You have full write authority on the customers collection through your tools — use it.
 
 REPORT & DASHBOARD NAVIGATION — when the user asks "where can I see X" or the data already lives on a page, ANSWER the number from live tools AND point them to the exact page:
 - Live bills: /admin (Live Bill Monitor) · Command Center: /admin/dashboards/command-center
@@ -120,7 +125,7 @@ You are Master Brain: as smart as Fundle Brain on reads, plus the authority to e
 
 RECOMMENDED ACTIONS (this is the extra layer over Fundle Brain):
 - ALWAYS end an analytical/diagnostic answer with a short prose "**Recommended actions**" bullet list, exactly like Fundle Brain.
-- THEN, for every recommendation that YOU can actually carry out with your action tools (set_customer_tier, grant_bonus_points, adjust_points, fix_negative_balances, retier_customers, fix_double_redemptions, apply_to_uploaded_report, credit_points_from_file, reverse_duplicate_bonus_credits, send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI can show a one-click "Execute" button:
+- THEN, for every recommendation that YOU can actually carry out with your action tools (set_customer_tier, grant_bonus_points, adjust_points, fix_negative_balances, retier_customers, fix_double_redemptions, apply_to_uploaded_report, credit_points_from_file, reverse_duplicate_bonus_credits, bulk_update_customers, send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI can show a one-click "Execute" button:
 
 ```suggested-actions
 [
@@ -165,7 +170,7 @@ failure. For "how many customers were over/double credited" use run_aggregation 
 After the answer, add a short prose "**Recommended actions**" list. For each recommendation you
 could carry out with an action tool (set_customer_tier, grant_bonus_points, adjust_points,
 fix_negative_balances, retier_customers, fix_double_redemptions, apply_to_uploaded_report,
-credit_points_from_file, send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI
+credit_points_from_file, bulk_update_customers, send_campaign, cancel_campaign, undo_action), ALSO append ONE machine-readable block so the UI
 shows an Execute button:
 
 ```suggested-actions
@@ -191,7 +196,8 @@ async def _seeded_history(user: Dict[str, Any], read_only: bool = False) -> List
     return msgs
 
 
-async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
+async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, Any],
+                               db_deadline: Optional[int] = None) -> Dict[str, Any]:
     handler = MASTER_TOOL_HANDLERS.get(name)
     try:
         # Give every tool a generous, per-call DB deadline that OVERRIDES the aggressive
@@ -199,10 +205,12 @@ async def _master_execute_tool(name: str, args: Dict[str, Any], user: Dict[str, 
         # die mid-flight and the model reports a "timeout / data unavailable". A CONFIRMED
         # mutation (the actual apply, e.g. reverse/credit over a large ledger) gets a much
         # larger budget so it never gets capped mid-write — nested pymongo.timeout only shortens,
-        # so the tool's own 600s wrap needs this outer value to be big enough.
-        deadline = (MB_MUTATION_DB_DEADLINE
-                    if (name in _MUTATION_TOOLS and (args or {}).get("confirm"))
-                    else MB_TOOL_DB_DEADLINE)
+        # so the tool's own 600s wrap needs this outer value to be big enough. The streaming
+        # loop passes a bigger db_deadline (its SSE heartbeats keep the connection alive, so even
+        # a heavy full-scan read can run to completion without a gateway timeout).
+        deadline = db_deadline or (MB_MUTATION_DB_DEADLINE
+                                   if (name in _MUTATION_TOOLS and (args or {}).get("confirm"))
+                                   else MB_TOOL_DB_DEADLINE)
         with pymongo.timeout(deadline):
             if handler:
                 result = await handler(**(args or {}), user=user)
@@ -318,7 +326,7 @@ _MUTATION_TOOLS = {
     "grant_bonus_points", "adjust_points", "fix_negative_balances", "retier_customers",
     "set_customer_tier", "apply_to_uploaded_report", "credit_points_from_file",
     "reverse_duplicate_bonus_credits", "fix_double_redemptions", "send_campaign",
-    "undo_action", "cancel_campaign",
+    "bulk_update_customers", "undo_action", "cancel_campaign",
 }
 _HAS_MOBILE_RE = re.compile(r"\b[6-9]\d{9}\b")
 _REASON_LABEL_RE = re.compile(r"reason\s*[:=]\s*", re.IGNORECASE)
@@ -1175,7 +1183,7 @@ async def _run_stream_loop(messages, model, provider, user, tools, emit, trace) 
                 except Exception:
                     args = {}
                 await emit({"type": "tool_start", "tool": name, "text": _tool_start_text(name)})
-                result = await _master_execute_tool(name, args, user=user)
+                result = await _master_execute_tool(name, args, user=user, db_deadline=MB_STREAM_DB_DEADLINE)
                 trace.append({"tool": name, "args": args, "result_preview": str(result)[:500]})
                 await emit({"type": "tool_done", "tool": name, "text": _tool_summary(name, result)})
                 messages.append({"role": "tool", "tool_call_id": tc.id, "name": name,

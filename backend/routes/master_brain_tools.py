@@ -14,6 +14,7 @@ Points changes always write a `points_ledger` row (never silent) so they are
 traceable and reversible. Audit entries use action `master_brain.*`.
 """
 import uuid
+import json
 import asyncio
 import hashlib
 import logging
@@ -908,6 +909,144 @@ async def _tool_reverse_duplicate_bonus_credits(filter_reason: str = "", since: 
                         f"Audit {audit_id} — this is undoable.")}
 
 
+# ============================================================
+# 6b) GENERIC GUARDED BULK FIELD UPDATE on the customers collection
+#     (so Master Brain can run a db.customers.updateMany-style fix itself
+#      instead of punting to the engineering team)
+# ============================================================
+BULK_UPDATE_UNDO_CAP = 200000
+_PROTECTED_SET_FIELDS = {"_id", "id", "mobile", "customer_mobile"}
+
+
+def _set_uses_pipeline(set_spec: Dict[str, Any]) -> bool:
+    for v in set_spec.values():
+        if isinstance(v, str) and v.startswith("$"):
+            return True
+        if isinstance(v, dict):
+            return True
+    return False
+
+
+async def _tool_bulk_update_customers(filter: Dict[str, Any] = None, set: Dict[str, Any] = None,
+                                      reason: str = "", confirm: bool = False, user=None) -> Dict[str, Any]:
+    """Guarded bulk field update on `customers`. Preview -> confirm -> apply, batched with live
+    progress, audit-logged + snapshotted (UNDOABLE). A `set` value may be a literal OR a field
+    reference like "$points_balance" (runs as an aggregation-pipeline $set)."""
+    err = _require_master(user)
+    if err:
+        return err
+    flt = filter or {}
+    set_spec = set or {}
+    if not isinstance(flt, dict) or not flt:
+        return {"error": "A non-empty `filter` is required — refusing to update the ENTIRE customers "
+                         "collection. Add at least one condition (e.g. {\"source\": \"historic_upload\"})."}
+    if not isinstance(set_spec, dict) or not set_spec:
+        return {"error": "A non-empty `set` object is required (the fields to update)."}
+    bad = _PROTECTED_SET_FIELDS.intersection(set_spec.keys())
+    if bad:
+        return {"error": f"Refusing to modify protected identity field(s): {sorted(bad)}."}
+
+    use_pipeline = _set_uses_pipeline(set_spec)
+    update = [{"$set": set_spec}] if use_pipeline else {"$set": set_spec}
+    fields = list(set_spec.keys())
+    ref_fields = [v[1:] for v in set_spec.values() if isinstance(v, str) and v.startswith("$")]
+
+    with pymongo.timeout(90):
+        matched = await customers_col.count_documents(flt)
+    proj = {"_id": 0, "mobile": 1, "name": 1}
+    for f in fields + ref_fields:
+        proj[f] = 1
+    with pymongo.timeout(90):
+        sample_docs = await customers_col.find(flt, proj).limit(5).to_list(5)
+    sample = []
+    for d in sample_docs:
+        after = {}
+        for k, v in set_spec.items():
+            if isinstance(v, str) and v.startswith("$"):
+                after[k] = d.get(v[1:])
+            elif isinstance(v, dict):
+                after[k] = "(computed)"
+            else:
+                after[k] = v
+        sample.append({"mobile": d.get("mobile"), "name": d.get("name"),
+                       "before": {f: d.get(f) for f in fields}, "after": after})
+
+    plan = {"action": "bulk_update_customers", "collection": "customers",
+            "filter_json": json.dumps(flt, default=str), "set_json": json.dumps(set_spec, default=str),
+            "matched": matched, "sample": sample, "uses_pipeline": use_pipeline}
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = (
+            f"This updates {matched:,} customer document(s), setting {fields}. Audit-logged and UNDOABLE. "
+            f"Confirm with the user + a reason, then call again with confirm=true.")
+        if matched > BULK_UPDATE_UNDO_CAP:
+            plan["warning"] = (f"{matched:,} rows exceed the undo-snapshot cap ({BULK_UPDATE_UNDO_CAP:,}); "
+                               f"if applied it will NOT be auto-undoable. Consider narrowing the filter.")
+        plan["message"] = (f"Preview: {matched:,} customers match. Fields to set: {fields}. "
+                           f"Reply to confirm + give a reason to apply.")
+        return plan
+
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    if matched == 0:
+        return {"ok": True, "applied": True, "matched": 0, "modified": 0,
+                "message": "No customers matched the filter — nothing to update."}
+
+    undoable = matched <= BULK_UPDATE_UNDO_CAP
+    prog = (user or {}).get("_mb_progress")
+
+    # Snapshot the BEFORE values of the changed fields (bounded) so the action can be undone.
+    changes: List[Dict[str, Any]] = []
+    if undoable:
+        snap_proj = {"_id": 0, "id": 1}
+        for f in fields:
+            snap_proj[f] = 1
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            async for d in customers_col.find(flt, snap_proj):
+                changes.append({"cust_id": d.get("id"), "before": {f: d.get(f) for f in fields}})
+
+    # Apply in batches of _id so it survives prod timeouts and can stream progress.
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        id_docs = await customers_col.find(flt, {"_id": 1}).to_list(None)
+    id_list = [d["_id"] for d in id_docs]
+    total = len(id_list)
+    modified = 0
+    for i in range(0, total, CREDIT_BATCH):
+        batch = id_list[i:i + CREDIT_BATCH]
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            res = await customers_col.update_many({"_id": {"$in": batch}}, update)
+        modified += res.modified_count
+        if prog:
+            try: await prog(min(i + CREDIT_BATCH, total), total, "customers updated")
+            except Exception: pass
+
+    audit_id = await _log_master(user, "bulk_field_update", "customers", "bulk", reason,
+        {"filter_json": json.dumps(flt, default=str), "set_json": json.dumps(set_spec, default=str),
+         "matched": matched, "modified": modified, "fields": fields, "undoable": undoable})
+    if undoable and changes:
+        await _record_snapshot(audit_id, "bulk_field_update", changes)
+    return {"ok": True, "applied": True, "matched": matched, "modified": modified,
+            "audit_id": audit_id, "undoable": undoable,
+            "message": (f"✅ Updated {modified:,} of {matched:,} matched customer(s) — set {fields}. "
+                        f"Audit {audit_id}." + ("" if undoable else " (too large to auto-undo)"))}
+
+
+async def _reverse_bulk_field_update(changes: List[Dict[str, Any]]) -> int:
+    """Undo a bulk_field_update by restoring each doc's snapshotted BEFORE field values."""
+    ops = []
+    for ch in changes:
+        cid = ch.get("cust_id")
+        before = ch.get("before") or {}
+        if cid and before:
+            ops.append(UpdateOne({"id": cid}, {"$set": before}))
+    for i in range(0, len(ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(ops[i:i + CREDIT_BATCH], ordered=False)
+    return len(ops)
+
+
+
 async def _record_snapshot(audit_id: str, action: str, changes: List[Dict[str, Any]]) -> None:
     """Persist a reversible before/after snapshot so the action can be undone later."""
     if not audit_id or not changes:
@@ -1017,7 +1156,10 @@ async def _tool_undo_action(audit_id: str, reason: str = "", confirm: bool = Fal
 
     entity = doc.get("entity") or "customers"
     # Reverse INLINE (efficient batched bulk_write) — fast even for thousands of changes.
-    reversed_count = await _reverse_changes_bulk(changes, act, reason, user)
+    if act == "bulk_field_update":
+        reversed_count = await _reverse_bulk_field_update(changes)
+    else:
+        reversed_count = await _reverse_changes_bulk(changes, act, reason, user)
     new_audit = await _finalize_undo(audit_id, act, entity, reason, reversed_count, user)
     return {"ok": True, "applied": True, "audit_id": new_audit, **plan,
             "message": f"Undid '{act}' — {reversed_count} change(s) rolled back and logged as an undo."}
@@ -1845,6 +1987,24 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "reason": {"type": "string"},
             "confirm": {"type": "boolean", "default": False},
         }}}},
+    {"type": "function", "function": {
+        "name": "bulk_update_customers",
+        "description": ("MUTATION (Master Admin). Bulk-update one or more FIELDS on many customer documents in ONE "
+                        "guarded, audited, UNDOABLE operation — this is your `db.customers.updateMany(...)`. Use it "
+                        "whenever a fix needs a bulk field update (e.g. reset lifetime_points_earned / "
+                        "lifetime_points_redeemed, normalise a tier casing, back-fill a flag). NEVER tell the user to "
+                        "ask engineering to run updateMany — YOU run it with this tool. `filter` is a Mongo query "
+                        "(REQUIRED, non-empty — refuses to touch the whole collection). `set` maps field->value; a "
+                        "value may be a literal OR a field reference like \"$points_balance\" to copy another field "
+                        "(field refs run as an aggregation-pipeline $set). ALWAYS confirm=false first to see the "
+                        "matched count + a before/after sample, then confirm=true + reason to apply. Protected fields "
+                        "_id/id/mobile cannot be changed. Audit-logged and undoable via undo_action."),
+        "parameters": {"type": "object", "properties": {
+            "filter": {"type": "object", "description": "Mongo query selecting which customers to update (required, non-empty). E.g. {\"source\":\"historic_upload\",\"points_balance\":{\"$gte\":0}}"},
+            "set": {"type": "object", "description": "Fields to set. Value = literal or \"$otherField\" reference. E.g. {\"lifetime_points_earned\":\"$points_balance\",\"lifetime_points_redeemed\":0}"},
+            "reason": {"type": "string", "description": "Audit reason (required to apply)."},
+            "confirm": {"type": "boolean", "default": False, "description": "false = preview; true = apply."}},
+         "required": ["filter", "set"]}}},
 ]
 
 MASTER_TOOL_HANDLERS = {
@@ -1859,6 +2019,7 @@ MASTER_TOOL_HANDLERS = {
     "apply_to_uploaded_report": _tool_apply_to_uploaded_report,
     "credit_points_from_file": _tool_credit_points_from_file,
     "reverse_duplicate_bonus_credits": _tool_reverse_duplicate_bonus_credits,
+    "bulk_update_customers": _tool_bulk_update_customers,
     "undo_action": _tool_undo_action,
     "send_campaign": _tool_send_campaign,
     "list_campaigns": _tool_list_campaigns,
