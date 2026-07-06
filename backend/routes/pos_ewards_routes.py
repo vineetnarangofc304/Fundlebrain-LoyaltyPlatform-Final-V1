@@ -32,6 +32,7 @@ Logging: every request + response captured in `api_logs` for Live Monitor.
 from __future__ import annotations
 import os
 import re
+import json
 import uuid
 import random
 import secrets
@@ -189,6 +190,26 @@ def _err(status: int, message: str, extra: Optional[Dict[str, Any]] = None) -> D
     return {"status_code": status, "response": body}
 
 
+def _trim_for_log(obj: Optional[dict]) -> Optional[dict]:
+    """Keep API-monitor docs small & safe: a huge bill payload (large items[]/taxes[])
+    would bloat api_logs and can even blow MongoDB's 16MB doc limit → the log insert throws
+    and 500s an otherwise-successful bill. Cap heavy arrays so the stored doc stays tiny."""
+    if not isinstance(obj, dict):
+        return obj
+    try:
+        if len(json.dumps(obj, default=str)) <= 40000:
+            return obj
+    except Exception:
+        return {"_note": "payload not serialisable for log"}
+    def _cap(v):
+        if isinstance(v, list) and len(v) > 20:
+            return v[:20] + [f"…(+{len(v) - 20} more truncated for log)"]
+        if isinstance(v, dict):
+            return {k: _cap(x) for k, x in v.items()}
+        return v
+    return {k: _cap(v) for k, v in obj.items()}
+
+
 async def _log_api(*, endpoint: str, method: str, status: int, ms: int,
                     customer_mobile: Optional[str] = None,
                     bill_number: Optional[str] = None,
@@ -198,24 +219,32 @@ async def _log_api(*, endpoint: str, method: str, status: int, ms: int,
                     response: Optional[dict] = None,
                     api_key_label: Optional[str] = None,
                     actor_ip: Optional[str] = None):
-    """Log a POS API call with full request + response for Live Monitor."""
-    await api_logs_col.insert_one({
-        "id": uuid.uuid4().hex,
-        "endpoint": endpoint,
-        "method": method,
-        "status_code": status,
-        "response_time_ms": ms,
-        "customer_mobile": customer_mobile,
-        "bill_number": bill_number,
-        "store_id": store_id,
-        "error_reason": error,
-        "request_payload": payload,
-        "response_payload": response,
-        "api_key_label": api_key_label,
-        "actor_ip": actor_ip,
-        "source": "pos_ewards",
-        "timestamp": _now_iso(),
-    })
+    """Log a POS API call for the Live Monitor. NON-BLOCKING: the DB insert is fired in the
+    background so a bloated api_logs collection (millions of rows on prod) can NEVER slow down
+    or fail the live POS response — a slow/failed log write previously inflated posAddPoint to
+    ~2s and could 500 a saved bill, which made the POS (Business Central) hold its record lock
+    and retry. Best-effort; a dropped monitor row is acceptable, a blocked till is not."""
+    try:
+        doc = {
+            "id": uuid.uuid4().hex,
+            "endpoint": endpoint,
+            "method": method,
+            "status_code": status,
+            "response_time_ms": ms,
+            "customer_mobile": customer_mobile,
+            "bill_number": bill_number,
+            "store_id": store_id,
+            "error_reason": error,
+            "request_payload": _trim_for_log(payload),
+            "response_payload": _trim_for_log(response),
+            "api_key_label": api_key_label,
+            "actor_ip": actor_ip,
+            "source": "pos_ewards",
+            "timestamp": _now_iso(),
+        }
+        _fire_and_forget(api_logs_col.insert_one(doc))
+    except Exception:
+        pass
 
 
 async def _validate_creds(x_api_key: Optional[str], merchant_id: Optional[str],
