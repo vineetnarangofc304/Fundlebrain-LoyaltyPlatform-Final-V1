@@ -1177,17 +1177,28 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
     if otp and not test_bypass:
         mob_key = _mobile_key(mobile)
         now = _now_iso()
-        mobile_match = {"purpose": "redeem_points", "otp": otp,
-                        "$or": [{"mobile_key": mob_key}, {"mobile": mobile}]}
-        # ACCEPT ANY STILL-VALID OTP for this mobile — NOT just the most-recent one. A resend,
-        # a duplicate redeem request, or an OTP a cashier reads off the Support Desk screen
-        # must NOT be rejected as "Invalid OTP". Security is preserved by: the single-use
-        # atomic claim below, the 10-min expiry, the mobile match, the bill-number tamper
-        # defense, AND a per-bill idempotency guard (further down) that blocks any second
-        # deduction for the same bill no matter how many OTPs exist.
+        # UNIFIED OTP MATCH — accept ANY still-valid OTP the customer holds for THIS mobile,
+        # whether it was issued for redemption (redeem_points) OR the identity/customer-check
+        # step the staff sees on the Support Desk / dashboard (customer_check). This is the
+        # permanent fix for "the OTP is valid on our Support Desk but the POS says Invalid":
+        # both OTPs live in the same table for the same mobile, and the POS was filtering to
+        # redeem_points ONLY. Security is fully preserved by: the single-use atomic claim below,
+        # the 10-min expiry, the mobile match, the bill-number tamper defense, AND a per-bill
+        # idempotency guard (further down) that blocks any second deduction for the same bill.
+        _redeem_purposes = ["redeem_points", "redeem"]
+        _all_purposes = _redeem_purposes + ["customer_check"]
+        mob_or = [{"mobile_key": mob_key}, {"mobile": mobile}]
+        mobile_match = {"purpose": {"$in": _all_purposes}, "otp": otp, "$or": mob_or}
+        # Prefer a redeem_points OTP first (it carries the authoritative points snapshot),
+        # then fall back to ANY still-valid OTP for this mobile with the same value.
         session = await pos_otp_col.find_one(
-            {**mobile_match, "redeemed": {"$ne": True}, "expires_at": {"$gte": now}},
+            {"purpose": {"$in": _redeem_purposes}, "otp": otp, "$or": mob_or,
+             "redeemed": {"$ne": True}, "expires_at": {"$gte": now}},
             {"_id": 0}, sort=[("created_at", -1)])
+        if session is None:
+            session = await pos_otp_col.find_one(
+                {**mobile_match, "redeemed": {"$ne": True}, "expires_at": {"$gte": now}},
+                {"_id": 0}, sort=[("created_at", -1)])
         if session is None:
             # (a) an OTP with this value was already used → idempotent success (POS retry)
             done = await pos_otp_col.find_one(
@@ -1223,11 +1234,21 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
             return resp
 
         # POINTS: the POS sends points=0 on this verify call. The authoritative redemption
-        # amount is what the OTP was ISSUED for (snapshot.points).
+        # amount is what the OTP was ISSUED for (snapshot.points). If we matched a customer_check
+        # OTP (no redemption snapshot), fall back to the latest redeem_points REQUEST for this
+        # mobile so the correct amount is redeemed.
         snapshot = session.get("payload_snapshot") or {}
         original_points = _parse_int(snapshot.get("points"))
         if original_points > 0:
             points_requested = original_points
+        elif points_requested <= 0:
+            latest_req = await pos_otp_col.find_one(
+                {"purpose": {"$in": _redeem_purposes}, "$or": mob_or},
+                {"_id": 0, "payload_snapshot": 1}, sort=[("created_at", -1)])
+            lr_points = _parse_int(((latest_req or {}).get("payload_snapshot") or {}).get("points"))
+            if lr_points > 0:
+                points_requested = lr_points
+                snapshot = (latest_req or {}).get("payload_snapshot") or snapshot
 
         # Bill-number tampering defense (when both sides have a bill)
         orig_bill = ((snapshot.get("transaction") or {}).get("number")
