@@ -5,6 +5,20 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-07 — 🔴🔴 P0 FIX: posAddPoint "partial commit" — bill saved but points never credited (recurring, now self-healing)
+
+⚠️ Redeploy required for production. Verified: testing_agent iteration_84 = 12/12 backend PASS (no regressions).
+- **Symptom (prod):** a live bill shows `points_earned` (e.g. +68) but the customer's balance stays 0 and there is NO earn ledger row. The bill settlement did THREE separate non-transactional writes — insert txn → `$set` customer balance → insert `earn` ledger row — and a MongoDB read timeout mid-flow left the bill saved but UNCREDITED. The duplicate-bill guard then rejected every POS retry ("Same bill number cannot be accepted…"), permanently LOCKING the broken state.
+- **Constraint:** the standalone MongoDB (preview) has NO multi-document transactions, so the fix uses a commit marker + idempotency instead.
+- **Fix (`pos_ewards_routes.py`):**
+  - New `_apply_bill_credit(txn)` — idempotent crediting: (1) writes ledger rows via **upsert keyed on (bill_number, ledger_kind)** so a re-run never duplicates them (ledger = source of truth, written FIRST); (2) credits the customer via an **atomic claim** — `find_one_and_update({bill_number, balance_applied≠true} → set balance_applied=true)` gates a single `$inc` of points_balance/lifetime_points_earned/lifetime_spend/visit_count (switched from the old race-prone absolute `$set`); (3) flips `commit_status` to `committed`. Mark-then-credit favours a recoverable **lost-credit over any double-credit** (KAZO rule) — the audit tool heals the rare micro-window.
+  - The bill is now inserted `commit_status:"pending"` with a `_credit` snapshot of all deltas, then `_apply_bill_credit` runs. On a POS RETRY, the duplicate guard RESUMES a `pending` bill (self-heal, credits exactly once, returns `resumed:true`) instead of rejecting; a fully `committed` (or legacy) bill is still a true 400 duplicate.
+- **Fix for ALREADY-broken prod bills (`master_brain_tools.py`):** new Master Brain tools — `audit_partial_commit_bills` (read: live pos_ewards bills with points_earned>0 but no non-voided earn ledger row) + `repair_partial_commit_bills` (mutation: backfills the earn ledger row + credits the points, marks the bill committed; preview→confirm+reason, audited, snapshotted, **UNDOABLE**). Registered in schemas/handlers/read-schemas + `_MUTATION_TOOLS` (which also gained the earlier correction tools that were missing from it).
+- **Verified (preview, real HTTP + DB + tool calls, `tests/iteration84_partial_commit_test.py` 25/25 + `iteration84_pos_regression_test.py`):** happy path → committed + earn ledger + exact balance; TRUE duplicate → 400 no re-credit; PENDING bill → self-healed, credited EXACTLY once, then true duplicate (no double-credit); legacy broken bill → audit detects → repair credits + backfills → re-audit clean → undo restores balance + voids the row. Full POS suite (customer-check, OTP, redeem, return) no regression.
+
+---
+
+
 ## 2026-07-07 — API Monitor: store-wise POS tracking ("which store is failing")
 
 ⚠️ Redeploy required for production.
