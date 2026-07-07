@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 84 backend regression — validated the P0 partial-commit fix (posAddPoint commit-marker + idempotent self-heal + Master Brain audit/repair/undo) AND the broader POS suite (customer-check, OTP check, redeem, return, true-duplicate). 12/12 backend tests PASS (3 iteration84_partial_commit_test.py + 9 new iteration84_pos_regression_test.py). No regression from the $set->$inc + commit_status refactor.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration84_partial_commit_test.py",
+    "/app/backend/tests/iteration84_pos_regression_test.py",
+    "/app/test_reports/pytest/iteration84_full.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "pos_ewards_routes.py is 2319 lines — well past the 700-line guideline. Recommend splitting into pos_earn.py / pos_redeem.py / pos_return.py / pos_otp.py / pos_shared.py modules to reduce cognitive load and blast radius of future changes.",
+    "pos_otp_col is instantiated locally in pos_ewards_routes.py (line 79: db['pos_otp_sessions']) rather than being centralized in database.py alongside the other _col handles. Small consistency nit — could cause drift if collection name ever changes.",
+    "posAddPoint self-heal reads _credit snapshot directly from the pending transaction — good. Suggest also asserting a schema-version field on _credit so future changes to the snapshot shape don't silently double-credit legacy pending rows.",
+    "Karix SMS is fire-and-forget and unreachable in preview; several warning log lines during test runs are infra artifacts (as noted by main agent), not code bugs."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration84_pos_regression_test.py (NEW — 9 broader POS regression tests)"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "n/a (skipped per request)"},
+  "test_credentials": "POS x-api-key ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI / KAZO_FUNDLE / K00055 / mock OTP 123456; master admin masteradmin@fundle.io / Master@2026 (used via _tool_* imports in partial-commit test).",
+  "seed_data_creation": "All seeded on scratch mobiles 99900070xx (customer_check, OTP, add, dup, redeem, return) and 99900044/55/66xx (partial-commit test). Every test cleans up its customer, transactions (incl. return rows via original_bill_number), points_ledger rows, and pos_otp sessions in teardown. audit_logs entry for the repair is also deleted in test_audit_repair_undo.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The two iteration84 test files together form the P0 regression suite: iteration84_partial_commit_test.py (happy path DB state, self-heal exactly-once, audit->repair->undo full cycle) + iteration84_pos_regression_test.py (customer-check, OTP verify, add-point happy, TRUE duplicate no double-credit, redeem OTP flow, insufficient-balance guard, returnOrder reverses points+lifetime_spend, missing-mobile 400). Run both with: python -m pytest backend/tests/iteration84_partial_commit_test.py backend/tests/iteration84_pos_regression_test.py -v — expected 12/12. Standalone Mongo cannot reproduce a real timeout, so self-heal is exercised by directly seeding a pending transaction row with the full _credit snapshot.",
+  "rca of the issue": "P0 already RCA'd and fixed by main agent: bill settlement did three separate non-transactional writes (insert txn -> $set customer balance -> insert earn ledger); a mid-flow read timeout left the bill saved but uncredited AND the duplicate-guard then blocked all POS retries. Fix uses commit_status='pending'->'committed' marker + idempotent _apply_bill_credit (ledger upsert + atomic $inc balance claim gated on balance_applied) + Master Brain repair_partial_commit_bills for legacy bills. Regression test confirms exactly-once credit on self-heal, no double-credit on committed retry, and clean $inc-based aggregates on returnOrder."
+}

@@ -327,6 +327,8 @@ _MUTATION_TOOLS = {
     "set_customer_tier", "apply_to_uploaded_report", "credit_points_from_file",
     "reverse_duplicate_bonus_credits", "fix_double_redemptions", "send_campaign",
     "bulk_update_customers", "undo_action", "cancel_campaign",
+    "fix_missing_redemption_ledger", "reverse_duplicate_adjustments",
+    "normalize_historical_points", "set_points_cutoff", "repair_partial_commit_bills",
 }
 _HAS_MOBILE_RE = re.compile(r"\b[6-9]\d{9}\b")
 _REASON_LABEL_RE = re.compile(r"reason\s*[:=]\s*", re.IGNORECASE)

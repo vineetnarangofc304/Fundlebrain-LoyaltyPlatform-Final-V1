@@ -2041,6 +2041,195 @@ async def _tool_audit_historical_derived_points(user=None) -> Dict[str, Any]:
 
 
 # ============================================================
+# PARTIAL-COMMIT (posAddPoint) audit + repair
+# ============================================================
+async def _scan_missing_earn_ledger(cutoff: str) -> List[Dict[str, Any]]:
+    """Deterministic scan: LIVE POS bills (source=pos_ewards, bill_date >= cutoff) that
+    recorded points_earned>0 but have NO non-voided `earn` ledger row — the exact fingerprint
+    of a partial commit (bill saved, points never credited/ledgered). Matched by
+    reference_id/bill_number."""
+    bills: List[Dict[str, Any]] = []
+    async for tx in transactions_col.find(
+            {"source": "pos_ewards", "points_earned": {"$gt": 0}, "bill_date": {"$gte": cutoff}},
+            {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1, "customer_id": 1,
+             "customer_mobile": 1, "points_earned": 1, "commit_status": 1,
+             "balance_applied": 1}).max_time_ms(25000):
+        bills.append(tx)
+    bill_nos = list({b.get("bill_number") for b in bills if b.get("bill_number")})
+    tx_ids = list({b.get("id") for b in bills if b.get("id")})
+    covered: set = set()
+    for i in range(0, len(bill_nos), 5000):
+        batch = bill_nos[i:i + 5000]
+        async for lr in points_ledger_col.find(
+                {"type": "earn", "voided": {"$ne": True},
+                 "$or": [{"reference_id": {"$in": batch}}, {"bill_number": {"$in": batch}}]},
+                {"_id": 0, "reference_id": 1, "bill_number": 1}).max_time_ms(10000):
+            if lr.get("reference_id"):
+                covered.add(lr["reference_id"])
+            if lr.get("bill_number"):
+                covered.add(lr["bill_number"])
+    for i in range(0, len(tx_ids), 5000):
+        batch = tx_ids[i:i + 5000]
+        async for lr in points_ledger_col.find(
+                {"type": "earn", "voided": {"$ne": True}, "reference_id": {"$in": batch}},
+                {"_id": 0, "reference_id": 1}).max_time_ms(10000):
+            covered.add(lr.get("reference_id"))
+    return [b for b in bills
+            if b.get("bill_number") not in covered and b.get("id") not in covered]
+
+
+async def _tool_audit_partial_commit_bills(sample_limit: int = 15, user=None) -> Dict[str, Any]:
+    """EXACT, READ-ONLY. Find LIVE POS bills (source=pos_ewards, on/after the cutoff) that
+    recorded points_earned>0 but have NO matching non-voided `earn` ledger row — the
+    fingerprint of a PARTIAL COMMIT (the bill was saved, but a DB timeout interrupted
+    crediting so the points were never added to the balance or ledger). These are bills whose
+    earned points are currently LOST. Reports how many bills/customers/points are affected so
+    repair_partial_commit_bills can heal them. Real DB reads only; never a fabricated zero."""
+    err = _require_master(user)
+    if err:
+        return err
+    cutoff = await _points_cutoff()
+    try:
+        missing = await _scan_missing_earn_ledger(cutoff)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit_partial_commit_bills incomplete: {e}")
+        return {"audit": "partial_commit_bills", "computed": False, "exact": False,
+                "cutoff_date": cutoff,
+                "message": ("Couldn't scan for partially-committed bills within the time limit "
+                            "right now (DB likely under load). Please retry in a few seconds.")}
+    total_pts = sum(int(b.get("points_earned") or 0) for b in missing)
+    custs = {b.get("customer_mobile") for b in missing if b.get("customer_mobile")}
+    still_pending = sum(1 for b in missing if b.get("commit_status") == "pending")
+    sample = [{"mobile": b.get("customer_mobile"), "bill": b.get("bill_number"),
+               "bill_date": b.get("bill_date"), "points_earned": int(b.get("points_earned") or 0),
+               "commit_status": b.get("commit_status") or "(legacy/none)"}
+              for b in missing[:max(1, sample_limit)]]
+    return {
+        "audit": "partial_commit_bills", "computed": True, "exact": True,
+        "cutoff_date": cutoff,
+        "bills_missing_earn_ledger": len(missing),
+        "still_marked_pending": still_pending,
+        "customers_affected": len(custs),
+        "points_never_credited": total_pts,
+        "sample": sample,
+        "definition": ("A partial commit = a live pos_ewards bill with points_earned>0 but no "
+                       "non-voided `earn` ledger row. The bill was saved but the balance/ledger "
+                       "write was interrupted (DB timeout) → the earned points were never "
+                       "credited. repair_partial_commit_bills backfills the earn ledger row and "
+                       "credits the missing points."),
+        "message": (f"{len(missing)} live bill(s) earned {total_pts} pts that were NEVER credited "
+                    f"(no earn ledger row) across {len(custs)} customer(s); {still_pending} are still "
+                    f"marked pending. Cutoff: {cutoff}. Run repair_partial_commit_bills to heal them."
+                    if missing else
+                    f"No partially-committed bills found — every live earn bill has its ledger row. "
+                    f"Cutoff: {cutoff}."),
+    }
+
+
+async def _tool_repair_partial_commit_bills(reason: str = "", confirm: bool = False,
+                                            user=None) -> Dict[str, Any]:
+    """MUTATION (Master Admin). Heal LIVE POS bills that recorded points_earned>0 but were
+    never credited (no `earn` ledger row) — the partial-commit bug. For each such bill it
+    writes the missing `earn` ledger row AND credits the earned points to the customer's
+    balance (raising lifetime_points_earned), then marks the bill committed. Preview first,
+    then confirm=true + reason. Audit-logged, snapshotted, UNDOABLE (undo voids the backfilled
+    rows and reverses the credit). Idempotent — a bill already covered by an earn row is skipped."""
+    err = _require_master(user)
+    if err:
+        return err
+    cutoff = await _points_cutoff()
+    missing = await _scan_missing_earn_ledger(cutoff)
+    over_cap = len(missing) > INLINE_CAP
+    missing = missing[:INLINE_CAP]
+    per_cust: Dict[str, Dict[str, Any]] = {}
+    for b in missing:
+        m = b.get("customer_mobile")
+        if not m:
+            continue
+        agg = per_cust.setdefault(m, {"pts": 0, "bills": 0})
+        agg["pts"] += int(b.get("points_earned") or 0)
+        agg["bills"] += 1
+    total_pts = sum(a["pts"] for a in per_cust.values())
+    plan = {"action": "repair_partial_commit_bills", "cutoff_date": cutoff,
+            "live_bills_to_repair": len(missing), "customers_affected": len(per_cust),
+            "points_to_credit": total_pts,
+            "sample": [{"mobile": m, "points_to_credit": a["pts"], "bills": a["bills"]}
+                       for m, a in list(per_cust.items())[:10]]}
+    if not missing:
+        plan["message"] = "No partially-committed bills found. Nothing to repair."
+        return plan
+    if over_cap:
+        plan["warning"] = (f"More than {INLINE_CAP} bills — this run repairs the first {INLINE_CAP}. "
+                           "Re-run for the rest.")
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("This CREDITS the earned points that were never applied "
+                                         "(writes the missing earn ledger row per bill + raises the "
+                                         "balance). Confirm with the user + a reason, then confirm=true.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    audit_id = str(uuid.uuid4())
+    cust_map = await _bulk_find_customers(list(per_cust.keys()))
+    ledger_docs: List[Dict[str, Any]] = []
+    for b in missing:
+        pts = int(b.get("points_earned") or 0)
+        if pts <= 0:
+            continue
+        ledger_docs.append({"id": str(uuid.uuid4()), "customer_id": b.get("customer_id"),
+                            "customer_mobile": b.get("customer_mobile"),
+                            "points": pts, "type": "earn", "kind": "earn", "ledger_kind": "earn",
+                            "reference_type": "transaction", "reference_id": b.get("bill_number"),
+                            "source_bill_id": b.get("id"), "bill_number": b.get("bill_number"),
+                            "bill_date": b.get("bill_date"),
+                            "note": f"Backfilled earn for Bill {b.get('bill_number')} (was never ledgered)",
+                            "reason": f"Repair partial-commit earn — {reason}",
+                            "created_at": _now_iso(), "created_by": user.get("email"),
+                            "via": "master_brain", "fix_audit_id": audit_id})
+    upd_ops: List[Any] = []
+    changes: List[Dict[str, Any]] = []
+    applied_pts = 0
+    for m, a in per_cust.items():
+        cust = cust_map.get(_last10(m))
+        if not cust:
+            continue
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        lte = int(cust.get("lifetime_points_earned") or 0)
+        add = int(a["pts"])
+        upd_ops.append(UpdateOne({"id": cid}, {"$inc": {"points_balance": add,
+                                                        "lifetime_points_earned": add}}))
+        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
+                        "points_before": cur, "points_after": cur + add,
+                        "lifetime_before": lte, "lifetime_after": lte + add})
+        applied_pts += add
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    for i in range(0, len(ledger_docs), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+    # Mark the healed bills committed so they aren't rescanned.
+    healed_bill_nos = [b.get("bill_number") for b in missing if b.get("bill_number")]
+    for i in range(0, len(healed_bill_nos), 5000):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await transactions_col.update_many(
+                {"bill_number": {"$in": healed_bill_nos[i:i + 5000]}},
+                {"$set": {"commit_status": "committed", "balance_applied": True,
+                          "repaired_by_audit": audit_id, "repaired_at": _now_iso()}})
+    await _log_master(user, "repair_partial_commit_bills", "customers", "bulk", reason,
+                      {"bills_repaired": len(missing), "customers_affected": len(changes),
+                       "points_credited": applied_pts, "cutoff": cutoff}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "repair_partial_commit_bills", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "points_credited": applied_pts, "customers_corrected": len(changes),
+            "message": (f"Repaired {len(missing)} partially-committed bill(s): backfilled the earn "
+                        f"ledger rows and credited {applied_pts} pts to {len(changes)} customer(s) whose "
+                        f"points were never applied. Audit {audit_id} — undoable.")}
+
+
+# ============================================================
 # DATA-INTEGRITY CORRECTIONS (write-back, preview->confirm, audited, UNDOABLE)
 # ============================================================
 async def _scan_missing_live_redemptions(cutoff: str) -> List[Dict[str, Any]]:
@@ -2606,6 +2795,21 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "confirm": {"type": "boolean", "default": False},
         }}}},
     {"type": "function", "function": {
+        "name": "repair_partial_commit_bills",
+        "description": ("MUTATION (Master Admin). Heal LIVE POS bills (source=pos_ewards, on/after "
+                        "the cutoff) that recorded points_earned>0 but were NEVER credited (no "
+                        "`earn` ledger row) — the partial-commit bug where a DB timeout interrupted "
+                        "posAddPoint after the bill was saved. Writes the missing earn ledger row "
+                        "per bill AND credits the earned points to the customer's balance (raising "
+                        "lifetime_points_earned), then marks the bill committed. Run "
+                        "audit_partial_commit_bills first. ALWAYS confirm=false to preview (bills, "
+                        "customers, points to credit), then confirm=true + reason. Idempotent, "
+                        "audit-logged and UNDOABLE."),
+        "parameters": {"type": "object", "properties": {
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }}}},
+    {"type": "function", "function": {
         "name": "reverse_duplicate_adjustments",
         "description": ("MUTATION (Master Admin). Reverse DUPLICATE point adjustments (a bulk adjust job "
                         "run twice). Groups non-voided `adjust` rows by (mobile, points, reason), KEEPS ONE "
@@ -2669,6 +2873,7 @@ MASTER_TOOL_HANDLERS = {
     "audit_missing_redemption_ledger": _tool_audit_missing_redemption_ledger,
     "audit_duplicate_adjustments": _tool_audit_duplicate_adjustments,
     "audit_historical_derived_points": _tool_audit_historical_derived_points,
+    "audit_partial_commit_bills": _tool_audit_partial_commit_bills,
     "grant_bonus_points": _tool_grant_bonus_points,
     "adjust_points": _tool_adjust_points,
     "fix_negative_balances": _tool_fix_negative_balances,
@@ -2681,6 +2886,7 @@ MASTER_TOOL_HANDLERS = {
     "reverse_duplicate_adjustments": _tool_reverse_duplicate_adjustments,
     "fix_missing_redemption_ledger": _tool_fix_missing_redemption_ledger,
     "normalize_historical_points": _tool_normalize_historical_points,
+    "repair_partial_commit_bills": _tool_repair_partial_commit_bills,
     "set_points_cutoff": _tool_set_points_cutoff,
     "bulk_update_customers": _tool_bulk_update_customers,
     "undo_action": _tool_undo_action,
@@ -2750,4 +2956,18 @@ MASTER_READ_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                         "for any 'historical points computed from lifetime spend / derived points "
                         "to remove' question."),
         "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "audit_partial_commit_bills",
+        "description": ("EXACT, read-only audit of PARTIALLY-COMMITTED live POS bills — bills "
+                        "(source=pos_ewards, on/after the cutoff) that recorded points_earned>0 "
+                        "but have NO non-voided `earn` ledger row, meaning a DB timeout "
+                        "interrupted posAddPoint after the bill was saved and the earned points "
+                        "were never credited to the balance or ledger. Returns how many bills, "
+                        "customers and points were never credited (and how many are still marked "
+                        "pending). ALWAYS use this for any 'points earned on a bill but missing "
+                        "from the balance/ledger / partial commit / bill saved but no points' "
+                        "question. Run repair_partial_commit_bills to heal them."),
+        "parameters": {"type": "object", "properties": {
+            "sample_limit": {"type": "integer", "default": 15, "description": "How many example bills to include."}
+        }}}},
 ]

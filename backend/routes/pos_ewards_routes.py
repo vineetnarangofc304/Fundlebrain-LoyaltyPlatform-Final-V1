@@ -1377,6 +1377,90 @@ async def pos_redeem_point_otp_check(payload: Dict[str, Any], request: Request,
     return resp
 
 
+async def _apply_bill_credit(txn: Dict[str, Any]) -> Dict[str, Any]:
+    """Idempotently credit a POS bill's points to the customer balance + points_ledger and
+    mark the bill committed. SAFE to call repeatedly for the same bill (POS retry / audit
+    self-heal): the ledger rows are upsert-keyed by (bill_number, ledger_kind) so a re-run
+    never duplicates them, and the customer balance $inc is guarded by an ATOMIC claim on the
+    bill row so it is applied EXACTLY once. Standalone MongoDB has no multi-document
+    transactions, so — per KAZO's rule of NEVER double-crediting — we mark-then-credit,
+    favouring a recoverable lost-credit over any double-credit (the audit tool heals the rare
+    micro-window). Reads all deltas from `txn['_credit']` (snapshotted at insert) so no
+    recomputation/drift happens on resume. Returns {new_balance, new_tier}."""
+    cr = txn.get("_credit") or {}
+    bill_number = txn.get("bill_number")
+    cust_id = cr.get("cust_id")
+    mobile = cr.get("mobile")
+    earn = int(cr.get("earn") or 0)
+    upgrade_bonus = int(cr.get("upgrade_bonus") or 0)
+    welcome_bonus = int(cr.get("welcome_bonus") or 0)
+    total_credit = earn + upgrade_bonus + welcome_bonus
+    expiry = cr.get("expiry")
+
+    async def _upsert_ledger(kind: str, ptype: str, reference_type: str,
+                             points: int, note: str) -> None:
+        if points <= 0:
+            return
+        await points_ledger_col.update_one(
+            {"bill_number": bill_number, "ledger_kind": kind, "type": ptype},
+            {"$setOnInsert": {
+                "id": uuid.uuid4().hex,
+                "customer_id": cust_id,
+                "customer_mobile": mobile,
+                "type": ptype,
+                "points": points,
+                "reference_type": reference_type,
+                "reference_id": txn.get("id"),
+                "bill_number": bill_number,
+                "ledger_kind": kind,
+                "note": note,
+                "expires_at": expiry,
+                "created_at": _now_iso(),
+            }},
+            upsert=True,
+        )
+
+    # 1) LEDGER first (the source of truth) — idempotent upserts keyed by bill_number+kind.
+    await _upsert_ledger("earn", "earn", "transaction", earn, f"Bill {bill_number}")
+    await _upsert_ledger("tier_upgrade", "bonus", "tier_upgrade", upgrade_bonus,
+                         f"Tier upgrade bonus: {cr.get('old_tier')} → {cr.get('new_tier')}")
+    await _upsert_ledger("welcome", "bonus", "welcome", welcome_bonus,
+                         "Welcome bonus (joined programme)")
+
+    # 2) BALANCE — atomically CLAIM the bill so the customer $inc runs exactly once, even
+    #    across POS retries / self-heals. $inc (not absolute $set) also fixes the concurrent
+    #    same-customer bill race the old code had.
+    claimed = await transactions_col.find_one_and_update(
+        {"bill_number": bill_number, "balance_applied": {"$ne": True}},
+        {"$set": {"balance_applied": True, "balance_applied_at": _now_iso()}},
+    )
+    if claimed is not None and cust_id:
+        cust_set = {"last_visit_at": _now_iso(), "tier": cr.get("new_tier")}
+        if cr.get("welcome_flag"):
+            cust_set["welcome_bonus_given"] = True
+        await customers_col.update_one(
+            {"id": cust_id},
+            {"$set": cust_set,
+             "$inc": {
+                "points_balance": total_credit,
+                "lifetime_points_earned": total_credit,
+                "lifetime_spend": float(cr.get("lifetime_spend_delta") or 0),
+                "visit_count": 1,
+             }},
+        )
+
+    # 3) mark the bill fully committed.
+    await transactions_col.update_one(
+        {"bill_number": bill_number},
+        {"$set": {"commit_status": "committed", "committed_at": _now_iso()}},
+    )
+
+    fresh = await customers_col.find_one(
+        {"id": cust_id}, {"_id": 0, "points_balance": 1, "tier": 1}) if cust_id else None
+    new_balance = int((fresh or {}).get("points_balance") or 0)
+    return {"new_balance": new_balance, "new_tier": (fresh or {}).get("tier") or cr.get("new_tier")}
+
+
 # ---------------- Endpoint 9 — Bill Settlement (THE BIG ONE) ----------------
 @router.post("/posAddPoint")
 async def pos_add_point(payload: Dict[str, Any], request: Request,
@@ -1404,8 +1488,32 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
-    # Duplicate bill check
-    if await transactions_col.find_one({"bill_number": bill_number}, {"_id": 0, "id": 1}):
+    # Duplicate bill check — with PARTIAL-COMMIT SELF-HEAL.
+    # A bill can exist in a PENDING state if a previous attempt inserted the bill row but a
+    # DB timeout interrupted crediting (balance/ledger). The old code rejected the POS retry
+    # as a duplicate, permanently locking the broken bill (points earned on the bill but never
+    # credited). Now: a PENDING duplicate is RESUMED idempotently (never double-credits); a
+    # fully COMMITTED (or legacy pre-fix) bill is still rejected as a true duplicate.
+    existing_bill = await transactions_col.find_one(
+        {"bill_number": bill_number},
+        {"_id": 0, "id": 1, "bill_number": 1, "commit_status": 1, "balance_applied": 1,
+         "points_earned": 1, "_credit": 1})
+    if existing_bill:
+        needs_heal = existing_bill.get("commit_status") == "pending" or (
+            bool(existing_bill.get("_credit")) and existing_bill.get("balance_applied") is not True)
+        if needs_heal:
+            healed = await _apply_bill_credit(existing_bill)
+            resp = _ok({"message": "Transaction details captured by Fundle successfully",
+                        "order_id": existing_bill.get("id"),
+                        "points_earned": int(existing_bill.get("points_earned") or 0),
+                        "new_balance": healed.get("new_balance"),
+                        "new_tier": healed.get("new_tier"),
+                        "resumed": True})
+            await _log_api(endpoint=endpoint, method="POST", status=200,
+                           ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                           bill_number=bill_number, error="partial_commit_self_healed",
+                           payload=payload, response=resp, api_key_label=cred.get("label"))
+            return resp
         resp = _err(400, "Same bill number cannot be accepted which has been entered earlier for the same customer key")
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
@@ -1575,6 +1683,36 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
 
     # items[] and payment_mode were mapped up-front (shared with the Lost-Customer path).
     txn_id = uuid.uuid4().hex
+
+    # Customer aggregates + bonuses are computed BEFORE the bill is inserted so the bill row
+    # carries every delta the idempotent credit/self-heal needs — no recomputation on retry.
+    old_tier = (cust.get("tier") or "silver")
+
+    # Slab-wise tier-upgrade bonus — awarded ONCE when a customer crosses UP into a
+    # higher tier (slab). Each tier defines its own `upgrade_bonus` in the loyalty config.
+    upgrade_bonus_points = 0
+    if new_tier != old_tier:
+        ranked = sorted((cfg.get("tier_rules") or []), key=lambda x: x.get("min_lifetime_spend", 0))
+        rank = {t.get("tier"): i for i, t in enumerate(ranked)}
+        if rank.get(new_tier, 0) > rank.get(old_tier, 0):
+            nt = next((t for t in ranked if t.get("tier") == new_tier), None)
+            upgrade_bonus_points = int((nt or {}).get("upgrade_bonus", 0) or 0)
+
+    # Welcome bonus — single GLOBAL bonus, credited ONCE when a customer first joins the
+    # programme (here, their first bill created the customer). Never re-awarded on tier/slab moves.
+    welcome_bonus_points = 0
+    if is_new_customer and not cust.get("welcome_bonus_given"):
+        welcome_bonus_points = int(_parse_float(cfg.get("welcome_bonus", 0)) or 0)
+
+    # Live POS points expire `point_expiry_days` (default 365) from the bill/transaction date.
+    earn_expiry = _expiry_iso(order_time, int(cfg.get("point_expiry_days", 365) or 365))
+
+    # Redemption is applied EXCLUSIVELY by the OTP redeem flow (posRedeemPointOtpCheck; or
+    # posRedeemPointRequest in non-OTP mode). The bill's redemption.redeemed_points is recorded
+    # on the txn for reporting/recon parity ONLY — it must NEVER be deducted here or the
+    # customer gets a DOUBLE point reduction (once at redeem, once on the bill).
+    prev_balance = int(cust.get("points_balance") or 0)
+
     txn_doc = {
         "id": txn_id,
         "customer_id": cust["id"],
@@ -1611,95 +1749,35 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         "is_return": False,
         "source": "pos_ewards",
         "created_at": _now_iso(),
+        # --- Partial-commit safety (see _apply_bill_credit) ---
+        # The bill is inserted PENDING; crediting the balance + writing the ledger rows
+        # happens next and flips this to "committed". If a DB timeout interrupts that, the
+        # bill stays "pending" and the POS retry (or the Master Brain audit tool) RESUMES it
+        # idempotently — points can never be lost to the old duplicate-bill lock again.
+        "commit_status": "pending",
+        "balance_applied": False,
+        "_credit": {
+            "cust_id": cust["id"],
+            "mobile": mobile,
+            "earn": points_earned,
+            "upgrade_bonus": upgrade_bonus_points,
+            "welcome_bonus": welcome_bonus_points,
+            "lifetime_spend_delta": final_amount,
+            "new_tier": new_tier,
+            "old_tier": old_tier,
+            "prev_balance": prev_balance,
+            "welcome_flag": welcome_bonus_points > 0,
+            "order_time": order_time,
+            "expiry": earn_expiry,
+        },
     }
     await transactions_col.insert_one(txn_doc)
 
-    # Customer aggregates (new_lifetime_spend + new_tier already computed above, pre-earn)
-    new_visit_count = int(cust.get("visit_count") or 0) + 1
-    old_tier = (cust.get("tier") or "silver")
-
-    # Slab-wise tier-upgrade bonus — awarded ONCE when a customer crosses UP into a
-    # higher tier (slab). Each tier defines its own `upgrade_bonus` in the loyalty config.
-    upgrade_bonus_points = 0
-    if new_tier != old_tier:
-        ranked = sorted((cfg.get("tier_rules") or []), key=lambda x: x.get("min_lifetime_spend", 0))
-        rank = {t.get("tier"): i for i, t in enumerate(ranked)}
-        if rank.get(new_tier, 0) > rank.get(old_tier, 0):
-            nt = next((t for t in ranked if t.get("tier") == new_tier), None)
-            upgrade_bonus_points = int((nt or {}).get("upgrade_bonus", 0) or 0)
-
-    # Welcome bonus — single GLOBAL bonus, credited ONCE when a customer first joins the
-    # programme (here, their first bill created the customer). Never re-awarded on tier/slab moves.
-    welcome_bonus_points = 0
-    if is_new_customer and not cust.get("welcome_bonus_given"):
-        welcome_bonus_points = int(_parse_float(cfg.get("welcome_bonus", 0)) or 0)
-
-    # Redemption is applied EXCLUSIVELY by the OTP redeem flow (posRedeemPointOtpCheck;
-    # or posRedeemPointRequest in non-OTP mode). The bill's redemption.redeemed_points is
-    # recorded on the txn for reporting/recon parity ONLY — it must NEVER be deducted here
-    # or the customer gets a DOUBLE point reduction (once at redeem, once on the bill).
-    new_balance = (int(cust.get("points_balance") or 0) + points_earned
-                   + upgrade_bonus_points + welcome_bonus_points)
-    cust_set = {
-        "points_balance": new_balance,
-        "lifetime_spend": new_lifetime_spend,
-        "visit_count": new_visit_count,
-        "last_visit_at": _now_iso(),
-        "tier": new_tier,
-    }
-    if welcome_bonus_points > 0:
-        cust_set["welcome_bonus_given"] = True
-    await customers_col.update_one(
-        {"id": cust["id"]},
-        {"$set": cust_set,
-         "$inc": {
-            # redemption is NOT incremented here — the redeem flow already did it.
-            "lifetime_points_earned": points_earned + upgrade_bonus_points + welcome_bonus_points,
-        }},
-    )
-
-    # Ledger entries — live POS points expire `point_expiry_days` (default 365)
-    # from the bill/transaction date.
-    earn_expiry = _expiry_iso(order_time, int(cfg.get("point_expiry_days", 365) or 365))
-    if points_earned > 0:
-        await points_ledger_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "customer_id": cust["id"],
-            "customer_mobile": mobile,
-            "type": "earn",
-            "points": points_earned,
-            "reference_type": "transaction",
-            "reference_id": txn_id,
-            "note": f"Bill {bill_number}",
-            "expires_at": earn_expiry,
-            "created_at": _now_iso(),
-        })
-    if upgrade_bonus_points > 0:
-        await points_ledger_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "customer_id": cust["id"],
-            "customer_mobile": mobile,
-            "type": "bonus",
-            "points": upgrade_bonus_points,
-            "reference_type": "tier_upgrade",
-            "reference_id": txn_id,
-            "note": f"Tier upgrade bonus: {old_tier} → {new_tier}",
-            "expires_at": earn_expiry,
-            "created_at": _now_iso(),
-        })
-    if welcome_bonus_points > 0:
-        await points_ledger_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "customer_id": cust["id"],
-            "customer_mobile": mobile,
-            "type": "bonus",
-            "points": welcome_bonus_points,
-            "reference_type": "welcome",
-            "reference_id": txn_id,
-            "note": "Welcome bonus (joined programme)",
-            "expires_at": earn_expiry,
-            "created_at": _now_iso(),
-        })
+    # Idempotently credit points (ledger-first, then an atomically-claimed balance $inc) and
+    # mark the bill committed. Safe to re-run for the same bill (self-heal on POS retry).
+    credit_result = await _apply_bill_credit(txn_doc)
+    new_balance = credit_result.get("new_balance")
+    new_tier = credit_result.get("new_tier", new_tier)
     # NOTE: NO redeem ledger entry is written here. Redemption is fully handled by the
     # OTP redeem flow (posRedeemPointOtpCheck), which already deducted the balance and
     # wrote the single authoritative 'redeem' ledger row keyed to this bill_number.
