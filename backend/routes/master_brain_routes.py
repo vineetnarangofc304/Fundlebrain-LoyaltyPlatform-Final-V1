@@ -61,6 +61,10 @@ MB_MUTATION_DB_DEADLINE = 55
 # Streaming path: SSE heartbeats keep the connection alive, so reads/aggregations get a big
 # DB budget instead of the 25s cap that made full customer/ledger scans "time out".
 MB_STREAM_DB_DEADLINE = 90
+# A CONFIRMED/bulk MUTATION in the streaming loop gets the full write budget (matches the tool's
+# own pymongo.timeout and the deterministic-confirm path) so a large updateMany completes in ONE
+# call instead of being capped at the read deadline, half-applied, and fabricated as "batches".
+MB_STREAM_MUTATION_DB_DEADLINE = 600
 # Analysis/read questions get the Fundle read tools PLUS the read-only Master audits (e.g.
 # the fast duplicate-redemption audit). The full action set is added only on write intent.
 READ_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_READ_TOOL_SCHEMAS
@@ -77,6 +81,8 @@ MASTER BRAIN — ACTION LAYER  (you are *Master Brain*, used ONLY by a Master Ad
 EVERYTHING ABOVE STILL APPLIES. You are Fundle Brain with extra powers. You MUST answer ANY analytics / data / "where do I see…" / list / export question exactly like Fundle Brain — same READ tools (customer_search, run_aggregation, export_csv, get_data_dictionary, …), same decisiveness, same formatting. NEVER refuse or downgrade a read/analytics request, and never say "I can only do actions". You give REAL, COMPLETE answers with actual numbers — never "timed out", never "I couldn't", never a vague placeholder. If one query is heavy, use a tighter/indexed query (a `$match` + `$count`, a filtered `count_documents`, or a `$limit`ed sample) and still deliver the number.
 
 🚫 ABSOLUTE ANTI-FABRICATION RULE (breaking this is the worst thing you can do): EVERY number, count, customer, table row, total, "excess points", "over-credited" figure, or audit detail you state MUST come from an actual tool result IN THIS conversation. You may NEVER invent, estimate, guess, illustrate, or "assume" data — not even as an example, and not to be helpful. If you have not run the tool that would produce a figure, RUN IT; if you cannot (or it returns nothing), SAY SO plainly ("I don't have that data — let me query it" or "no records found") and then call the right tool. NEVER present a fabricated report/table. For questions about what a past action did (e.g. "how many were over-credited?"), you MUST call a READ tool (run_aggregation on points_ledger, master_action_log) or reverse_duplicate_bonus_credits with confirm=false to get REAL numbers before answering. A wrong-but-confident made-up report is a critical failure.
+
+⚙️ EXECUTION IS ATOMIC — NO "BATCHES PER TURN", NO FAKE PROGRESS: Every write tool (bulk_update_customers, normalize_historical_points, credit_points_from_file, fix_negative_balances, fix_double_redemptions, reverse_duplicate_bonus_credits, reverse_duplicate_adjustments, repair_partial_commit_bills, apply_to_uploaded_report, retier_customers, set_customer_tier, …) processes the ENTIRE matched set server-side in a SINGLE call and returns the REAL counts (matched / modified / customers_reset / credited / audit_id). There is NO per-turn batch limit and you have NO reason to "continue with the remaining rows" in another turn. So: (a) NEVER claim you can "only process one batch/1,200 per turn", "loop through batches", or that something "timed out at scale" unless the tool result literally contained an error — if it did, relay that error verbatim and CALL THE TOOL AGAIN. (b) NEVER invent "processed X / remaining Y" progress; report ONLY the counts the tool returned. (c) If confirmed but you're unsure whether it applied, call the tool again (it is idempotent) or run a READ query to verify the true current count — do not narrate an outcome you didn't observe. Confessing "I fabricated that" means you must instead run the tool and report its real result.
 
 CRITICAL — READ vs WRITE separation (this is what keeps you fast and reliable):
 - When the user is ASKING A QUESTION / requesting analysis, a count, a list, a report, or "where do I see X" (e.g. "how many customers have a negative balance and why?"), answer it using ONLY the READ tools (run_aggregation, customer_search, get_data_dictionary, export_csv, …). Do NOT call ANY action/repair tool (fix_negative_balances, fix_double_redemptions, retier_customers, grant/adjust, send_campaign, …) — not even in "preview" — merely to answer a question. Using a repair tool to "check" data is WRONG and slow.
@@ -1185,7 +1191,11 @@ async def _run_stream_loop(messages, model, provider, user, tools, emit, trace) 
                 except Exception:
                     args = {}
                 await emit({"type": "tool_start", "tool": name, "text": _tool_start_text(name)})
-                result = await _master_execute_tool(name, args, user=user, db_deadline=MB_STREAM_DB_DEADLINE)
+                # Mutation tools get the FULL DB budget (like the deterministic-confirm path) so a
+                # confirmed bulk write can't be capped mid-flight at the read deadline and then be
+                # narrated as fabricated "batch progress". Reads keep the shorter stream deadline.
+                _dl = MB_STREAM_MUTATION_DB_DEADLINE if name in _MUTATION_TOOLS else MB_STREAM_DB_DEADLINE
+                result = await _master_execute_tool(name, args, user=user, db_deadline=_dl)
                 trace.append({"tool": name, "args": args, "result_preview": str(result)[:500]})
                 await emit({"type": "tool_done", "tool": name, "text": _tool_summary(name, result)})
                 messages.append({"role": "tool", "tool_call_id": tc.id, "name": name,

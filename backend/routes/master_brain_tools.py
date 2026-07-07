@@ -1022,20 +1022,18 @@ async def _tool_bulk_update_customers(filter: Dict[str, Any] = None, set: Dict[s
             async for d in customers_col.find(flt, snap_proj):
                 changes.append({"cust_id": d.get("id"), "before": {f: d.get(f) for f in fields}})
 
-    # Apply in batches of _id so it survives prod timeouts and can stream progress.
+    # Apply as a SINGLE server-side update_many — MongoDB does it in one pass at any scale
+    # (no per-doc fetch, no cross-turn batching), so it either fully applies or errors cleanly;
+    # it can never half-apply and be narrated as fabricated "batch progress".
+    if prog:
+        try: await prog(0, matched, "customers updated")
+        except Exception: pass
     with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
-        id_docs = await customers_col.find(flt, {"_id": 1}).to_list(None)
-    id_list = [d["_id"] for d in id_docs]
-    total = len(id_list)
-    modified = 0
-    for i in range(0, total, CREDIT_BATCH):
-        batch = id_list[i:i + CREDIT_BATCH]
-        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
-            res = await customers_col.update_many({"_id": {"$in": batch}}, update)
-        modified += res.modified_count
-        if prog:
-            try: await prog(min(i + CREDIT_BATCH, total), total, "customers updated")
-            except Exception: pass
+        res = await customers_col.update_many(flt, update)
+    modified = res.modified_count
+    if prog:
+        try: await prog(matched, matched, "customers updated")
+        except Exception: pass
 
     audit_id = await _log_master(user, "bulk_field_update", "customers", "bulk", reason,
         {"filter_json": json.dumps(flt, default=str), "set_json": json.dumps(set_spec, default=str),
@@ -2470,11 +2468,12 @@ async def _tool_normalize_historical_points(reason: str = "", confirm: bool = Fa
     if err:
         return err
     # Target customers: migrated, with a derived earned/redeemed figure to clear.
+    tgt_filter = {"source": "historic_upload",
+                  "$or": [{"lifetime_points_earned": {"$gt": 0}},
+                          {"lifetime_points_redeemed": {"$gt": 0}}]}
     targets: List[Dict[str, Any]] = []
     async for c in customers_col.find(
-            {"source": "historic_upload",
-             "$or": [{"lifetime_points_earned": {"$gt": 0}},
-                     {"lifetime_points_redeemed": {"$gt": 0}}]},
+            tgt_filter,
             {"_id": 0, "id": 1, "mobile": 1, "points_balance": 1,
              "lifetime_points_earned": 1, "lifetime_points_redeemed": 1}).max_time_ms(25000):
         targets.append(c)
@@ -2518,23 +2517,22 @@ async def _tool_normalize_historical_points(reason: str = "", confirm: bool = Fa
     if rerr:
         return rerr
     audit_id = str(uuid.uuid4())
-    upd_ops: List[Any] = []
+    # Undo snapshot (bounded) from the targets we already read.
     changes: List[Dict[str, Any]] = []
     for t in targets:
-        cid = t["id"]
         cur = int(t.get("points_balance") or 0)
-        le = int(t.get("lifetime_points_earned") or 0)
-        lr = int(t.get("lifetime_points_redeemed") or 0)
-        upd_ops.append(UpdateOne({"id": cid}, {"$set": {
-            "lifetime_points_earned": 0, "lifetime_points_redeemed": 0,
-            "historical_balance_authoritative": True}}))
-        changes.append({"cust_id": cid, "mobile": t.get("mobile"),
+        changes.append({"cust_id": t["id"], "mobile": t.get("mobile"),
                         "points_before": cur, "points_after": cur,          # balance unchanged
-                        "lifetime_before": le, "lifetime_after": 0,
-                        "lifetime_redeemed_before": lr, "lifetime_redeemed_after": 0})
-    for i in range(0, len(upd_ops), CREDIT_BATCH):
-        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
-            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+                        "lifetime_before": int(t.get("lifetime_points_earned") or 0), "lifetime_after": 0,
+                        "lifetime_redeemed_before": int(t.get("lifetime_points_redeemed") or 0),
+                        "lifetime_redeemed_after": 0})
+    # Reset in ONE server-side update_many — completes in a single pass for EVERY matching
+    # historic customer at any scale (no per-doc writes, no cross-turn batching to fabricate).
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        reset_res = await customers_col.update_many(tgt_filter, {"$set": {
+            "lifetime_points_earned": 0, "lifetime_points_redeemed": 0,
+            "historical_balance_authoritative": True}})
+    customers_reset = reset_res.modified_count
     # Void the derived historic earn/bonus ledger rows (kept for audit, points->0).
     vreason = f"Historic derived points removed (balance-only rule) — {reason}"
     with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
@@ -2544,14 +2542,18 @@ async def _tool_normalize_historical_points(reason: str = "", confirm: bool = Fa
                        "voided_reason": vreason, "voided_by_audit": audit_id,
                        "original_points": {"$ifNull": ["$original_points", "$points"]}, "points": 0}}])
     await _log_master(user, "normalize_historical_points", "customers", "bulk", reason,
-                      {"customers_reset": len(changes), "ledger_rows_voided": ledger_rows,
+                      {"customers_reset": customers_reset, "ledger_rows_voided": ledger_rows,
                        "ledger_points_voided": ledger_points}, audit_id=audit_id)
-    await _record_snapshot(audit_id, "normalize_historical_points", changes)
+    if changes:
+        await _record_snapshot(audit_id, "normalize_historical_points", changes)
     return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
-            "customers_reset": len(changes),
-            "message": (f"Normalized {len(changes)} historic customer(s): reset derived "
-                        f"lifetime earned/redeemed to 0 and voided {ledger_rows} derived earn/bonus "
-                        f"ledger rows ({ledger_points} pts). Balances untouched. Audit {audit_id} — undoable.")}
+            "customers_reset": customers_reset,
+            "undo_snapshot_rows": len(changes),
+            "message": (f"Normalized {customers_reset:,} historic customer(s) in one pass: reset derived "
+                        f"lifetime earned/redeemed to 0 and voided {ledger_rows:,} derived earn/bonus "
+                        f"ledger rows ({ledger_points:,} pts). Balances untouched. Audit {audit_id}."
+                        + ("" if not over_cap else
+                           f" (undo covers the first {len(changes):,} of them.)"))}
 
 
 async def _tool_set_points_cutoff(cutoff_date: str = "", confirm: bool = False,

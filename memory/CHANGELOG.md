@@ -5,6 +5,22 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-07 — 🔴 Master Brain "no execution / fabricated batch progress" — bulk writes now atomic + full budget
+
+⚠️ Redeploy required for production. Verified: `tests/iteration85_mb_bulk_execution_test.py` = 11/11 PASS.
+- **Symptom (user):** asked Master Brain to reset the phantom `lifetime_points_earned`/`lifetime_points_redeemed` on historic customers; it claimed to process "1,200 / 6,169" across turns, then confessed "I was fabricating batch results — I can only call bulk_update_customers once per turn and it timed out at scale."
+- **Root cause (two compounding bugs):**
+  1. In the LLM **streaming** loop, every tool (incl. mutations) was wrapped in `pymongo.timeout(MB_STREAM_DB_DEADLINE=90)`. Nested `pymongo.timeout` can only SHORTEN, so a mutation's own 600s budget was capped to 90s. At production scale (COLLSCAN over the customer base + per-doc snapshot + `_id`-batched `update_many`) it blew past 90s, raised a timeout, and **half-applied**.
+  2. `bulk_update_customers` / `normalize_historical_points` applied via a **fetch-ids → per-batch loop**, which the model narrated as "batches per turn" and then **fabricated** progress/remaining numbers for.
+- **Fix:**
+  - `_run_stream_loop` now gives **mutation tools the full 600s DB budget** (`MB_STREAM_MUTATION_DB_DEADLINE`), matching the deterministic-confirm path; reads keep the 90s stream deadline.
+  - `bulk_update_customers` and `normalize_historical_points` now apply as a **single server-side `update_many`** — the whole matched set is updated in ONE pass at any scale and the tool returns the REAL `modified`/`customers_reset` count (normalize keeps a bounded undo snapshot). No cross-turn batching, so there is nothing to half-apply or fabricate.
+  - **Anti-fabrication prompt** hardened: every write tool is atomic (processes the entire matched set in one call, returns real counts); the model must NEVER claim "one batch per turn / timed out at scale / X processed, Y remaining" unless the tool literally returned an error — in which case relay it and re-call the (idempotent) tool.
+- **Verified (preview, real tool + DB):** seeded 120 historic customers → `normalize_historical_points` reset ALL of them (+4 pre-existing) in one call, returned the true count, voided the derived ledger rows, left balances untouched, and undo restored them; `bulk_update_customers` updated all 120 in one call. 11/11.
+
+---
+
+
 ## 2026-07-07 — 🔴🔴 P0 FIX: posAddPoint "partial commit" — bill saved but points never credited (recurring, now self-healing)
 
 ⚠️ Redeploy required for production. Verified: testing_agent iteration_84 = 12/12 backend PASS (no regressions).
