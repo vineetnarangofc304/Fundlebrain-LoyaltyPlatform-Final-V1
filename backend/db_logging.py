@@ -46,6 +46,9 @@ _BATCH_MAX = 50
 _queue: asyncio.Queue | None = None      # created on start() (bound to the running loop)
 _workers: list = []
 _dropped = 0
+_inserted = 0
+_failed = 0
+_last_error: str | None = None
 
 
 def submit_log(doc: dict) -> None:
@@ -56,6 +59,8 @@ def submit_log(doc: dict) -> None:
     global _dropped
     q = _queue
     if q is None:
+        # Writer not started yet (should not happen — startup() starts it first).
+        _dropped += 1
         return
     try:
         q.put_nowait(doc)
@@ -67,7 +72,24 @@ def submit_log(doc: dict) -> None:
                 "(logging is best-effort; live traffic is unaffected)")
 
 
+def stats() -> dict:
+    """Lightweight health snapshot for the background writer (queue depth,
+    totals, last error) so operators can confirm on production that logging is
+    keeping up and not silently dropping rows."""
+    return {
+        "started": _queue is not None,
+        "workers": len(_workers),
+        "queue_depth": _queue.qsize() if _queue is not None else 0,
+        "queue_max": _QUEUE_MAX,
+        "inserted": _inserted,
+        "dropped": _dropped,
+        "failed_batches": _failed,
+        "last_error": _last_error,
+    }
+
+
 async def _worker() -> None:
+    global _inserted, _failed, _last_error
     assert _queue is not None
     while True:
         doc = await _queue.get()
@@ -82,8 +104,16 @@ async def _worker() -> None:
                 await _log_col.insert_one(batch[0])
             else:
                 await _log_col.insert_many(batch, ordered=False)
+            _inserted += len(batch)
         except Exception as e:  # noqa: BLE001 — best-effort; never crash the worker
-            logger.debug(f"api_logs background insert failed ({len(batch)} rows): {e}")
+            _failed += 1
+            _last_error = f"{type(e).__name__}: {str(e)[:200]}"
+            # Surface at WARNING on the first failure and then periodically, so a
+            # sustained failure (e.g. api_logs locked / write pool exhausted) is
+            # visible to operators instead of hidden at debug level.
+            if _failed == 1 or _failed % 100 == 0:
+                logger.warning(f"api_logs background insert failed x{_failed} "
+                               f"({len(batch)} rows): {_last_error}")
         finally:
             for _ in batch:
                 _queue.task_done()

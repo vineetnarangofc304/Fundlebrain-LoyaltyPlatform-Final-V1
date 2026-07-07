@@ -14,6 +14,15 @@ async def recent_calls(limit: int = 100, user: dict = Depends(get_current_user))
     return rows
 
 
+@router.get("/log-writer-health")
+async def log_writer_health(user: dict = Depends(get_current_user)):
+    """Health of the isolated background api_logs writer (queue depth, rows
+    inserted/dropped/failed). Lets operators confirm on production that logging
+    is keeping up and never blocking live POS traffic."""
+    from db_logging import stats
+    return stats()
+
+
 @router.get("/health")
 async def health(user: dict = Depends(get_current_user)):
     now = datetime.now(timezone.utc)

@@ -5,6 +5,20 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-07 — Fix P0: POS `posAddPoint` 500 `NetworkTimeout` (till hangs "Working on it…") + Master Brain timeouts (iter 83, 8/8 PASS)
+
+⚠️ Redeploy required for production.
+- **Symptom (production, from API Monitor):** `POST /api/pos/posAddPoint → 500 → "unhandled_exception: NetworkTimeout: customer-apps-shard-00-01.o9d3cj.mongodb.net:27017: The read operation timed out"`. LS Central till stuck on "Working on it…"; billing delayed. Master Brain also intermittently showed connection/timeout errors.
+- **Root cause:** The previous deploy moved POS logging to *unbounded* `asyncio.create_task(api_logs_col.insert_one(...))` fire-and-forget, and the global `APILogMiddleware` did the same for every internal API call. On production `api_logs` holds millions of rows (multi-index inserts). Under live store traffic these background inserts saturated the **single shared Motor connection pool**, so a foreground `posAddPoint` bill (and Master Brain) could not check out a socket within the Atlas client `timeoutMS` → `NetworkTimeout: read operation timed out`. Confirmed non-reproducible in preview (no load) — a load/pool-starvation regression.
+- **Fix:** New `backend/db_logging.py` — a **bounded queue (5000) drained by 2 workers on a SEPARATE, tiny Motor client (maxPoolSize=8)**. All best-effort `api_logs` writes now go through `submit_log()` (POS `_log_api`, both `APILogMiddleware` paths, and the POS unhandled-exception handler). Background logging can no longer steal connections from live POS/dashboard/Master-Brain reads; a burst just fills the queue and drops overflow (a lost monitor row is acceptable; a blocked till is not). Batched `insert_many` cuts round-trips.
+- **Also:** main Motor client given explicit `maxPoolSize=100, minPoolSize=10` (warm sockets for live bills). New observability endpoint `GET /api/api-monitor/log-writer-health` (queue_depth, inserted, dropped, failed_batches, last_error) + periodic WARNING logs so operators can confirm on production that logging keeps up.
+- **Validated (preview, testing_agent 8/8):** all POS flows (customer check, OTP, `posAddPoint` on store K00055, redeem) 200 & fast; `api_logs` still records via the isolated writer; **30 concurrent posCustomerCheck → 30/30 200, max 0.36s** (proves logging no longer starves the pool); Master Brain SSE `/chat/stream` returns replies & analytics numbers. NOTE: the pool-starvation itself only manifests under production load, so the concurrency test is a best-effort proxy — verify on prod via the health endpoint after redeploy.
+- **Files:** `backend/db_logging.py` (new), `backend/database.py` (pool sizing), `backend/server.py` (middleware + exception handler + startup wiring), `backend/routes/pos_ewards_routes.py` (`_log_api` → `submit_log`), `backend/routes/api_monitor_routes.py` (health endpoint).
+- **Deferred (needs user OK):** `api_logs` retention/TTL to keep the collection small (keeps inserts fast, lowers chance the isolated writer backs up on prod). Separate: deployment_agent flagged `.gitignore` blocks `.env` — a deployment-config item, not this bug.
+
+---
+
+
 ## 2026-07-02 — Fix: Master Brain "not working / timing out / doesn't understand commands" (iters 77+78, 17/17 PASS)
 
 ⚠️ Redeploy required for production.
