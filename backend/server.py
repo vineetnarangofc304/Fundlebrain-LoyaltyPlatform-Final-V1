@@ -16,6 +16,7 @@ from typing import Optional
 from pathlib import Path
 
 import jwt as _jwt
+import pymongo
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -224,6 +225,12 @@ _LOG_SKIP_PREFIXES = (
     "/api/health",
 )
 _LOG_MAX_BYTES = 50_000
+# Generous per-request DB deadline for the LIVE POS billing path. It OVERRIDES the
+# aggressive production Atlas client timeoutMS (~10s) via pymongo CSOT, so when the
+# cluster is momentarily slow under peak store load a live bill WAITS a little instead
+# of dying with `NetworkTimeout: read operation timed out` (the till "Working on it…"
+# hang). Master Brain already does the same for its bulk ops.
+POS_DB_DEADLINE_SEC = float(os.environ.get("POS_DB_DEADLINE_SEC", "30"))
 _LOG_STREAMING_HINTS = ("text/csv", "application/pdf", "spreadsheetml",
                         "octet-stream", "application/zip", "text/event-stream")
 
@@ -286,6 +293,13 @@ class APILogMiddleware:
 
         path = scope.get("path", "")
         method = scope.get("method", "")
+        # LIVE POS billing path: wrap the whole request in a generous pymongo CSOT deadline
+        # so slow-but-alive Atlas responses under peak load delay a bill instead of failing
+        # it with NetworkTimeout. (POS is skip-logged anyway; it self-logs via _log_api.)
+        if method != "OPTIONS" and path.startswith("/api/pos/"):
+            with pymongo.timeout(POS_DB_DEADLINE_SEC):
+                await self.app(scope, receive, send)
+            return
         if (
             method == "OPTIONS"
             or not path.startswith("/api/")

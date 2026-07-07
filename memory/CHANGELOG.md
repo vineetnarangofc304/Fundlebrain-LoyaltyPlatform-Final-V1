@@ -5,6 +5,19 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-07 — Fix P0 (round 2): POS `NetworkTimeout` persists after pool fix → aggressive prod Atlas `timeoutMS` on the POS path
+
+⚠️ Redeploy required for production.
+
+- **Symptom:** After the connection-pool isolation fix was deployed, `posAddPoint` STILL returned `NetworkTimeout: ...mongodb.net: The read operation timed out` on live tills ("Working on it…" hang on the coupon/amount screens).
+- **Root cause (confirmed):** Production Atlas has an aggressive client-wide `timeoutMS` (~10s). Master Brain already wraps its bulk DB ops in `pymongo.timeout(600)` to survive it — but the **POS endpoints had NO such override**, so when Atlas is momentarily slow under peak store load, a POS query breaches the ~10s client timeout and dies with `NetworkTimeout`. Verified locally: `pymongo.timeout(0.0005)` around a Motor query raises the exact same `NetworkTimeout`, and `pymongo.timeout(30)` lets it through. All relevant indexes already exist and the pool fix is deployed, so it is neither a missing index nor pool starvation — it is the client timeout being exceeded server-side.
+- **Fix:** `APILogMiddleware` now wraps every `/api/pos/*` request in `with pymongo.timeout(POS_DB_DEADLINE_SEC)` (default **30s**, env-tunable via `POS_DB_DEADLINE_SEC`) — a pure-ASGI middleware so the CSOT deadline propagates into the handler's Motor ops. A slow-but-alive Atlas now DELAYS a live bill instead of failing it. Same proven pattern Master Brain uses.
+- **Validated (preview):** CSOT mechanism enforced with Motor; POS endpoints respond ~0.1–0.2s with the wrap in place (no regression). Files: `backend/server.py` (import pymongo, `POS_DB_DEADLINE_SEC`, middleware wrap).
+- **After redeploy, confirm on prod:** watch API Monitor — `posAddPoint` NetworkTimeouts should drop to ~0. If they PERSIST even with the 30s deadline, the Atlas cluster is genuinely saturated at peak (queries >30s) → the real fix is **scaling the MongoDB Atlas tier** (infra, via Emergent Support), not code.
+
+---
+
+
 ## 2026-07-07 — Master Brain data-integrity audits + corrections (deterministic, audited, UNDOABLE) + canonical cutoff rule
 
 ⚠️ Redeploy required for production. Verified on preview via seeded apply→undo round-trips + live chat invocation.
