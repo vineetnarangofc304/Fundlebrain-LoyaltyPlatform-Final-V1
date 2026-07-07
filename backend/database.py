@@ -9,7 +9,12 @@ load_dotenv(Path(__file__).parent / ".env")
 _mongo_url = os.environ["MONGO_URL"]
 _db_name = os.environ["DB_NAME"]
 
-client = AsyncIOMotorClient(_mongo_url)
+# Main request pool. Explicit sizing so a live POS bill / dashboard read always
+# has warm sockets available. Best-effort api_logs WRITES run on a separate tiny
+# pool (see db_logging.py) so background logging can never starve this pool —
+# that starvation is what caused the production `NetworkTimeout: read operation
+# timed out` 500s on posAddPoint.
+client = AsyncIOMotorClient(_mongo_url, maxPoolSize=100, minPoolSize=10)
 db = client[_db_name]
 
 

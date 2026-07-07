@@ -48,6 +48,7 @@ from database import (
     db, customers_col, transactions_col, stores_col, points_ledger_col,
     coupons_col, coupon_redemptions_col, api_logs_col, loyalty_config_col,
 )
+from db_logging import submit_log
 
 router = APIRouter(prefix="/pos", tags=["pos-ewards"])
 logger = logging.getLogger("kazo-fundle.pos-ewards")
@@ -242,7 +243,10 @@ async def _log_api(*, endpoint: str, method: str, status: int, ms: int,
             "source": "pos_ewards",
             "timestamp": _now_iso(),
         }
-        _fire_and_forget(api_logs_col.insert_one(doc))
+        # Best-effort, NON-BLOCKING: enqueue onto the isolated background writer
+        # (dedicated tiny Mongo pool). A slow/bloated api_logs insert can NEVER
+        # again starve the main pool and time out a live POS bill.
+        submit_log(doc)
     except Exception:
         pass
 

@@ -1,0 +1,26 @@
+{
+  "summary": "Iteration 83 — full backend regression validation of the P0 pool-isolation fix (db_logging.py bounded queue + dedicated Motor client, main pool maxPoolSize=100). All 8 tests PASS in ~10s. Covered: (1) POS posCustomerCheck 200 in <3s, (2) posCustomerCheckRequest + posCustomerOTPCheck 200 (mock OTP 123456), (3) posAddPoint with UNIQUE bill on K00055/KAZO_FUNDLE — 200 envelope, points_earned/new_balance present, no NetworkTimeout, (4) posRedeemPointRequest + posRedeemPointOtpCheck 200, (5) api_logs still receives rows via the new isolated writer — posCustomerCheck row observed in /api/api-monitor/recent within ~1s of the call, (6) CONCURRENCY: 30 parallel posCustomerCheck calls → 30/30 status 200, max latency 0.36s (well under threshold; proves logging no longer starves the main pool), (7) Master Brain SSE /chat/stream 'reply with just READY' ends with done event carrying non-empty reply, (8) MB streaming analytics query 'how many customers do we have?' returns a numeric answer via done event. No functional regression; the fix is safe to keep in production.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration83_pool_isolation_regression_test.py",
+    "/app/test_reports/pytest/iteration83.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "db_logging.py workers swallow ALL exceptions at logger.debug level — under sustained failure (e.g. api_logs collection locked) an operator would have no visibility. Consider promoting to logger.warning on the first N failures per interval OR expose a /health metric (queue_depth, dropped_count, last_error_ts).",
+    "db_logging._queue is bound to whichever loop first calls start_log_writer(); if any code path calls submit_log() BEFORE startup completes (e.g. an early import-time side-effect), the row is silently dropped. Current code is safe (startup() calls it first) but a defensive one-line 'queue not yet started, dropped' counter would surface future regressions.",
+    "pos_ewards_routes.py is still ~2240 lines — split per-endpoint modules (customer_check, add_point, redeem, otp) as previously flagged. The submit_log() migration is the right pattern; keep applying it if any other route still uses asyncio.create_task(collection.insert_one(...)).",
+    "database.py has an explicit maxPoolSize=100 but no serverSelectionTimeoutMS / socketTimeoutMS on the main client — a genuinely dead Atlas primary would still hang requests for the driver default (30s). Consider matching db_logging.py's 5s serverSelectionTimeoutMS and adding a bounded socketTimeoutMS on the main client too."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration83_pool_isolation_regression_test.py"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "N/A"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026; POS x-api-key ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI, merchant KAZO_FUNDLE, customer_key K00055, mock OTP 123456; test mobile 9990002222.",
+  "seed_data_creation": "None persistent. Each posAddPoint uses a fresh UUID-hex bill number (prefix IT83-) so no duplicate-bill collision. The Gold test customer 9990002222's balance is affected by ~1500-rupee bills + a 10-point redeem attempt — expected & documented in test_credentials.md.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression file /app/backend/tests/iteration83_pool_isolation_regression_test.py is self-contained (loads REACT_APP_BACKEND_URL from env or frontend/.env). Concurrency test observed 30/30 200s with max latency 0.36s on preview. Note that the real production pool-starvation manifests only under multi-store live load; this test is a proxy. If a future run sees max_latency spike >2s, re-check db_logging.py workers are actually started (grep supervisor backend logs for 'api_logs background writer started').",
+  "rca of the issue": "Not applicable — validating a prior fix. Confirmed the fix components are wired: server.py:23 imports submit_log/start_log_writer; server.py:495 startup() calls start_log_writer(); server.py:147/336/360 middleware + exception handlers use submit_log() instead of asyncio.create_task(_persist_api_log(...)); pos_ewards_routes.py:249 _log_api() uses submit_log(doc); database.py:17 main client has maxPoolSize=100/minPoolSize=10; db_logging.py runs a separate AsyncIOMotorClient(maxPoolSize=8) with a bounded asyncio.Queue(maxsize=5000) drained by 2 workers doing insert_many batches up to 50. Overflow drops rows (best-effort logging), preserving live POS latency."
+}

@@ -20,6 +20,8 @@ import jwt as _jwt
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+from db_logging import submit_log, start_log_writer
+
 from routes.auth_routes import router as auth_router
 from routes.users_routes import router as users_router
 from routes.dashboard_routes import router as dashboard_router
@@ -142,8 +144,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     if is_pos:
         # Record in the API Monitor so admins can self-diagnose the real cause.
         try:
-            from database import api_logs_col
-            await api_logs_col.insert_one({
+            submit_log({
                 "id": uuid.uuid4().hex,
                 "endpoint": path,
                 "method": request.method,
@@ -262,16 +263,6 @@ def _decode_body(raw: bytes):
             return {"_binary": True, "size_bytes": len(raw)}
 
 
-async def _persist_api_log(doc: dict):
-    """Fire-and-forget insert. Wrapped in try/except so logging failure
-    never crashes the request."""
-    try:
-        from database import api_logs_col
-        await api_logs_col.insert_one(doc)
-    except Exception as e:
-        logging.getLogger("kazo-fundle").debug(f"api_logs insert failed: {e}")
-
-
 class APILogMiddleware:
     """Pure-ASGI request/response logger for the API monitor.
 
@@ -342,7 +333,7 @@ class APILogMiddleware:
             await self.app(scope, recv_wrapper, send_wrapper)
         except Exception as e:
             elapsed_ms = int((time.perf_counter() - start) * 1000)
-            asyncio.create_task(_persist_api_log({
+            submit_log({
                 "id": uuid.uuid4().hex, "endpoint": path, "method": method,
                 "status_code": 500, "response_time_ms": elapsed_ms,
                 "customer_mobile": None, "bill_number": None, "store_id": None,
@@ -351,7 +342,7 @@ class APILogMiddleware:
                 "response_payload": None, "api_key_label": actor_email,
                 "actor_ip": actor_ip, "source": "internal",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-            }))
+            })
             raise
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -366,7 +357,7 @@ class APILogMiddleware:
             if d:
                 error_reason = str(d)[:300]
 
-        asyncio.create_task(_persist_api_log({
+        submit_log({
             "id": uuid.uuid4().hex, "endpoint": path, "method": method,
             "status_code": state["status"], "response_time_ms": elapsed_ms,
             "customer_mobile": None, "bill_number": None, "store_id": None,
@@ -375,7 +366,7 @@ class APILogMiddleware:
             "response_payload": response_body_decoded, "api_key_label": actor_email,
             "actor_ip": actor_ip, "source": "internal",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        }))
+        })
 
 
 app.add_middleware(APILogMiddleware)
@@ -496,6 +487,14 @@ async def startup():
     from auth import hash_password
     from datetime import datetime, timezone
     import uuid
+
+    # Start the isolated, bounded api_logs background writer FIRST so every log
+    # write from here on runs off the main request pool (prevents the production
+    # posAddPoint NetworkTimeout caused by logging saturating the shared pool).
+    try:
+        start_log_writer()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not start api_logs background writer: {e}")
 
     # Best-effort init of object storage for the Downloads Center exports.
     try:
