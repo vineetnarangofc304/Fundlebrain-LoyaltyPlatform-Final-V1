@@ -27,8 +27,24 @@ from pymongo import UpdateOne
 from database import (
     customers_col, points_ledger_col, audit_logs_col, loyalty_config_col,
     mb_action_snapshots_col, master_campaigns_col, mb_credit_jobs_col,
-    mb_credit_receipts_col,
+    mb_credit_receipts_col, transactions_col,
 )
+
+# Historical / live boundary. Bills BEFORE this date are HISTORICAL — the migrated
+# points_balance is the sole authoritative points figure and NOTHING is computed for
+# them. Bills ON/AFTER are LIVE POS — points are computed + ledgered in real time.
+DEFAULT_POINTS_CUTOFF = "2025-06-08"
+
+
+async def _points_cutoff() -> str:
+    """Single source of truth for the historical/live cutoff (YYYY-MM-DD), read from
+    loyalty_config so it always matches the ingest pipeline. Audits REPORT this value
+    so the operator can verify it is correct for their dataset."""
+    try:
+        cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0, "points_cutoff_date": 1})
+        return ((cfg or {}).get("points_cutoff_date") or DEFAULT_POINTS_CUTOFF)
+    except Exception:
+        return DEFAULT_POINTS_CUTOFF
 
 # Inline apply is bounded to keep the chat request fast; bigger jobs are routed
 # to the dedicated batched re-tier tool on the Loyalty Rules page.
@@ -1792,6 +1808,223 @@ async def _tool_fix_double_redemptions(mobile: Optional[str] = None, reason: str
                        f"{len(rows)} duplicate redemption ledger row(s). Logged to the action log."}
 
 
+# ============================================================
+# DETERMINISTIC DATA-INTEGRITY AUDITS (read-only, exact, no LLM/guesswork)
+# ============================================================
+async def _tool_audit_missing_redemption_ledger(sample_limit: int = 15, user=None) -> Dict[str, Any]:
+    """EXACT, READ-ONLY. Find bills (transactions) that recorded a redemption
+    (points_redeemed > 0) but have NO matching `redeem` row in points_ledger, so the
+    redemption has no ledger trail. Splits the result by HISTORICAL (bill_date < cutoff —
+    audit-gap only, balance is authoritative) vs LIVE (>= cutoff — posAddPoint does not
+    deduct, so a bill that never went through the OTP redeem flow means the balance was
+    NOT reduced → a real over-balance). Real DB reads only; never a fabricated zero."""
+    err = _require_master(user)
+    if err:
+        return err
+    cutoff = await _points_cutoff()
+    # Pass 1 — every bill that recorded a redemption (small subset of all bills).
+    bills: List[Dict[str, Any]] = []
+    try:
+        async for tx in transactions_col.find(
+                {"points_redeemed": {"$gt": 0}},
+                {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1,
+                 "customer_mobile": 1, "points_redeemed": 1}).max_time_ms(25000):
+            bills.append(tx)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit_missing_redemption_ledger pass-1 incomplete: {e}")
+        return {"audit": "missing_redemption_ledger", "computed": False, "exact": False,
+                "cutoff_date": cutoff,
+                "message": ("Couldn't scan redemption bills within the time limit right now "
+                            "(DB likely under load). Please retry in a few seconds.")}
+    # Pass 2 — which of those bills ARE covered by a non-voided redeem ledger row,
+    # matched by reference_id/bill_number (live) or source_bill_id (historic).
+    bill_nos = list({b.get("bill_number") for b in bills if b.get("bill_number")})
+    tx_ids = list({b.get("id") for b in bills if b.get("id")})
+    covered_bills: set = set()
+    covered_srcs: set = set()
+    try:
+        for i in range(0, len(bill_nos), 5000):
+            batch = bill_nos[i:i + 5000]
+            async for lr in points_ledger_col.find(
+                    {"type": "redeem", "voided": {"$ne": True},
+                     "$or": [{"reference_id": {"$in": batch}}, {"bill_number": {"$in": batch}}]},
+                    {"_id": 0, "reference_id": 1, "bill_number": 1}).max_time_ms(10000):
+                if lr.get("reference_id"):
+                    covered_bills.add(lr.get("reference_id"))
+                if lr.get("bill_number"):
+                    covered_bills.add(lr.get("bill_number"))
+        for i in range(0, len(tx_ids), 5000):
+            batch = tx_ids[i:i + 5000]
+            async for lr in points_ledger_col.find(
+                    {"type": "redeem", "voided": {"$ne": True}, "source_bill_id": {"$in": batch}},
+                    {"_id": 0, "source_bill_id": 1}).max_time_ms(10000):
+                covered_srcs.add(lr.get("source_bill_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit_missing_redemption_ledger pass-2 incomplete: {e}")
+        return {"audit": "missing_redemption_ledger", "computed": False, "exact": False,
+                "cutoff_date": cutoff,
+                "message": ("Couldn't cross-check redeem ledger rows within the time limit "
+                            "right now. Please retry in a few seconds.")}
+    missing = [b for b in bills
+               if b.get("bill_number") not in covered_bills and b.get("id") not in covered_srcs]
+
+    def _pts(rows):
+        return sum(int(r.get("points_redeemed") or 0) for r in rows)
+
+    hist = [b for b in missing if (b.get("bill_date") or "") < cutoff]
+    live = [b for b in missing if (b.get("bill_date") or "") >= cutoff]
+    sample = [{"mobile": b.get("customer_mobile"), "bill": b.get("bill_number"),
+               "bill_date": b.get("bill_date"), "points_redeemed": int(b.get("points_redeemed") or 0),
+               "bucket": "historic" if (b.get("bill_date") or "") < cutoff else "live"}
+              for b in missing[:max(1, sample_limit)]]
+    return {
+        "audit": "missing_redemption_ledger", "computed": True, "exact": True,
+        "cutoff_date": cutoff,
+        "total_bills_with_redemption": len(bills),
+        "bills_missing_redeem_ledger": len(missing),
+        "customers_affected": len({b.get("customer_mobile") for b in missing if b.get("customer_mobile")}),
+        "points_redeemed_without_ledger": _pts(missing),
+        "historic_pre_cutoff": {
+            "bills": len(hist), "points": _pts(hist),
+            "note": "Historical (before cutoff): points_balance is authoritative — this is an "
+                    "audit-trail gap only, NOT a balance error."},
+        "live_post_cutoff": {
+            "bills": len(live), "points": _pts(live),
+            "customers": len({b.get("customer_mobile") for b in live if b.get("customer_mobile")}),
+            "note": "Live (on/after cutoff): posAddPoint does NOT deduct. If these bills never "
+                    "went through the OTP redeem flow, the customer's balance was NOT reduced → "
+                    "a real OVER-balance to correct."},
+        "sample": sample,
+        "message": (f"{len(missing)} of {len(bills)} redemption bills have NO redeem ledger row "
+                    f"({_pts(missing)} pts): {len(hist)} historic (audit-gap only) + {len(live)} "
+                    f"live (potential over-balance). Cutoff used: {cutoff}."
+                    if missing else
+                    f"Every redemption bill has a matching redeem ledger row. Clean. Cutoff: {cutoff}."),
+    }
+
+
+async def _tool_audit_duplicate_adjustments(filter_reason: str = "", since: str = "",
+                                            user=None) -> Dict[str, Any]:
+    """EXACT, READ-ONLY. Find customers who received the SAME point ADJUSTMENT more than
+    once — the fingerprint of a bulk adjust job that was run twice. Groups non-voided
+    `adjust` ledger rows by (mobile, points, reason); any group with count > 1 has
+    `count - 1` surplus rows. Reports surplus rows, customers affected and net surplus
+    points (negative surplus = points wrongly deducted twice → owed back on fix)."""
+    err = _require_master(user)
+    if err:
+        return err
+    match: Dict[str, Any] = {"type": "adjust", "voided": {"$ne": True}}
+    if filter_reason:
+        match["reason"] = filter_reason
+    if since:
+        match["created_at"] = {"$gte": since}
+    groups: List[Dict[str, Any]] = []
+    try:
+        async for g in points_ledger_col.aggregate(
+                [{"$match": match},
+                 {"$group": {"_id": {"m": "$customer_mobile", "p": "$points", "r": "$reason"},
+                             "count": {"$sum": 1}}},
+                 {"$match": {"count": {"$gt": 1}}}],
+                allowDiskUse=True, maxTimeMS=25000):
+            groups.append(g)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit_duplicate_adjustments incomplete: {e}")
+        return {"audit": "duplicate_adjustments", "computed": False, "exact": False,
+                "message": ("Couldn't complete the duplicate-adjustment scan within the time "
+                            "limit right now. Please retry in a few seconds.")}
+    custs: set = set()
+    surplus_rows = 0
+    surplus_points = 0
+    surplus_negative_points = 0
+    sample: List[Dict[str, Any]] = []
+    for g in groups:
+        extra = int(g["count"]) - 1
+        pts = int(g["_id"].get("p") or 0)
+        m = g["_id"].get("m")
+        if extra <= 0:
+            continue
+        surplus_rows += extra
+        surplus_points += pts * extra
+        if pts < 0:
+            surplus_negative_points += pts * extra
+        if m:
+            custs.add(m)
+        if len(sample) < 15:
+            sample.append({"mobile": m, "points_each": pts, "times": int(g["count"]),
+                           "surplus_rows": extra, "reason": g["_id"].get("r")})
+    return {
+        "audit": "duplicate_adjustments", "computed": True, "exact": True,
+        "filter_reason": filter_reason or "(all adjust rows)",
+        "since": since or "(all time)",
+        "customers_affected": len(custs),
+        "surplus_duplicate_rows": surplus_rows,
+        "net_surplus_points": surplus_points,
+        "surplus_points_wrongly_deducted": abs(surplus_negative_points),
+        "sample": sample,
+        "definition": ("A duplicate adjustment = >1 identical `adjust` ledger row for the same "
+                       "(mobile, points, reason). Surplus = count-1 rows per group."),
+        "message": (f"{surplus_rows} surplus duplicate adjustment rows across {len(custs)} "
+                    f"customers; net {surplus_points} pts ({abs(surplus_negative_points)} pts were "
+                    f"wrongly deducted twice and are owed back)."
+                    if surplus_rows else "No duplicate adjustments found in this scope."),
+    }
+
+
+async def _tool_audit_historical_derived_points(user=None) -> Dict[str, Any]:
+    """EXACT, READ-ONLY. Quantify COMPUTED/DERIVED points sitting on HISTORICAL data
+    (source=historic_upload). Per the canonical rule, historical customers keep ONLY their
+    migrated points_balance — no earned/redeemed figures should be derived from spend. This
+    reports (a) historic customers whose lifetime_points_earned was derived (>0) and (b)
+    non-voided historic `earn`/`bonus` ledger rows — i.e. exactly what would be removed to
+    leave points_balance as the sole historical truth."""
+    err = _require_master(user)
+    if err:
+        return err
+    cutoff = await _points_cutoff()
+    result: Dict[str, Any] = {"audit": "historical_derived_points", "computed": True,
+                              "exact": True, "cutoff_date": cutoff}
+    try:
+        cf = await customers_col.aggregate(
+            [{"$match": {"source": "historic_upload", "lifetime_points_earned": {"$gt": 0}}},
+             {"$group": {"_id": None, "n": {"$sum": 1},
+                         "earned": {"$sum": "$lifetime_points_earned"},
+                         "redeemed": {"$sum": "$lifetime_points_redeemed"}}}],
+            maxTimeMS=15000, allowDiskUse=True).to_list(1)
+        c = cf[0] if cf else {}
+        result["historic_customers_with_derived_earned"] = int(c.get("n") or 0)
+        result["derived_lifetime_points_earned_total"] = int(c.get("earned") or 0)
+        result["derived_lifetime_points_redeemed_total"] = int(c.get("redeemed") or 0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"historical_derived_points customer facet failed: {e}")
+        result["computed"] = False
+    try:
+        by_type: Dict[str, Dict[str, int]] = {}
+        async for g in points_ledger_col.aggregate(
+                [{"$match": {"source": "historic_upload", "type": {"$in": ["earn", "bonus"]},
+                             "voided": {"$ne": True}}},
+                 {"$group": {"_id": "$type", "n": {"$sum": 1}, "pts": {"$sum": "$points"}}}],
+                maxTimeMS=15000, allowDiskUse=True):
+            by_type[g["_id"]] = {"rows": int(g.get("n") or 0), "points": int(g.get("pts") or 0)}
+        result["historic_derived_ledger_rows"] = by_type
+        result["historic_derived_ledger_total_rows"] = sum(v["rows"] for v in by_type.values())
+        result["historic_derived_ledger_total_points"] = sum(v["points"] for v in by_type.values())
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"historical_derived_points ledger facet failed: {e}")
+        result["computed"] = False
+    result["note"] = ("These are the derived/computed points on historical data. Under the rule "
+                      "'historical = balance only', normalize_historical_points would void these "
+                      "ledger rows (kept for audit, points->0) and reset the derived lifetime "
+                      "fields, leaving points_balance untouched as the sole historical truth.")
+    result["message"] = (
+        f"Historic customers with derived earned points: "
+        f"{result.get('historic_customers_with_derived_earned', '?')} "
+        f"(total derived earned {result.get('derived_lifetime_points_earned_total', '?')} pts). "
+        f"Historic derived earn/bonus ledger rows: "
+        f"{result.get('historic_derived_ledger_total_rows', '?')} "
+        f"({result.get('historic_derived_ledger_total_points', '?')} pts). Cutoff: {cutoff}.")
+    return result
+
+
 MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "grant_bonus_points",
@@ -2010,6 +2243,9 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
 MASTER_TOOL_HANDLERS = {
     "audit_double_redemptions": _tool_audit_double_redemptions,
     "audit_negative_balances": _tool_audit_negative_balances,
+    "audit_missing_redemption_ledger": _tool_audit_missing_redemption_ledger,
+    "audit_duplicate_adjustments": _tool_audit_duplicate_adjustments,
+    "audit_historical_derived_points": _tool_audit_historical_derived_points,
     "grant_bonus_points": _tool_grant_bonus_points,
     "adjust_points": _tool_adjust_points,
     "fix_negative_balances": _tool_fix_negative_balances,
@@ -2049,4 +2285,42 @@ MASTER_READ_TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {
             "mobile": {"type": "string", "description": "Optional 10-digit mobile to scope the audit."}
         }}}},
+    {"type": "function", "function": {
+        "name": "audit_missing_redemption_ledger",
+        "description": ("EXACT, read-only audit of bills that recorded a redemption "
+                        "(points_redeemed>0) but have NO matching `redeem` row in the points "
+                        "ledger. Splits the result into HISTORICAL (before the cutoff — an "
+                        "audit-trail gap only, balance is authoritative) vs LIVE (on/after the "
+                        "cutoff — a real over-balance if the bill never went through the OTP "
+                        "redeem flow). ALWAYS use this for any 'missing redemption ledger / "
+                        "redemptions without a ledger entry' question. Returns exact bill and "
+                        "point counts and the cutoff date used."),
+        "parameters": {"type": "object", "properties": {
+            "sample_limit": {"type": "integer", "default": 15, "description": "How many example bills to include."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "audit_duplicate_adjustments",
+        "description": ("EXACT, read-only audit of DUPLICATE point adjustments — the fingerprint "
+                        "of a bulk adjust job run twice. Groups non-voided `adjust` ledger rows by "
+                        "(mobile, points, reason); any group with count>1 has surplus rows. "
+                        "Returns surplus rows, customers affected, net surplus points and the "
+                        "points wrongly deducted twice. ALWAYS use this for any 'duplicate "
+                        "adjustment / adjust entries done twice' question. Optional filter_reason "
+                        "and since (ISO datetime) narrow the scope."),
+        "parameters": {"type": "object", "properties": {
+            "filter_reason": {"type": "string", "description": "Only consider adjust rows with this exact reason."},
+            "since": {"type": "string", "description": "ISO datetime; only rows created at/after this."}
+        }}}},
+    {"type": "function", "function": {
+        "name": "audit_historical_derived_points",
+        "description": ("EXACT, read-only audit of COMPUTED/DERIVED points on HISTORICAL data "
+                        "(source=historic_upload). Per the canonical rule, historical customers "
+                        "keep ONLY their migrated points_balance — no earned/redeemed figures "
+                        "should be derived from spend. Returns how many historic customers have a "
+                        "derived lifetime_points_earned>0 (and the total), plus the non-voided "
+                        "historic earn/bonus ledger rows and points — i.e. exactly what would be "
+                        "removed to leave points_balance as the sole historical truth. Use this "
+                        "for any 'historical points computed from lifetime spend / derived points "
+                        "to remove' question."),
+        "parameters": {"type": "object", "properties": {}}}},
 ]
