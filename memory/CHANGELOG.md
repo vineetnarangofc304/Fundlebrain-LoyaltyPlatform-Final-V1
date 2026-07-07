@@ -5,6 +5,34 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-07 — Master Brain data-integrity audits + corrections (deterministic, audited, UNDOABLE) + canonical cutoff rule
+
+⚠️ Redeploy required for production. Verified on preview via seeded apply→undo round-trips + live chat invocation.
+
+**Canonical rule locked (user directive):** Cutoff = **2026-06-08**. Bills BEFORE = HISTORICAL → `points_balance` is the sole authoritative points, NOTHING computed. Bills ON/AFTER = LIVE POS → points computed + ledgered in real time. Master Brain must be 100% deterministic (real DB reads/writes, no LLM/guess/dummy), audited and undoable. Nothing is ever hard-deleted — corrections VOID rows (points→0, `original_points` kept, `voided_*` fields) so the trail is preserved.
+
+- **Cutoff default corrected** `2025-06-08 → 2026-06-08` in `historic_routes.py` + `master_brain_tools.py`. This was the ROOT CAUSE of Issue #2: with the cutoff a year too early, historical 2026 bills were treated as "live" and earned computed points (e.g. SURUCHI's derived `lifetime_points_earned=2510` on a real balance of 249). Future ingests now correctly exclude pre-cutoff bills from earning. ⚠️ Production DB likely still has a `2025-06-08` override — must be set to `2026-06-08` (via the new `set_points_cutoff` tool or the Loyalty settings page) BEFORE running audits/fixes.
+
+- **3 NEW deterministic READ-ONLY audits** (exact aggregations, honest "couldn't compute" instead of fake zeros, always report the cutoff used):
+  - `audit_missing_redemption_ledger` — bills with points_redeemed>0 but no matching non-voided redeem ledger row; split HISTORIC (audit-gap only) vs LIVE (real over-balance).
+  - `audit_duplicate_adjustments` — customers with >1 identical `adjust` row (bulk adjust run twice); surplus rows + points owed back.
+  - `audit_historical_derived_points` — migrated customers with derived `lifetime_points_earned>0` + non-voided historic earn/bonus ledger rows (exactly what normalize would remove).
+
+- **4 NEW MUTATION tools** (preview→confirm+reason, audit-logged, UNDOABLE):
+  - `fix_missing_redemption_ledger` — LIVE bills only: writes the missing redeem row + deducts the never-debited points (raises lifetime_points_redeemed). Historic left untouched.
+  - `reverse_duplicate_adjustments` — keeps ONE adjust per (mobile,points,reason) group, voids the surplus, credits back the double-deducted amount.
+  - `normalize_historical_points` — voids derived historic earn/bonus ledger rows + resets lifetime_earned/redeemed to 0 + flags `historical_balance_authoritative:true`; `points_balance` NEVER changed.
+  - `set_points_cutoff` — read/set the historical↔live cutoff (audited).
+
+- **Undo made fully general:** `_reverse_changes_bulk` now also restores `lifetime_points_redeemed`; `undo_action` now generically voids rows a fix INSERTED (tagged `fix_audit_id`) and restores rows a fix VOIDED (tagged `voided_by_audit`). Verified: apply→undo returns balances/ledger to the exact prior state for all 3 fixes.
+
+- **Files:** `backend/routes/master_brain_tools.py` (audits+fixes+cutoff+undo), `backend/routes/historic_routes.py` (cutoff default). Registry: 24 handlers, 19 action schemas, 5 read schemas — all wired, no dupes.
+
+**Deferred (user is deciding — decision #5 "leave for now"):** (a) global recompute after the cutoff change; (b) recurrence-prevention CODE for `posAddPoint` writing the redeem row/deducting (held due to double-deduction-bug history — needs discussion); (c) double-run idempotency guard on bulk adjust/bonus jobs.
+
+---
+
+
 ## 2026-07-07 — Fix P0: POS `posAddPoint` 500 `NetworkTimeout` (till hangs "Working on it…") + Master Brain timeouts (iter 83, 8/8 PASS)
 
 ⚠️ Redeploy required for production.

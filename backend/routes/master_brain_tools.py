@@ -33,7 +33,7 @@ from database import (
 # Historical / live boundary. Bills BEFORE this date are HISTORICAL — the migrated
 # points_balance is the sole authoritative points figure and NOTHING is computed for
 # them. Bills ON/AFTER are LIVE POS — points are computed + ledgered in real time.
-DEFAULT_POINTS_CUTOFF = "2025-06-08"
+DEFAULT_POINTS_CUTOFF = "2026-06-08"
 
 
 async def _points_cutoff() -> str:
@@ -97,8 +97,8 @@ async def _find_customer(mobile: Any) -> Optional[Dict[str, Any]]:
 
 
 async def _log_master(user: Dict[str, Any], action: str, entity: str, entity_id: str,
-                      reason: str, metadata: Dict[str, Any]) -> str:
-    doc_id = str(uuid.uuid4())
+                      reason: str, metadata: Dict[str, Any], audit_id: Optional[str] = None) -> str:
+    doc_id = audit_id or str(uuid.uuid4())
     await audit_logs_col.insert_one({
         "id": doc_id,
         "action": f"master_brain.{action}",
@@ -1104,6 +1104,8 @@ async def _reverse_changes_bulk(changes: List[Dict[str, Any]], action: str, reas
             inc = {"points_balance": delta}
             if ch.get("lifetime_before") is not None:
                 inc["lifetime_points_earned"] = int(ch.get("lifetime_before") or 0) - int(ch.get("lifetime_after") or 0)
+            if ch.get("lifetime_redeemed_before") is not None:
+                inc["lifetime_points_redeemed"] = int(ch.get("lifetime_redeemed_before") or 0) - int(ch.get("lifetime_redeemed_after") or 0)
             upd["$inc"] = inc
             if ch.get("mobile") and delta:
                 ledger_docs.append({"id": str(uuid.uuid4()), "customer_mobile": ch.get("mobile"),
@@ -1176,6 +1178,19 @@ async def _tool_undo_action(audit_id: str, reason: str = "", confirm: bool = Fal
         reversed_count = await _reverse_bulk_field_update(changes)
     else:
         reversed_count = await _reverse_changes_bulk(changes, act, reason, user)
+    # Generic ledger cleanup keyed by audit_id, so any fix that inserted or voided ledger
+    # rows is fully rolled back: void the rows it INSERTED, restore the rows it VOIDED.
+    try:
+        await points_ledger_col.update_many(
+            {"fix_audit_id": audit_id, "voided": {"$ne": True}},
+            {"$set": {"voided": True, "voided_at": _now_iso(), "voided_by": user.get("email"),
+                      "voided_reason": f"Undo of {act} — {reason}"}})
+        await points_ledger_col.update_many(
+            {"voided_by_audit": audit_id},
+            [{"$set": {"voided": False, "points": {"$ifNull": ["$original_points", "$points"]}}},
+             {"$unset": ["voided_at", "voided_by", "voided_reason", "voided_by_audit"]}])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"undo ledger cleanup for {audit_id} failed: {e}")
     new_audit = await _finalize_undo(audit_id, act, entity, reason, reversed_count, user)
     return {"ok": True, "applied": True, "audit_id": new_audit, **plan,
             "message": f"Undid '{act}' — {reversed_count} change(s) rolled back and logged as an undo."}
@@ -2025,6 +2040,363 @@ async def _tool_audit_historical_derived_points(user=None) -> Dict[str, Any]:
     return result
 
 
+# ============================================================
+# DATA-INTEGRITY CORRECTIONS (write-back, preview->confirm, audited, UNDOABLE)
+# ============================================================
+async def _scan_missing_live_redemptions(cutoff: str) -> List[Dict[str, Any]]:
+    """Deterministic rescan: LIVE (bill_date >= cutoff) bills with points_redeemed>0 that
+    have NO non-voided redeem ledger row. Same logic the audit uses."""
+    bills: List[Dict[str, Any]] = []
+    async for tx in transactions_col.find(
+            {"points_redeemed": {"$gt": 0}, "bill_date": {"$gte": cutoff}},
+            {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1,
+             "customer_mobile": 1, "points_redeemed": 1}).max_time_ms(25000):
+        bills.append(tx)
+    bill_nos = list({b.get("bill_number") for b in bills if b.get("bill_number")})
+    tx_ids = list({b.get("id") for b in bills if b.get("id")})
+    covered_bills: set = set()
+    covered_srcs: set = set()
+    for i in range(0, len(bill_nos), 5000):
+        batch = bill_nos[i:i + 5000]
+        async for lr in points_ledger_col.find(
+                {"type": "redeem", "voided": {"$ne": True},
+                 "$or": [{"reference_id": {"$in": batch}}, {"bill_number": {"$in": batch}}]},
+                {"_id": 0, "reference_id": 1, "bill_number": 1}).max_time_ms(10000):
+            if lr.get("reference_id"):
+                covered_bills.add(lr["reference_id"])
+            if lr.get("bill_number"):
+                covered_bills.add(lr["bill_number"])
+    for i in range(0, len(tx_ids), 5000):
+        batch = tx_ids[i:i + 5000]
+        async for lr in points_ledger_col.find(
+                {"type": "redeem", "voided": {"$ne": True}, "source_bill_id": {"$in": batch}},
+                {"_id": 0, "source_bill_id": 1}).max_time_ms(10000):
+            covered_srcs.add(lr.get("source_bill_id"))
+    return [b for b in bills
+            if b.get("bill_number") not in covered_bills and b.get("id") not in covered_srcs]
+
+
+async def _tool_fix_missing_redemption_ledger(reason: str = "", confirm: bool = False,
+                                              user=None) -> Dict[str, Any]:
+    """MUTATION (Master Admin). Correct LIVE (on/after cutoff) bills that recorded a
+    redemption but were NEVER deducted (no redeem ledger row) — the customer kept points
+    they spent. For each such bill it writes the missing `redeem` ledger row AND deducts the
+    points from the balance (raising lifetime_points_redeemed). HISTORICAL bills are left
+    untouched (balance is authoritative there). Preview first, then confirm=true + reason.
+    Audit-logged, snapshotted, UNDOABLE (undo restores balances and voids the backfilled rows)."""
+    err = _require_master(user)
+    if err:
+        return err
+    cutoff = await _points_cutoff()
+    missing = await _scan_missing_live_redemptions(cutoff)
+    over_cap = len(missing) > INLINE_CAP
+    missing = missing[:INLINE_CAP]
+    per_cust: Dict[str, Dict[str, Any]] = {}
+    for b in missing:
+        m = b.get("customer_mobile")
+        if not m:
+            continue
+        agg = per_cust.setdefault(m, {"pts": 0, "bills": 0})
+        agg["pts"] += int(b.get("points_redeemed") or 0)
+        agg["bills"] += 1
+    total_pts = sum(a["pts"] for a in per_cust.values())
+    plan = {"action": "fix_missing_redemption_ledger", "cutoff_date": cutoff,
+            "live_bills_to_fix": len(missing), "customers_affected": len(per_cust),
+            "points_to_deduct": total_pts,
+            "sample": [{"mobile": m, "points_to_deduct": a["pts"], "bills": a["bills"]}
+                       for m, a in list(per_cust.items())[:10]]}
+    if not missing:
+        plan["message"] = "No live redemption bills are missing a ledger row. Nothing to fix."
+        return plan
+    if over_cap:
+        plan["warning"] = (f"More than {INLINE_CAP} bills — this run fixes the first {INLINE_CAP}. "
+                           "Re-run for the rest.")
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("This DEDUCTS the redeemed points from each customer's balance "
+                                         "(they were never debited) and writes the missing redeem ledger "
+                                         "row per bill. Confirm with the user + a reason, then confirm=true.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    audit_id = str(uuid.uuid4())
+    cust_map = await _bulk_find_customers(list(per_cust.keys()))
+    ledger_docs: List[Dict[str, Any]] = []
+    for b in missing:
+        ledger_docs.append({"id": str(uuid.uuid4()), "customer_mobile": b.get("customer_mobile"),
+                            "points": -int(b.get("points_redeemed") or 0), "type": "redeem",
+                            "kind": "redeem", "reference_type": "transaction",
+                            "reference_id": b.get("bill_number"), "source_bill_id": b.get("id"),
+                            "bill_number": b.get("bill_number"), "bill_date": b.get("bill_date"),
+                            "note": "Backfilled missing redemption (was never ledgered)",
+                            "reason": f"Backfill missing redemption — {reason}",
+                            "created_at": _now_iso(), "created_by": user.get("email"),
+                            "via": "master_brain", "fix_audit_id": audit_id})
+    upd_ops: List[Any] = []
+    changes: List[Dict[str, Any]] = []
+    applied_pts = 0
+    for m, a in per_cust.items():
+        cust = cust_map.get(_last10(m))
+        if not cust:
+            continue
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        ltr = int(cust.get("lifetime_points_redeemed") or 0)
+        ex = int(a["pts"])
+        upd_ops.append(UpdateOne({"id": cid}, {"$inc": {"points_balance": -ex,
+                                                        "lifetime_points_redeemed": ex}}))
+        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
+                        "points_before": cur, "points_after": cur - ex,
+                        "lifetime_redeemed_before": ltr, "lifetime_redeemed_after": ltr + ex})
+        applied_pts += ex
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    for i in range(0, len(ledger_docs), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+    await _log_master(user, "fix_missing_redemption_ledger", "customers", "bulk", reason,
+                      {"bills_fixed": len(missing), "customers_affected": len(changes),
+                       "points_deducted": applied_pts, "cutoff": cutoff}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "fix_missing_redemption_ledger", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "points_deducted": applied_pts, "customers_corrected": len(changes),
+            "message": (f"Backfilled {len(missing)} missing redemption ledger rows and deducted "
+                        f"{applied_pts} points from {len(changes)} customer(s) whose balance was never "
+                        f"reduced. Audit {audit_id} — undoable.")}
+
+
+async def _tool_reverse_duplicate_adjustments(filter_reason: str = "", since: str = "",
+                                              reason: str = "", confirm: bool = False,
+                                              user=None) -> Dict[str, Any]:
+    """MUTATION (Master Admin). Reverse DUPLICATE point adjustments (a bulk adjust job run
+    twice). Groups non-voided `adjust` rows by (mobile, points, reason); keeps ONE row per
+    group and voids the surplus, correcting each balance by the removed amount (so a
+    double-deduction is credited back). Preview first, then confirm=true + reason.
+    Audit-logged, snapshotted, UNDOABLE."""
+    err = _require_master(user)
+    if err:
+        return err
+    match: Dict[str, Any] = {"type": "adjust", "voided": {"$ne": True}}
+    if filter_reason:
+        match["reason"] = filter_reason
+    if since:
+        match["created_at"] = {"$gte": since}
+    groups: List[Dict[str, Any]] = []
+    try:
+        async for g in points_ledger_col.aggregate(
+                [{"$match": match},
+                 {"$group": {"_id": {"m": "$customer_mobile", "p": "$points", "r": "$reason"},
+                             "rows": {"$push": {"id": "$id", "created_at": "$created_at"}},
+                             "count": {"$sum": 1}}},
+                 {"$match": {"count": {"$gt": 1}}}], allowDiskUse=True, maxTimeMS=25000):
+            groups.append(g)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"reverse_duplicate_adjustments scan incomplete: {e}")
+        return {"action": "reverse_duplicate_adjustments", "computed": False,
+                "message": "Couldn't complete the duplicate-adjustment scan right now. Retry shortly."}
+    per_cust: Dict[str, Dict[str, Any]] = {}
+    void_ids: List[str] = []
+    total_surplus_rows = 0
+    total_restore = 0
+    for g in groups:
+        m = g["_id"].get("m")
+        pts = int(g["_id"].get("p") or 0)
+        rows = sorted(g["rows"], key=lambda r: r.get("created_at") or "")
+        surplus = rows[1:]  # keep the earliest, void the rest
+        if not surplus or not m:
+            continue
+        ex = pts * len(surplus)                # signed sum of the surplus rows
+        void_ids.extend([r["id"] for r in surplus if r.get("id")])
+        total_surplus_rows += len(surplus)
+        c = per_cust.setdefault(m, {"restore": 0, "rows": 0})
+        c["restore"] += -ex                    # removing surplus => balance += -ex
+        c["rows"] += len(surplus)
+        total_restore += -ex
+    plan = {"action": "reverse_duplicate_adjustments",
+            "filter_reason": filter_reason or "(all adjust rows)", "since": since or "(all time)",
+            "customers_affected": len(per_cust), "surplus_rows_to_void": total_surplus_rows,
+            "net_balance_correction": total_restore,
+            "sample": [{"mobile": m, "balance_correction": c["restore"], "surplus_rows": c["rows"]}
+                       for m, c in list(per_cust.items())[:10]]}
+    if not per_cust:
+        plan["message"] = "No duplicate adjustments found in this scope. Nothing to reverse."
+        return plan
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("This VOIDS the surplus duplicate adjustment rows (keeps ONE "
+                                         "each) and corrects each balance by the removed amount. Confirm "
+                                         "with the user + a reason, then confirm=true.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    audit_id = str(uuid.uuid4())
+    cust_map = await _bulk_find_customers(list(per_cust.keys()))
+    upd_ops: List[Any] = []
+    changes: List[Dict[str, Any]] = []
+    applied = 0
+    for m, c in per_cust.items():
+        cust = cust_map.get(_last10(m))
+        if not cust:
+            continue
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        r = int(c["restore"])
+        upd_ops.append(UpdateOne({"id": cid}, {"$inc": {"points_balance": r}}))
+        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
+                        "points_before": cur, "points_after": cur + r})
+        applied += 1
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    vreason = f"Duplicate adjustment reversed by Master Brain — {reason}"
+    for i in range(0, len(void_ids), BATCH):
+        await points_ledger_col.update_many(
+            {"id": {"$in": void_ids[i:i + BATCH]}},
+            [{"$set": {"voided": True, "voided_at": _now_iso(), "voided_by": user.get("email"),
+                       "voided_reason": vreason, "voided_by_audit": audit_id,
+                       "original_points": {"$ifNull": ["$original_points", "$points"]}, "points": 0}}])
+    await _log_master(user, "reverse_duplicate_adjustments", "customers", "bulk", reason,
+                      {"customers_affected": len(changes), "surplus_rows_voided": total_surplus_rows,
+                       "net_balance_correction": total_restore}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "reverse_duplicate_adjustments", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "customers_corrected": len(changes), "surplus_rows_voided": total_surplus_rows,
+            "message": (f"Reversed duplicate adjustments for {len(changes)} customer(s): voided "
+                        f"{total_surplus_rows} surplus rows and corrected balances by {total_restore} "
+                        f"pts net. Audit {audit_id} — undoable.")}
+
+
+async def _tool_normalize_historical_points(reason: str = "", confirm: bool = False,
+                                            user=None) -> Dict[str, Any]:
+    """MUTATION (Master Admin). Enforce the rule 'HISTORICAL = balance only'. For migrated
+    (source=historic_upload) customers it (1) VOIDS the derived historic `earn`/`bonus`
+    ledger rows (kept for audit, points->0) and (2) resets lifetime_points_earned and
+    lifetime_points_redeemed to 0 and flags historical_balance_authoritative=true — leaving
+    points_balance completely untouched as the sole historical truth. Preview first, then
+    confirm=true + reason. Audit-logged, snapshotted, UNDOABLE."""
+    err = _require_master(user)
+    if err:
+        return err
+    # Target customers: migrated, with a derived earned/redeemed figure to clear.
+    targets: List[Dict[str, Any]] = []
+    async for c in customers_col.find(
+            {"source": "historic_upload",
+             "$or": [{"lifetime_points_earned": {"$gt": 0}},
+                     {"lifetime_points_redeemed": {"$gt": 0}}]},
+            {"_id": 0, "id": 1, "mobile": 1, "points_balance": 1,
+             "lifetime_points_earned": 1, "lifetime_points_redeemed": 1}).max_time_ms(25000):
+        targets.append(c)
+    over_cap = len(targets) > INLINE_CAP
+    targets = targets[:INLINE_CAP]
+    # Count the derived ledger rows that would be voided.
+    ledger_rows = 0
+    ledger_points = 0
+    try:
+        async for g in points_ledger_col.aggregate(
+                [{"$match": {"source": "historic_upload", "type": {"$in": ["earn", "bonus"]},
+                             "voided": {"$ne": True}}},
+                 {"$group": {"_id": None, "n": {"$sum": 1}, "pts": {"$sum": "$points"}}}],
+                maxTimeMS=15000, allowDiskUse=True):
+            ledger_rows = int(g.get("n") or 0)
+            ledger_points = int(g.get("pts") or 0)
+    except Exception:  # noqa: BLE001
+        pass
+    plan = {"action": "normalize_historical_points",
+            "historic_customers_to_reset": len(targets),
+            "derived_earned_ledger_rows_to_void": ledger_rows,
+            "derived_earned_ledger_points": ledger_points,
+            "sample": [{"mobile": t.get("mobile"), "points_balance": int(t.get("points_balance") or 0),
+                        "lifetime_earned_now": int(t.get("lifetime_points_earned") or 0)}
+                       for t in targets[:10]],
+            "note": "points_balance is NOT changed — only derived earned/redeemed figures + their "
+                    "earn/bonus ledger rows are cleared."}
+    if not targets and not ledger_rows:
+        plan["message"] = "No derived historical points found. Nothing to normalize."
+        return plan
+    if over_cap:
+        plan["warning"] = (f"More than {INLINE_CAP} historic customers — this run resets the first "
+                           f"{INLINE_CAP}. Re-run for the rest.")
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("This VOIDS derived historic earn/bonus ledger rows and resets "
+                                         "lifetime_points_earned/redeemed to 0 (balance untouched). "
+                                         "Confirm with the user + a reason, then confirm=true.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    audit_id = str(uuid.uuid4())
+    upd_ops: List[Any] = []
+    changes: List[Dict[str, Any]] = []
+    for t in targets:
+        cid = t["id"]
+        cur = int(t.get("points_balance") or 0)
+        le = int(t.get("lifetime_points_earned") or 0)
+        lr = int(t.get("lifetime_points_redeemed") or 0)
+        upd_ops.append(UpdateOne({"id": cid}, {"$set": {
+            "lifetime_points_earned": 0, "lifetime_points_redeemed": 0,
+            "historical_balance_authoritative": True}}))
+        changes.append({"cust_id": cid, "mobile": t.get("mobile"),
+                        "points_before": cur, "points_after": cur,          # balance unchanged
+                        "lifetime_before": le, "lifetime_after": 0,
+                        "lifetime_redeemed_before": lr, "lifetime_redeemed_after": 0})
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    # Void the derived historic earn/bonus ledger rows (kept for audit, points->0).
+    vreason = f"Historic derived points removed (balance-only rule) — {reason}"
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        await points_ledger_col.update_many(
+            {"source": "historic_upload", "type": {"$in": ["earn", "bonus"]}, "voided": {"$ne": True}},
+            [{"$set": {"voided": True, "voided_at": _now_iso(), "voided_by": user.get("email"),
+                       "voided_reason": vreason, "voided_by_audit": audit_id,
+                       "original_points": {"$ifNull": ["$original_points", "$points"]}, "points": 0}}])
+    await _log_master(user, "normalize_historical_points", "customers", "bulk", reason,
+                      {"customers_reset": len(changes), "ledger_rows_voided": ledger_rows,
+                       "ledger_points_voided": ledger_points}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "normalize_historical_points", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "customers_reset": len(changes),
+            "message": (f"Normalized {len(changes)} historic customer(s): reset derived "
+                        f"lifetime earned/redeemed to 0 and voided {ledger_rows} derived earn/bonus "
+                        f"ledger rows ({ledger_points} pts). Balances untouched. Audit {audit_id} — undoable.")}
+
+
+async def _tool_set_points_cutoff(cutoff_date: str = "", confirm: bool = False,
+                                  user=None) -> Dict[str, Any]:
+    """MUTATION (Master Admin). Read or set the HISTORICAL→LIVE cutoff date (YYYY-MM-DD).
+    Bills before it are historical (balance-only); on/after are live POS (points computed).
+    Call with no cutoff_date to just READ the current value. To change it, pass cutoff_date
+    with confirm=false to preview, then confirm=true. Audit-logged."""
+    err = _require_master(user)
+    if err:
+        return err
+    current = await _points_cutoff()
+    if not cutoff_date:
+        return {"action": "set_points_cutoff", "current_cutoff": current,
+                "message": f"Current historical→live cutoff is {current}. Pass cutoff_date to change it."}
+    import re as _re
+    if not _re.match(r"^\d{4}-\d{2}-\d{2}$", cutoff_date.strip()):
+        return {"error": "cutoff_date must be an ISO date like 2026-06-08."}
+    cutoff_date = cutoff_date.strip()
+    plan = {"action": "set_points_cutoff", "current_cutoff": current, "new_cutoff": cutoff_date}
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("Changing the cutoff changes which bills are historical vs live "
+                                         "in ALL audits/reports. Confirm, then call again with confirm=true.")
+        return plan
+    await loyalty_config_col.update_one({"id": "default"},
+                                        {"$set": {"points_cutoff_date": cutoff_date}}, upsert=True)
+    audit_id = await _log_master(user, "set_points_cutoff", "loyalty_config", "default",
+                                 reason=f"Set cutoff {current} -> {cutoff_date}",
+                                 metadata={"from": current, "to": cutoff_date})
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "message": f"Historical→live cutoff set to {cutoff_date} (was {current})."}
+
+
 MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "grant_bonus_points",
@@ -2221,6 +2593,57 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "confirm": {"type": "boolean", "default": False},
         }}}},
     {"type": "function", "function": {
+        "name": "fix_missing_redemption_ledger",
+        "description": ("MUTATION (Master Admin). Correct LIVE (on/after the cutoff) bills that recorded "
+                        "a redemption but were NEVER deducted (no redeem ledger row) — the customer kept "
+                        "points they spent. Writes the missing redeem ledger row per bill AND deducts the "
+                        "points from the balance (raising lifetime_points_redeemed). HISTORICAL bills are "
+                        "left untouched (balance is authoritative). Run the audit_missing_redemption_ledger "
+                        "first. ALWAYS confirm=false to preview (bills, customers, points to deduct), then "
+                        "confirm=true + reason. Audit-logged and UNDOABLE."),
+        "parameters": {"type": "object", "properties": {
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }}}},
+    {"type": "function", "function": {
+        "name": "reverse_duplicate_adjustments",
+        "description": ("MUTATION (Master Admin). Reverse DUPLICATE point adjustments (a bulk adjust job "
+                        "run twice). Groups non-voided `adjust` rows by (mobile, points, reason), KEEPS ONE "
+                        "each and voids the surplus, correcting each balance by the removed amount (a "
+                        "double-deduction is credited back). Run audit_duplicate_adjustments first. Scope "
+                        "with filter_reason and/or since. ALWAYS confirm=false to preview, then confirm=true "
+                        "+ reason. Audit-logged and UNDOABLE."),
+        "parameters": {"type": "object", "properties": {
+            "filter_reason": {"type": "string", "description": "Only reverse adjust rows with this exact reason."},
+            "since": {"type": "string", "description": "ISO datetime; only rows created at/after this."},
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }}}},
+    {"type": "function", "function": {
+        "name": "normalize_historical_points",
+        "description": ("MUTATION (Master Admin). Enforce 'HISTORICAL = balance only'. For migrated "
+                        "(source=historic_upload) customers it voids the derived historic earn/bonus ledger "
+                        "rows (kept for audit, points->0) and resets lifetime_points_earned/"
+                        "lifetime_points_redeemed to 0 with a historical_balance_authoritative flag — "
+                        "points_balance is NEVER changed. Use this to remove points that were wrongly "
+                        "computed on historical data. Run audit_historical_derived_points first. ALWAYS "
+                        "confirm=false to preview, then confirm=true + reason. Audit-logged and UNDOABLE."),
+        "parameters": {"type": "object", "properties": {
+            "reason": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        }}}},
+    {"type": "function", "function": {
+        "name": "set_points_cutoff",
+        "description": ("MUTATION (Master Admin). Read or set the HISTORICAL→LIVE cutoff date (YYYY-MM-DD). "
+                        "Bills before it are historical (balance-only); on/after are live POS (points "
+                        "computed in real time). Call with NO cutoff_date to just read the current value. "
+                        "To change it, pass cutoff_date (confirm=false previews, confirm=true applies). "
+                        "Audit-logged."),
+        "parameters": {"type": "object", "properties": {
+            "cutoff_date": {"type": "string", "description": "ISO date e.g. 2026-06-08. Omit to read current."},
+            "confirm": {"type": "boolean", "default": False},
+        }}}},
+    {"type": "function", "function": {
         "name": "bulk_update_customers",
         "description": ("MUTATION (Master Admin). Bulk-update one or more FIELDS on many customer documents in ONE "
                         "guarded, audited, UNDOABLE operation — this is your `db.customers.updateMany(...)`. Use it "
@@ -2255,6 +2678,10 @@ MASTER_TOOL_HANDLERS = {
     "apply_to_uploaded_report": _tool_apply_to_uploaded_report,
     "credit_points_from_file": _tool_credit_points_from_file,
     "reverse_duplicate_bonus_credits": _tool_reverse_duplicate_bonus_credits,
+    "reverse_duplicate_adjustments": _tool_reverse_duplicate_adjustments,
+    "fix_missing_redemption_ledger": _tool_fix_missing_redemption_ledger,
+    "normalize_historical_points": _tool_normalize_historical_points,
+    "set_points_cutoff": _tool_set_points_cutoff,
     "bulk_update_customers": _tool_bulk_update_customers,
     "undo_action": _tool_undo_action,
     "send_campaign": _tool_send_campaign,

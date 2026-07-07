@@ -58,9 +58,10 @@ SKIPPED_PERSIST_CAP = 1_000_000  # safety cap on skipped-rows write per job
 ALLOWED_DATASETS = {"customers", "transactions", "stores", "items", "points_ledger", "sku_transactions"}
 DUPLICATE_MODES = {"upsert", "skip", "fail"}
 
-# Loyalty go-live: only bills on/after this date earn loyalty points (POS data
-# started flowing on 8 Jun 2025). Editable via PUT /historic-data/points-cutoff.
-DEFAULT_POINTS_CUTOFF = "2025-06-08"
+# Loyalty go-live: only bills on/after this date earn loyalty points (live POS data
+# started flowing on 8 Jun 2026; everything before is historical — balance-only, nothing
+# computed). Editable via PUT /historic-data/points-cutoff.
+DEFAULT_POINTS_CUTOFF = "2026-06-08"
 
 
 async def _get_points_cutoff() -> str:
