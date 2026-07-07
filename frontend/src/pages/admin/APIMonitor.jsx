@@ -8,8 +8,10 @@ import { toast } from "sonner";
 export default function APIMonitor() {
   const [health, setHealth] = useState(null);
   const [recent, setRecent] = useState([]);
+  const [byStore, setByStore] = useState([]);
+  const [storeSearch, setStoreSearch] = useState("");
   const [drill, setDrill] = useState(null);
-  const [filter, setFilter] = useState({ endpoint: "", source: "", method: "", status: "" });
+  const [filter, setFilter] = useState({ endpoint: "", source: "", method: "", status: "", store: "" });
 
   const load = async () => {
     const params = { limit: 200 };
@@ -17,19 +19,22 @@ export default function APIMonitor() {
     if (filter.source) params.source = filter.source;
     if (filter.method) params.method = filter.method;
     if (filter.status) params.status_code = filter.status;
-    const [h, r] = await Promise.all([
+    if (filter.store) params.store_code = filter.store;
+    const [h, r, s] = await Promise.all([
       api.get("/api-monitor/health"),
       api.get("/api-monitor/logs", { params }),
+      api.get("/api-monitor/by-store", { params: { window_hours: 24, search: storeSearch } }),
     ]);
     setHealth(h.data);
     setRecent(r.data.rows || r.data || []);
+    setByStore(s.data.stores || []);
   };
   useEffect(() => {
     load();
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter]);
+  }, [filter, storeSearch]);
 
   if (!health) return <div className="p-10 text-neutral-500">Loading…</div>;
 
@@ -58,6 +63,53 @@ export default function APIMonitor() {
                     <td className="text-right font-mono text-red-600">{fmtNum(r.failed)}</td>
                     <td className="text-right font-mono">{r.avg_response_ms}</td>
                     <td className="text-right"><span className={`pill ${r.health_pct > 95 ? "pill-success" : r.health_pct > 85 ? "pill-warning" : "pill-danger"}`}>{fmtPct(r.health_pct, 2)}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white border border-black/10 p-5" data-testid="apimon-by-store">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500">BY STORE · POS HITS (LAST 24h) · WORST FIRST</div>
+            <input
+              className="k-input k-input-sm w-56"
+              placeholder="Search store code or name…"
+              value={storeSearch}
+              onChange={(e) => setStoreSearch(e.target.value)}
+              data-testid="apimon-store-search"
+            />
+          </div>
+          <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
+            <table className="data-table">
+              <thead><tr>
+                <th>Store</th><th className="text-right">Hits</th><th className="text-right">Failed</th>
+                <th className="text-right">Timeouts</th><th className="text-right">Err %</th>
+                <th className="text-right">Avg ms</th><th className="text-right">Max ms</th><th>Last seen</th>
+              </tr></thead>
+              <tbody>
+                {byStore.length === 0 && (
+                  <tr><td colSpan={8} className="text-center text-neutral-400 py-4">No POS hits in the last 24h.</td></tr>
+                )}
+                {byStore.map((s) => (
+                  <tr key={s.store_code}
+                      className={`cursor-pointer hover:bg-neutral-50 ${filter.store === s.store_code ? "bg-neutral-100" : ""}`}
+                      onClick={() => setFilter({ ...filter, store: s.store_code, source: "pos_ewards" })}
+                      data-testid={`apimon-store-row-${s.store_code}`}>
+                    <td className="text-xs">
+                      <span className="font-mono">{s.store_code}</span>
+                      <span className="text-neutral-500"> · {s.store_name}{s.city ? `, ${s.city}` : ""}</span>
+                    </td>
+                    <td className="text-right font-mono">{fmtNum(s.total)}</td>
+                    <td className={`text-right font-mono ${s.failed > 0 ? "text-red-600" : ""}`}>{fmtNum(s.failed)}</td>
+                    <td className={`text-right font-mono ${s.timeouts > 0 ? "text-red-600 font-semibold" : ""}`}>{fmtNum(s.timeouts)}</td>
+                    <td className="text-right">
+                      <span className={`pill ${s.error_rate_pct === 0 ? "pill-success" : s.error_rate_pct < 5 ? "pill-warning" : "pill-danger"}`}>{fmtPct(s.error_rate_pct, 2)}</span>
+                    </td>
+                    <td className="text-right font-mono">{s.avg_response_ms}</td>
+                    <td className={`text-right font-mono ${s.max_response_ms > 9000 ? "text-red-600" : ""}`}>{s.max_response_ms}</td>
+                    <td className="text-xs whitespace-nowrap">{fmtDateTime(s.last_seen)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -95,6 +147,12 @@ export default function APIMonitor() {
                 <span className="pill pill-info inline-flex items-center gap-1">
                   {filter.endpoint}
                   <button onClick={() => setFilter({ ...filter, endpoint: "" })} className="ml-1"><X className="w-3 h-3" /></button>
+                </span>
+              )}
+              {filter.store && (
+                <span className="pill pill-info inline-flex items-center gap-1" data-testid="apimon-store-chip">
+                  Store: {filter.store}
+                  <button onClick={() => setFilter({ ...filter, store: "" })} className="ml-1"><X className="w-3 h-3" /></button>
                 </span>
               )}
             </div>

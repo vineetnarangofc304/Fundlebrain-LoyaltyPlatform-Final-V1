@@ -697,6 +697,7 @@ async def list_api_logs(
     customer_mobile: Optional[str] = None,
     bill_number: Optional[str] = None,
     source: Optional[str] = None,
+    store_code: Optional[str] = None,
     since: Optional[str] = None,
     user: dict = Depends(require_roles("super_admin", "brand_admin",
                                          "crm_manager", "marketing_manager")),
@@ -715,6 +716,11 @@ async def list_api_logs(
         fil["bill_number"] = bill_number
     if source:
         fil["source"] = source
+    if store_code:
+        # Match the first-class field OR (for rows logged before this field existed)
+        # the store code carried inside the POS request payload's customer_key.
+        fil["$or"] = [{"store_code": store_code},
+                      {"request_payload.customer_key": store_code}]
     if since:
         fil["timestamp"] = {"$gte": since}
     rows = await api_logs_col.find(fil, {"_id": 0}).sort("timestamp", -1).limit(limit).to_list(limit)

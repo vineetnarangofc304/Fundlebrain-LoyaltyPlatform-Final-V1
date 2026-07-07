@@ -65,6 +65,63 @@ async def health(user: dict = Depends(get_current_user)):
     }
 
 
+@router.get("/by-store")
+async def by_store(window_hours: int = 24, search: str = "", user: dict = Depends(get_current_user)):
+    """Store-wise POS API health so operators can see EXACTLY which outlet is failing.
+    Groups POS api_logs by store code (customer_key), over the given window, returning per
+    store: total hits, failures, DB timeouts, error rate, avg/max latency and last seen.
+    Sorted worst-first (most failures)."""
+    from database import stores_col
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(hours=max(1, window_hours))).isoformat()
+    pipe = [
+        {"$match": {"timestamp": {"$gte": start}, "source": "pos_ewards"}},
+        {"$group": {
+            "_id": {"$ifNull": ["$store_code", "$request_payload.customer_key"]},
+            "total": {"$sum": 1},
+            "failed": {"$sum": {"$cond": [{"$gte": ["$status_code", 400]}, 1, 0]}},
+            "timeouts": {"$sum": {"$cond": [
+                {"$regexMatch": {"input": {"$ifNull": ["$error_reason", ""]},
+                                 "regex": "NetworkTimeout|timed out|timeout", "options": "i"}}, 1, 0]}},
+            "avg_response": {"$avg": "$response_time_ms"},
+            "max_response": {"$max": "$response_time_ms"},
+            "last_seen": {"$max": "$timestamp"},
+        }},
+        {"$match": {"_id": {"$nin": [None, ""]}}},
+        {"$sort": {"failed": -1, "timeouts": -1, "total": -1}},
+        {"$limit": 300},
+    ]
+    rows = await api_logs_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=20000).to_list(300)
+    codes = [r["_id"] for r in rows if r.get("_id")]
+    name_map: dict = {}
+    if codes:
+        async for s in stores_col.find({"code": {"$in": codes}}, {"_id": 0, "code": 1, "name": 1, "city": 1}):
+            name_map[s.get("code")] = s
+    out = []
+    for r in rows:
+        code = r["_id"]
+        s = name_map.get(code, {})
+        total = r["total"] or 0
+        failed = r["failed"] or 0
+        out.append({
+            "store_code": code,
+            "store_name": s.get("name") or "—",
+            "city": s.get("city") or "",
+            "total": total,
+            "failed": failed,
+            "timeouts": r.get("timeouts", 0),
+            "error_rate_pct": round(failed / total * 100, 2) if total else 0,
+            "avg_response_ms": round(r.get("avg_response") or 0, 1),
+            "max_response_ms": r.get("max_response") or 0,
+            "last_seen": r.get("last_seen"),
+        })
+    if search:
+        q = search.strip().lower()
+        out = [o for o in out
+               if q in (o["store_code"] or "").lower() or q in (o["store_name"] or "").lower()]
+    return {"window_hours": window_hours, "stores": out, "count": len(out)}
+
+
 @router.get("/errors")
 async def errors(limit: int = 50, user: dict = Depends(get_current_user)):
     rows = await api_logs_col.find({"status_code": {"$gte": 400}}, {"_id": 0}).sort("timestamp", -1).limit(limit).to_list(limit)

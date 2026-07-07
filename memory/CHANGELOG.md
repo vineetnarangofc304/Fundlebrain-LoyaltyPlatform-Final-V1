@@ -5,6 +5,16 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-07 — API Monitor: store-wise POS tracking ("which store is failing")
+
+⚠️ Redeploy required for production.
+- **Backend:** `_log_api` now stamps `store_code` (from POS payload `customer_key`) + `merchant_id` on every POS api_logs row. New `GET /api/api-monitor/by-store?window_hours=&search=` aggregates POS hits per store → total, failed, DB timeouts, error-rate %, avg/max latency, last seen; joins store name/city; sorted worst-first. Coalesces `store_code` with legacy `request_payload.customer_key` so it works on existing rows too. `GET /api/api-monitor/logs` gained a `store_code` filter (same coalesce) for drill-down.
+- **Frontend (`APIMonitor.jsx`):** new searchable "BY STORE · POS HITS (LAST 24h) · WORST FIRST" table (data-testid `apimon-by-store`, search `apimon-store-search`, rows `apimon-store-row-<code>`). Timeouts/failures highlighted red, error-rate pill (green/amber/red), max-latency red >9s. Clicking a store filters the Recent-calls feed to that store (chip `apimon-store-chip`). Auto-refresh 5s.
+- **Verified (preview):** `/by-store` returns correct per-store totals/failures with names joined & worst-first; `/logs?store_code=` filters correctly; frontend compiles clean.
+
+---
+
+
 ## 2026-07-07 — Fix P0 (round 2): POS `NetworkTimeout` persists after pool fix → aggressive prod Atlas `timeoutMS` on the POS path
 
 ⚠️ Redeploy required for production.
