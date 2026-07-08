@@ -202,8 +202,11 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
     ).sort("bill_date", -1).limit(10).to_list(10)
 
     # ---- points ledger (last 25) ----
+    # Match by mobile OR customer_id: POS/legacy redeem rows were historically written
+    # with only customer_id, so a mobile-only query hid them from the profile even though
+    # the balance was correctly deducted. Matching both surfaces every ledger entry.
     ledger = await points_ledger_col.find(
-        {"customer_mobile": mobile}, {"_id": 0}
+        {"$or": [{"customer_mobile": mobile}, {"customer_id": customer_id}]}, {"_id": 0}
     ).sort("created_at", -1).limit(25).to_list(25)
 
     # ---- NPS history ----

@@ -31,6 +31,7 @@ from routes.ai_tools import TOOL_SCHEMAS, execute_tool, clear_stats_cache
 from routes.master_brain_tools import (
     MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, MASTER_READ_TOOL_SCHEMAS,
     _tool_undo_action, _tool_cancel_campaign, _tool_reverse_duplicate_bonus_credits,
+    _tool_backfill_ledger_mobiles,
 )
 from routes import mb_attachments as MBA
 
@@ -795,6 +796,37 @@ async def redemption_repair_fix(body: RedemptionFixIn, user: dict = Depends(requ
     if body.confirm and not (body.reason or "").strip():
         raise HTTPException(400, "A reason is required to apply the redemption fix.")
     res = await MASTER_TOOL_HANDLERS["fix_missing_redemption_ledger"](
+        reason=body.reason, confirm=body.confirm, mobile=(body.mobile or "").strip(), user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+# ---- Ledger mobile backfill (deterministic, LLM-free — powers the ops UI) ----
+class LedgerBackfillIn(BaseModel):
+    reason: str = ""
+    confirm: bool = False
+    mobile: str = ""
+
+
+@router.get("/ledger-mobile-backfill/audit")
+async def ledger_mobile_backfill_audit(mobile: str = "",
+                                       user: dict = Depends(require_master_admin)):
+    """Count points_ledger rows that are MISSING customer_mobile but HAVE customer_id
+    (POS/legacy redeem & earn rows) — these are invisible on the customer profile even
+    though the balance is correct. Optional `mobile` scopes to one customer."""
+    return await _tool_backfill_ledger_mobiles(confirm=False, mobile=(mobile or "").strip(), user=user)
+
+
+@router.post("/ledger-mobile-backfill/fix")
+async def ledger_mobile_backfill_fix(body: LedgerBackfillIn,
+                                     user: dict = Depends(require_master_admin)):
+    """Stamp customer_mobile onto ledger rows that only have customer_id (resolved from the
+    customers master) so every point change shows on the profile. Never touches points.
+    Preview when confirm=false; apply when confirm=true + reason. Audit-logged."""
+    if body.confirm and not (body.reason or "").strip():
+        raise HTTPException(400, "A reason is required to run the backfill.")
+    res = await _tool_backfill_ledger_mobiles(
         reason=body.reason, confirm=body.confirm, mobile=(body.mobile or "").strip(), user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])

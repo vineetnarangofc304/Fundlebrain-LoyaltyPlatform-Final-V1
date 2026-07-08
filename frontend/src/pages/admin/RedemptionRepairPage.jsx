@@ -15,6 +15,37 @@ export default function RedemptionRepairPage() {
   const [fix, setFix] = useState(null);
   const [undoing, setUndoing] = useState(false);
 
+  // --- Ledger-mobile backfill (separate concern: rows that only have customer_id, so the
+  //     redemption/earning is invisible on the customer profile even though the balance is
+  //     correct). Stamps customer_mobile so every point change shows on the profile. ---
+  const [bf, setBf] = useState({ audit: null, loading: false, applying: false, reason: "", mobile: "" });
+
+  const bfAudit = async () => {
+    setBf((s) => ({ ...s, loading: true }));
+    try {
+      const r = await api.get("/master-brain/ledger-mobile-backfill/audit", { params: { mobile: bf.mobile.trim() } });
+      setBf((s) => ({ ...s, audit: r.data, loading: false }));
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Backfill audit failed");
+      setBf((s) => ({ ...s, loading: false }));
+    }
+  };
+
+  const bfFix = async () => {
+    if (!bf.reason.trim()) { toast.error("A reason is required to run the backfill."); return; }
+    setBf((s) => ({ ...s, applying: true }));
+    try {
+      const r = await api.post("/master-brain/ledger-mobile-backfill/fix", {
+        confirm: true, reason: bf.reason.trim(), mobile: bf.mobile.trim(),
+      });
+      toast.success(r.data?.message || "Ledger rows backfilled.");
+      setBf((s) => ({ ...s, applying: false, audit: r.data }));
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Backfill failed");
+      setBf((s) => ({ ...s, applying: false }));
+    }
+  };
+
   const runAudit = async () => {
     setLoading(true);
     try {
@@ -102,6 +133,58 @@ export default function RedemptionRepairPage() {
             <strong> previewed, needs a reason, is audit-logged, and is fully undoable</strong>. Historical (pre-cutoff) bills are an
             audit-trail gap only (balance is authoritative there) and are left untouched.
           </p>
+        </div>
+
+        {/* --- Ledger visibility backfill (profile shows the point change) --- */}
+        <div className="chart-card p-5" data-accent="slate" data-testid="ledger-backfill-card">
+          <SectionHeading eyebrow="LEDGER VISIBILITY" title="Backfill missing mobile on ledger rows (so redemptions show on the profile)" accent="slate" />
+          <p className="text-sm text-neutral-600 mt-2 leading-relaxed">
+            A redemption/earning correctly changed the balance but its ledger row was written with only
+            <code> customer_id</code> and no <code>customer_mobile</code> — so it was <strong>invisible on the customer profile</strong>.
+            This stamps the mobile onto those rows (resolved from the customer master). It <strong>never changes points</strong>.
+            Leave the mobile blank to fix ALL customers, or enter one mobile to fix a single customer.
+          </p>
+          <div className="flex flex-wrap items-center gap-3 mt-4">
+            <input
+              value={bf.mobile}
+              onChange={(e) => setBf((s) => ({ ...s, mobile: e.target.value }))}
+              placeholder="Mobile (optional — blank = all)"
+              className="p-2.5 border border-neutral-300 rounded-lg text-sm w-64 font-mono"
+              data-testid="backfill-mobile-input"
+            />
+            <button onClick={bfAudit} disabled={bf.loading} className="k-btn flex items-center gap-2 disabled:opacity-50" data-testid="backfill-audit-btn">
+              <Search className="w-4 h-4" /> {bf.loading ? "Scanning…" : "Scan"}
+            </button>
+          </div>
+          {bf.audit && (
+            <div className="mt-4 space-y-3" data-testid="backfill-result">
+              <div className="flex items-start gap-3 p-4 rounded-lg border bg-slate-50 border-slate-200 text-slate-800 text-sm">
+                <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0" />
+                <div>
+                  <div className="font-medium">
+                    {fmtNum(bf.audit.rows_updated ?? bf.audit.ledger_rows_missing_mobile)} ledger row(s)
+                    {bf.audit.applied ? " backfilled" : " missing customer_mobile"}
+                    {" · "}{fmtNum(bf.audit.distinct_customers)} customer(s){bf.audit.scope && bf.audit.scope !== "ALL" ? ` · scope ${bf.audit.scope}` : ""}
+                  </div>
+                  {bf.audit.message && <div className="opacity-80 mt-1">{bf.audit.message}</div>}
+                </div>
+              </div>
+              {!bf.audit.applied && (bf.audit.ledger_rows_missing_mobile || 0) > 0 && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <input
+                    value={bf.reason}
+                    onChange={(e) => setBf((s) => ({ ...s, reason: e.target.value }))}
+                    placeholder="Reason (required) — e.g. 'Stamp mobile on POS redeem ledger rows'"
+                    className="p-2.5 border border-neutral-300 rounded-lg text-sm flex-1 min-w-[260px]"
+                    data-testid="backfill-reason-input"
+                  />
+                  <button onClick={bfFix} disabled={bf.applying} className="k-btn kazo-bg-burgundy text-white flex items-center gap-2 disabled:opacity-50" data-testid="backfill-apply-btn">
+                    <Wrench className="w-4 h-4" /> {bf.applying ? "Applying…" : "Backfill now"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {!audit && !loading && (

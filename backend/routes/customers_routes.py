@@ -80,7 +80,9 @@ async def get_customer(customer_id: str, user: dict = Depends(get_current_user))
     # transactions
     txns = await transactions_col.find({"customer_id": customer_id}, {"_id": 0}).sort("bill_date", -1).limit(50).to_list(50)
     # points ledger
-    ledger = await points_ledger_col.find({"customer_id": customer_id}, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    ledger = await points_ledger_col.find(
+        {"$or": [{"customer_id": customer_id}, {"customer_mobile": cust.get("mobile")}]},
+        {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
     # coupon redemptions
     redemptions = await coupon_redemptions_col.find({"customer_id": customer_id}, {"_id": 0}).sort("redeemed_at", -1).limit(50).to_list(50)
     # tickets

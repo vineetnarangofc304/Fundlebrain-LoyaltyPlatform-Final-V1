@@ -2392,6 +2392,93 @@ async def _tool_repair_partial_commit_bills(reason: str = "", confirm: bool = Fa
 
 
 # ============================================================
+# LEDGER MOBILE BACKFILL — make every ledger row carry customer_mobile
+# ============================================================
+# The customer profile (Customer 360) reads the points ledger by customer_mobile.
+# Historically the POS earn/redeem ledger rows were written with ONLY customer_id, so a
+# redemption correctly reduced the balance but the entry was INVISIBLE on the profile
+# (and on any mobile-keyed view: Support Desk redeemed-points, mobile-keyed audits).
+# This backfill resolves customer_id -> mobile and stamps customer_mobile on those rows.
+async def _tool_backfill_ledger_mobiles(reason: str = "", confirm: bool = False,
+                                        mobile: str = "", user=None) -> Dict[str, Any]:
+    """READ (preview) / MUTATION (apply). Find points_ledger rows that are MISSING
+    customer_mobile but HAVE customer_id, resolve the mobile from the customers master,
+    and set customer_mobile on them so every ledger entry shows on the customer profile.
+    Optional `mobile` scopes to ONE customer. Preview (confirm=false) -> apply (confirm=true
+    + reason). Audit-logged. Safe/idempotent: only fills the missing field, never changes points."""
+    err = _require_master(user)
+    if err:
+        return err
+    base_filter: Dict[str, Any] = {
+        "$or": [{"customer_mobile": {"$exists": False}}, {"customer_mobile": None},
+                {"customer_mobile": ""}],
+        "customer_id": {"$exists": True, "$nin": [None, ""]},
+    }
+    if mobile:
+        # scope to a single customer: resolve their id(s) first
+        cust = await customers_col.find_one(
+            {"mobile": {"$regex": _last10(mobile) + "$"}}, {"_id": 0, "id": 1, "mobile": 1})
+        if not cust:
+            return {"error": f"No customer found for mobile {mobile}."}
+        base_filter["customer_id"] = cust["id"]
+    # Collect the distinct customer_ids that need backfilling (bounded scan).
+    rows: List[Dict[str, Any]] = []
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        async for r in points_ledger_col.find(
+                base_filter, {"_id": 1, "customer_id": 1}).limit(500000):
+            rows.append(r)
+    total = len(rows)
+    cust_ids = list({r.get("customer_id") for r in rows if r.get("customer_id")})
+    plan = {"action": "backfill_ledger_mobiles", "ledger_rows_missing_mobile": total,
+            "distinct_customers": len(cust_ids), "scope": (mobile or "ALL")}
+    if total == 0:
+        plan["message"] = "No ledger rows are missing customer_mobile. Nothing to backfill."
+        return plan
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("This stamps customer_mobile onto the ledger rows that "
+                                         "currently only have customer_id, so they appear on the "
+                                         "customer profile. It never changes points. Confirm with a reason.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    # Resolve id -> mobile in batches from the customers master.
+    id_to_mobile: Dict[str, str] = {}
+    for i in range(0, len(cust_ids), 5000):
+        batch = cust_ids[i:i + 5000]
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            async for c in customers_col.find(
+                    {"id": {"$in": batch}}, {"_id": 0, "id": 1, "mobile": 1}):
+                if c.get("mobile"):
+                    id_to_mobile[c["id"]] = c["mobile"]
+    # Update all rows for each resolved customer_id in one update_many per id-batch.
+    updated = 0
+    unresolved_ids = 0
+    ops: List[Any] = []
+    for cid, mob in id_to_mobile.items():
+        q = {"customer_id": cid, "$or": [{"customer_mobile": {"$exists": False}},
+                                          {"customer_mobile": None}, {"customer_mobile": ""}]}
+        ops.append(UpdateOne(q, {"$set": {"customer_mobile": mob}}))
+    unresolved_ids = len([c for c in cust_ids if c not in id_to_mobile])
+    for i in range(0, len(ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            res = await points_ledger_col.bulk_write(ops[i:i + CREDIT_BATCH], ordered=False)
+            updated += (res.modified_count or 0)
+    audit_id = str(uuid.uuid4())
+    await _log_master(user, "backfill_ledger_mobiles", "points_ledger", "bulk", reason,
+                      {"rows_missing": total, "distinct_customers": len(cust_ids),
+                       "rows_updated": updated, "unresolved_customers": unresolved_ids,
+                       "scope": (mobile or "ALL")}, audit_id=audit_id)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "rows_updated": updated, "unresolved_customers": unresolved_ids,
+            "message": (f"Backfilled customer_mobile on {updated} ledger row(s) across "
+                        f"{len(id_to_mobile)} customer(s). {unresolved_ids} customer_id(s) "
+                        f"had no mobile on the master and were skipped.")}
+
+
+
+# ============================================================
 # DATA-INTEGRITY CORRECTIONS (write-back, preview->confirm, audited, UNDOABLE)
 # ============================================================
 async def _scan_missing_live_redemptions(cutoff: str, mobile: str = "") -> List[Dict[str, Any]]:

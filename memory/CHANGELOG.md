@@ -2,6 +2,18 @@
 (PRD.md holds the full problem statement, architecture, data rules and history.
 This file appends what was implemented, newest first.)
 
+
+---
+
+## 2026-07-08 — 🔴 Ledger visibility: every point change now carries `customer_mobile` (redemptions were invisible on the profile)
+
+⚠️ Redeploy required. User (prod): "redemption ran, he redeemed points, profile shows the right points, but NO ledger entry — make sure a ledger entry happens for all these changes across all interfaces." (mobile 7992376665)
+- **Root cause:** the customer profile (`customer_360_v2`) reads the points ledger by **`customer_mobile`**, but the POS **redeem** ledger rows (OTP + non-OTP) and the legacy `stores_routes` / live-monitor recalc rows were written with **only `customer_id`** — no `customer_mobile`. So the redemption correctly deducted the balance but its ledger row was INVISIBLE on the mobile-keyed profile (and on Support Desk redeemed-points / mobile-keyed audits). Earn rows via `_apply_bill_credit` already carried mobile, so earnings showed but redemptions didn't.
+- **Fix (write-side — all interfaces now write `customer_mobile`):** `pos_ewards_routes.py` OTP redeem + non-OTP redeem; `stores_routes.py` legacy earn + legacy redeem; `live_monitor_routes.py` recalc earn. (Master Brain tools, `customers_routes` award/deduct, and Support Desk reversal already wrote it.) Also stamp `kind` + `bill_number` for parity.
+- **Fix (read-side — existing prod rows become visible immediately):** `customer_360_v2` and `customers_routes.get_customer` now match the ledger by **`customer_mobile` OR `customer_id`**, so legacy rows (which have `customer_id`) show on the profile even before any data migration.
+- **Backfill (data hygiene for mobile-keyed views):** new deterministic, LLM-free, audited endpoints `GET /api/master-brain/ledger-mobile-backfill/audit` + `POST /api/master-brain/ledger-mobile-backfill/fix` (tool `_tool_backfill_ledger_mobiles`) resolve `customer_id → mobile` from the customers master and stamp `customer_mobile` onto rows that lack it (never touches points). Scoped by optional `mobile`. New UI panel on the **Redemption Repair** page (`/admin/redemption-repair`): "Backfill missing mobile on ledger rows" — Scan → reason → Backfill now. (Preview DB itself had 89 such rows across 33 customers.)
+- **Verified (preview, real HTTP + DB):** `tests/iteration88_ledger_mobile_test.py` 10/10 — POS OTP redeem & non-OTP redeem write a redeem ledger row WITH customer_mobile; the Customer 360 profile now shows the redemption; backfill audit finds legacy rows and the apply stamps their mobile. UI screenshot confirms the panel renders + scans.
+
 ---
 
 ## 2026-07-08 — ✨ Bulk Bonus Points — award loyalty points from a file (flat / top-up, validity, dup-proof)

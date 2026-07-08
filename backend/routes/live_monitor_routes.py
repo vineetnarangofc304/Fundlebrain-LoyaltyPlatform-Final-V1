@@ -552,8 +552,10 @@ async def recalc_points(
             await customers_col.update_one({"id": cust["id"]},
                 {"$inc": {"points_balance": pts, "lifetime_points_earned": pts}})
             await points_ledger_col.insert_one({
-                "id": uuid.uuid4().hex, "customer_id": cust["id"], "type": "earn",
+                "id": uuid.uuid4().hex, "customer_id": cust["id"],
+                "customer_mobile": t.get("customer_mobile"), "type": "earn", "kind": "earn",
                 "points": pts, "reference_type": "recalc", "reference_id": t.get("id"),
+                "bill_number": t.get("bill_number"),
                 "note": f"Points recalculated for bill {t.get('bill_number')}",
                 "created_at": _now_iso(),
             })

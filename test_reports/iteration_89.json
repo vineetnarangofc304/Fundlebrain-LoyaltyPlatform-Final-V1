@@ -1,0 +1,31 @@
+{
+  "summary": "Independently validated ledger customer_mobile stamping fix (iter88) + regression checks. 20/20 assertions in new pytest passed: POS OTP redeem, non-OTP redeem, posAddPoint earn all write points_ledger rows carrying customer_mobile; Customer 360 (customer-360/{id}) now surfaces redemption via mobile-OR-id $or query; backfill audit + fix endpoints behave correctly (400 without reason, rows_updated>=1 with reason, points_balance untouched); OTP retry idempotency confirmed (single ledger row, no double deduction); loyalty_config.require_otp_for_redeem left = true. Pre-existing iteration88 test also re-run: 10/10 PASS.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/pos/posRedeemPointOtpCheck", "issue": "Verify with points='0' + no country_code prefix silently deducts 0 (ledger row points=0). iter68 says '0' should trigger snapshot-driven deduction, but only works when country_code='91' + '91'+mobile is used. Not related to iter89 fix but worth confirming with product."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration89_ledger_mobile_indep_test.py",
+    "/app/backend/tests/iteration88_ledger_mobile_test.py",
+    "/app/test_reports/pytest/iteration89.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "backend/routes/pos_ewards_routes.py is 2321 lines — split into request/verify/earn modules for maintainability.",
+    "posAddPoint uses customer.mobile (nested) while posRedeem* uses customer_mobile (flat). Inconsistent payload contract across POS endpoints; document explicitly in OpenAPI or normalize.",
+    "OTP verify semantics ('points' honored vs ignored based on country_code) is subtle — add explicit unit test coverage for both branches to avoid regressions."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration89_ledger_mobile_indep_test.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (works). POS x-api-key=ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI, merchant_id=KAZO_FUNDLE, store K00055.",
+  "seed_data_creation": "Test customer mobile 9990009123 (id TEST_ITER89_*) seeded with points_balance=5000 then cleaned up after test. loyalty_config.require_otp_for_redeem restored to True (verified post-run).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Ledger-mobile stamping fix is fully validated. Note: to actually verify OTP redeem BALANCE deduction in tests, pass matching points value in both posRedeemPointRequest and posRedeemPointOtpCheck (e.g. '150' in both), OR use country_code='91' + '91'+MOBILE + points='0' pattern as iteration68. Only assert ledger row presence + customer_mobile, if you want to keep the test framework-agnostic.",
+  "rca of the issue": "N/A - validation-only run; iter88 fix confirmed correct."
+}

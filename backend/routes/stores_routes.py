@@ -215,10 +215,13 @@ async def issue_points(body: dict):
         await points_ledger_col.insert_one({
             "id": uuid.uuid4().hex,
             "customer_id": cust["id"],
+            "customer_mobile": mobile,
             "type": "earn",
+            "kind": "earn",
             "points": points,
             "reference_type": "transaction",
             "reference_id": txn_id,
+            "bill_number": bill_number,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
     await customers_col.update_one(
@@ -296,10 +299,13 @@ async def redeem_points(body: dict):
     await points_ledger_col.insert_one({
         "id": uuid.uuid4().hex,
         "customer_id": cust["id"],
+        "customer_mobile": mobile,
         "type": "redeem",
+        "kind": "redeem",
         "points": -points_to_redeem,
         "reference_type": "transaction",
         "reference_id": bill_number,
+        "bill_number": bill_number,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     ms = int((time.time() - t0) * 1000)
