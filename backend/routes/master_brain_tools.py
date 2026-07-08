@@ -2230,12 +2230,16 @@ async def _tool_repair_partial_commit_bills(reason: str = "", confirm: bool = Fa
 # ============================================================
 # DATA-INTEGRITY CORRECTIONS (write-back, preview->confirm, audited, UNDOABLE)
 # ============================================================
-async def _scan_missing_live_redemptions(cutoff: str) -> List[Dict[str, Any]]:
+async def _scan_missing_live_redemptions(cutoff: str, mobile: str = "") -> List[Dict[str, Any]]:
     """Deterministic rescan: LIVE (bill_date >= cutoff) bills with points_redeemed>0 that
-    have NO non-voided redeem ledger row. Same logic the audit uses."""
+    have NO non-voided redeem ledger row. Same logic the audit uses. Optionally scoped to a
+    single customer `mobile` (last-10 match) for a targeted single-customer repair."""
+    tx_filter: Dict[str, Any] = {"points_redeemed": {"$gt": 0}, "bill_date": {"$gte": cutoff}}
+    if mobile:
+        tx_filter["customer_mobile"] = {"$regex": _last10(mobile) + "$"}
     bills: List[Dict[str, Any]] = []
     async for tx in transactions_col.find(
-            {"points_redeemed": {"$gt": 0}, "bill_date": {"$gte": cutoff}},
+            tx_filter,
             {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1,
              "customer_mobile": 1, "points_redeemed": 1}).max_time_ms(25000):
         bills.append(tx)
@@ -2264,18 +2268,19 @@ async def _scan_missing_live_redemptions(cutoff: str) -> List[Dict[str, Any]]:
 
 
 async def _tool_fix_missing_redemption_ledger(reason: str = "", confirm: bool = False,
-                                              user=None) -> Dict[str, Any]:
+                                              mobile: str = "", user=None) -> Dict[str, Any]:
     """MUTATION (Master Admin). Correct LIVE (on/after cutoff) bills that recorded a
     redemption but were NEVER deducted (no redeem ledger row) — the customer kept points
     they spent. For each such bill it writes the missing `redeem` ledger row AND deducts the
     points from the balance (raising lifetime_points_redeemed). HISTORICAL bills are left
-    untouched (balance is authoritative there). Preview first, then confirm=true + reason.
-    Audit-logged, snapshotted, UNDOABLE (undo restores balances and voids the backfilled rows)."""
+    untouched (balance is authoritative there). Optional `mobile` scopes the fix to ONE
+    customer. Preview first, then confirm=true + reason. Audit-logged, snapshotted, UNDOABLE
+    (undo restores balances and voids the backfilled rows)."""
     err = _require_master(user)
     if err:
         return err
     cutoff = await _points_cutoff()
-    missing = await _scan_missing_live_redemptions(cutoff)
+    missing = await _scan_missing_live_redemptions(cutoff, mobile=mobile)
     over_cap = len(missing) > INLINE_CAP
     missing = missing[:INLINE_CAP]
     per_cust: Dict[str, Dict[str, Any]] = {}
@@ -2795,6 +2800,7 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {
             "reason": {"type": "string"},
             "confirm": {"type": "boolean", "default": False},
+            "mobile": {"type": "string", "description": "Optional — scope the fix to a SINGLE customer's mobile (e.g. fix only this shopper's missing redemption). Omit to fix all live missing-redemption bills."},
         }}}},
     {"type": "function", "function": {
         "name": "repair_partial_commit_bills",

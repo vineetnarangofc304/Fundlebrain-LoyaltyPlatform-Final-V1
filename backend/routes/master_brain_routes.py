@@ -770,6 +770,39 @@ async def reverse_dups_apply(body: ReverseDupsIn, user: dict = Depends(require_m
     return res
 
 
+# ---- Missing-redemption repair (deterministic, LLM-free — powers the ops UI) ----
+class RedemptionFixIn(BaseModel):
+    reason: str = ""
+    confirm: bool = False
+    mobile: str = ""
+
+
+@router.get("/redemption-repair/audit")
+async def redemption_repair_audit(sample_limit: int = 200,
+                                  user: dict = Depends(require_master_admin)):
+    """Deterministic audit of LIVE bills that recorded a redemption but have NO redeem ledger
+    row (the customer's balance was never reduced → inflated balance). Runs the exact scan
+    directly — no LLM, so it always completes and returns real numbers."""
+    return await MASTER_TOOL_HANDLERS["audit_missing_redemption_ledger"](
+        sample_limit=sample_limit, user=user)
+
+
+@router.post("/redemption-repair/fix")
+async def redemption_repair_fix(body: RedemptionFixIn, user: dict = Depends(require_master_admin)):
+    """Deterministic fix — preview when confirm=false, apply when confirm=true + reason.
+    Writes the missing redeem ledger row(s) and deducts the never-debited points. Optional
+    `mobile` scopes to a single customer. Audit-logged, snapshotted, UNDOABLE."""
+    if body.confirm and not (body.reason or "").strip():
+        raise HTTPException(400, "A reason is required to apply the redemption fix.")
+    res = await MASTER_TOOL_HANDLERS["fix_missing_redemption_ledger"](
+        reason=body.reason, confirm=body.confirm, mobile=(body.mobile or "").strip(), user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+
+
 @router.get("/campaigns")
 async def list_campaigns(limit: int = 50, user: dict = Depends(require_master_admin)):
     rows = await master_campaigns_col.find({}, {"_id": 0, "audience_spec": 0}) \

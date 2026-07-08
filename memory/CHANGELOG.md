@@ -5,6 +5,19 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-08 — 🔴 Missing-redemption repair: deterministic ops UI + index (Master Brain "can't do it" fixed)
+
+⚠️ Redeploy required. From the doc (SALONI, bill INVK56262701034): the bill recorded `points_redeemed=1,650` but had NO `redeem` ledger row → her balance was never reduced (~1,910 instead of 260). User: "master not able to do it… build a quick interface or code so this happens on production ASAP."
+- **Why Master Brain "couldn't do it":** `_scan_missing_live_redemptions` finds bills via `transactions.find({points_redeemed > 0})`, but `points_redeemed` had **no index** → a COLLSCAN over 1.5M+ transactions that times out (25s cap) at production scale → the fix tool raised and the LLM couldn't complete.
+- **Fix:**
+  - Added a **partial index** `ix_txn_redeemed_partial = (points_redeemed, bill_date)` with `partialFilterExpression {points_redeemed > 0}` (tiny — only redemption bills). The scan is now instant.
+  - Built a dedicated, **LLM-free ops page** `/admin/redemption-repair` (master-admin only, under DATA nav): Run Audit → KPIs (bills with redemption, live missing-ledger, customers, pts never deducted) + affected-bills table; **Fix all live** or per-customer **Fix** → preview → reason → apply; result panel with **Undo**. Backed by deterministic endpoints `GET /api/master-brain/redemption-repair/audit` and `POST /api/master-brain/redemption-repair/fix` (reuse the audited/undoable `fix_missing_redemption_ledger`).
+  - Added optional `mobile` scope to `_scan_missing_live_redemptions` + `fix_missing_redemption_ledger` (+ its LLM schema) so a single customer (e.g. SALONI) can be fixed in isolation, from the UI or via Master Brain.
+- **Verified (preview, real HTTP + DB + UI):** `tests/iteration86_redemption_repair_test.py` 10/10 — audit detects, scoped fix corrects balance 1910→260, writes the -1650 redeem row, raises lifetime_redeemed, re-audit clean, undo restores. UI smoke: audit populates, per-customer Fix opens the confirm panel.
+
+---
+
+
 ## 2026-07-08 — 🔴🔴 P0 REGRESSION FIX: posAddPoint 15–27s + NetworkTimeout 500s → missing points_ledger index
 
 ⚠️ Redeploy required. Root-caused from the production API Monitor screenshot (08 Jul 2026): `/api/pos/posAddPoint` calls taking **15,828 ms and 27,381 ms**, plus frequent `unhandled_exception: NetworkTimeout: …mongodb.net:27017: The read operation timed out` (500s) and duplicate-bill 400s.

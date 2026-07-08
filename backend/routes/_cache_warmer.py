@@ -23,7 +23,8 @@ WARM_PATHS = [
     "/api/dashboard/command-center?period=all",
     "/api/dashboard/kpis",
     "/api/dashboard/sales-trend?period=all",
-    "/api/analytics/sales-dashboard?period_days=0",
+    # sales-dashboard all-time is served from a persisted rollup (analytics
+    # rollup_loop) — no longer warmed here, to cut concurrent full-scan load.
     "/api/segments/cohort-library/",
     "/api/analytics/customer-dashboard",
     "/api/analytics/loyalty-dashboard",

@@ -70,6 +70,7 @@ const SECTIONS = [
       { to: "/admin/historic-data", icon: Database, label: "Historical Upload", testid: "nav-historic-data" },
       { to: "/admin/verify-load", icon: ClipboardCheck, label: "Verify Load", testid: "nav-verify-load" },
       { to: "/admin/reconciliation", icon: ShieldCheck, label: "Data Reconciliation", testid: "nav-reconciliation" },
+      { to: "/admin/redemption-repair", icon: ShieldAlert, label: "Redemption Repair", testid: "nav-redemption-repair", masterOnly: true },
     ],
   },
   {
@@ -367,7 +368,7 @@ export default function AdminLayout() {
                   <span>{section.label}</span>
                   <ChevronRight className={`w-3 h-3 transition-transform ${isCollapsed ? "" : "rotate-90"}`} />
                 </button>
-                {!isCollapsed && section.items.map((n) => (
+                {!isCollapsed && section.items.filter((n) => !n.masterOnly || user?.is_master_admin).map((n) => (
                   <NavLink
                     key={n.to}
                     to={n.to}

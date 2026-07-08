@@ -1,5 +1,6 @@
 """Additional drill-down dashboards and entity-level detail views."""
 from datetime import datetime, timezone, timedelta
+import asyncio
 import logging
 from typing import Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,6 +10,7 @@ from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
 from routes._dash_cache import dash_cache
+from routes._rollups import read_rollup, write_rollup, long_col
 
 logger = logging.getLogger("kazo-fundle.analytics")
 
@@ -41,17 +43,19 @@ async def transaction_detail(txn_id: str, user: dict = Depends(get_current_user)
 
 
 # Sales dashboard - hourly + weekday + payment breakdown
-@router.get("/sales-dashboard")
-@dash_cache("an-sales")
-async def sales_dashboard(
-    period_days: int = 30,
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    user: dict = Depends(get_current_user),
-):
-    from ._date_range import parse_date_range
-    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
-    start = start_iso or _start(period_days)
+SALES_ALLTIME_KEY = "an-sales|all"
+SALES_ROLLUP_MAX_AGE = 6 * 3600         # serve a rollup up to 6h old
+_SALES_ROLLUP_INTERVAL = 1800           # background refresh cadence (30 min)
+
+
+async def _compute_sales(col, start, end_iso, max_time_ms=None):
+    """Compute the sales-dashboard facet on the given collection.
+
+    Factored out so it can run either on the request-path collection
+    (transactions_col, 30s CSOT) or on the background rollup client
+    (long_col('transactions'), CSOT disabled). Returns the exact response dict
+    the endpoint serves, so the rollup and the live path are byte-identical.
+    """
     bill_filter: Dict[str, Any] = {"$gte": start}
     if end_iso:
         bill_filter["$lt"] = end_iso
@@ -97,7 +101,10 @@ async def sales_dashboard(
             ],
         }},
     ]
-    res = await transactions_col.aggregate(facet_pipe, allowDiskUse=True).to_list(1)
+    agg_kwargs: Dict[str, Any] = {"allowDiskUse": True}
+    if max_time_ms:
+        agg_kwargs["maxTimeMS"] = max_time_ms
+    res = await col.aggregate(facet_pipe, **agg_kwargs).to_list(1)
     facet = res[0] if res else {}
     hourly = facet.get("hourly", [])
     weekday = facet.get("weekday", [])
@@ -111,6 +118,52 @@ async def sales_dashboard(
         "payment_mix": [{"mode": r["_id"], "net": round(r["net"], 2), "count": r["count"]} for r in pay],
         "discount_distribution": [{"bucket": r["_id"], "count": r["count"], "net": round(r["net"], 2)} for r in disc],
     }
+
+
+@router.get("/sales-dashboard")
+@dash_cache("an-sales")
+async def sales_dashboard(
+    period_days: int = 30,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    from ._date_range import parse_date_range
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    start = start_iso or _start(period_days)
+
+    # "All time" is the full-collection scan that overruns the 30s request-path
+    # timeout, so it is served from a background-computed rollup (build_sales_rollup
+    # / _rollups.py). Bounded date ranges stay live — they hit the bill_date index
+    # and are fast. If the rollup is not ready yet, fall back to the live query so
+    # behaviour is never worse than before.
+    is_all_time = (period_days is None or period_days <= 0) and not start_date and not end_date
+    if is_all_time:
+        cached = await read_rollup(SALES_ALLTIME_KEY, SALES_ROLLUP_MAX_AGE)
+        if cached is not None:
+            return cached
+    return await _compute_sales(transactions_col, start, end_iso)
+
+
+async def build_sales_rollup() -> None:
+    """Compute the all-time sales facet on the CSOT-disabled client and persist it.
+
+    Runs off the request path so the full-collection scan can take as long as it
+    needs (bounded by maxTimeMS) instead of being killed by the 30s request timeout.
+    """
+    value = await _compute_sales(long_col("transactions"), _start(0), None, max_time_ms=120000)
+    await write_rollup(SALES_ALLTIME_KEY, value)
+
+
+async def rollup_loop() -> None:
+    """Background loop: keep the heavy all-time rollups fresh, off the request path."""
+    await asyncio.sleep(15)   # let uvicorn bind + indexes start building
+    while True:
+        try:
+            await build_sales_rollup()
+        except Exception as e:
+            logger.warning(f"sales rollup refresh failed: {e}")
+        await asyncio.sleep(_SALES_ROLLUP_INTERVAL)
 
 
 # Customer dashboard - RFM-style + cohorts

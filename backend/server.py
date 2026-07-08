@@ -410,7 +410,21 @@ async def ensure_indexes():
         # already indexed by bootstrap_pos_defaults)
         (transactions_col, [("store_id", 1), ("bill_date", -1)], {"name": "ix_txn_store_billdate"}),
         (transactions_col, [("customer_mobile", 1), ("bill_date", -1)], {"name": "ix_txn_mobile_billdate"}),
+        # COVERING index for the system-wide ATV / loyalty-sum aggregate
+        # (cohort-library build_context + any $sum net_amount over all loyalty bills).
+        # The $match {customer_mobile: {$nin: [None, ""]}} + $group {net: $sum net_amount,
+        # bills: $sum 1} was doing an IXSCAN then FETCHing every matched doc (~766K rows /
+        # ~788MB) just to read net_amount, blowing past the 30s Mongo op timeout under
+        # cache-warmer + dashboard load and 500-ing the endpoint. With net_amount in the
+        # index the aggregate is fully covered (PROJECTION_COVERED, no FETCH) — verified via
+        # explain. Purely additive; no query or behaviour change.
+        (transactions_col, [("customer_mobile", 1), ("net_amount", 1)], {"name": "ix_txn_mobile_net"}),
         (transactions_col, [("is_return", 1)], {"name": "ix_txn_is_return"}),
+        # points_redeemed (partial, >0 only) — the missing-redemption audit/repair scans
+        # "bills that recorded a redemption". Without this it COLLSCANs 1.5M+ transactions and
+        # times out (Master Brain "can't do it"); the partial index is tiny (only redemption bills).
+        (transactions_col, [("points_redeemed", 1), ("bill_date", 1)],
+         {"name": "ix_txn_redeemed_partial", "partialFilterExpression": {"points_redeemed": {"$gt": 0}}}),
         # transaction_id powers the SKU line-item attach ($or with bill_number).
         # Without it that post-pass does a COLLSCAN per bill (O(n²)) and never
         # finishes on a 1M-line file — pegging the DB and 500-ing dashboards.
@@ -677,6 +691,16 @@ async def startup():
         asyncio.create_task(warm_loop())
     except Exception as e:
         logger.warning(f"Could not schedule cache warmer: {e}")
+
+    # Keep the heavy ALL-TIME analytics rollups fresh in a background task
+    # (off the request path, on a client with the 30s CSOT disabled) so the
+    # "All time" views never run a full-collection scan on a request and 500.
+    # Persisted in Mongo, so it also survives the frequent redeploys.
+    try:
+        from routes.analytics_routes import rollup_loop
+        asyncio.create_task(rollup_loop())
+    except Exception as e:
+        logger.warning(f"Could not schedule analytics rollup loop: {e}")
 
 
 @app.on_event("shutdown")
