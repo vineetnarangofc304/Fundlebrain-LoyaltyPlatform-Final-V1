@@ -5,6 +5,19 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-08 — 🔴🔴 P0 REGRESSION FIX: posAddPoint 15–27s + NetworkTimeout 500s → missing points_ledger index
+
+⚠️ Redeploy required. Root-caused from the production API Monitor screenshot (08 Jul 2026): `/api/pos/posAddPoint` calls taking **15,828 ms and 27,381 ms**, plus frequent `unhandled_exception: NetworkTimeout: …mongodb.net:27017: The read operation timed out` (500s) and duplicate-bill 400s.
+- **Root cause (regression from the 07-Jul partial-commit fix):** `_apply_bill_credit` writes the earn/bonus ledger rows via `update_one(..., upsert=True)` keyed on `(bill_number, ledger_kind, type)`. But `points_ledger` had **NO index on `bill_number`**, so EVERY bill's ledger upsert did a full **COLLSCAN of the multi-million-row ledger** (the pre-fix code did a plain `insert`). That pushed posAddPoint from ~7.6s to 15–30s, and the scan load saturated Atlas → read-operation timeouts (the 500s) cascaded across POS calls. The duplicate-bill 400s are the POS retrying those slow/timed-out calls.
+- **Fix:**
+  - Added index **`ix_pl_billnumber_kind` = `(bill_number, ledger_kind, type)`** on `points_ledger` (in `ensure_indexes()` + created live). The ledger upsert is now an IXSCAN (~1ms) instead of a COLLSCAN. Verified via `explain`: `FETCH → IXSCAN (ix_pl_billnumber_kind)`.
+  - Trimmed 2 DB round-trips from `_apply_bill_credit`: folded the commit-status flip into the atomic balance-claim write (removed the separate commit update), and removed the post-credit customer re-read (balance is now reported optimistically as `prev_balance + credit`, matching pre-fix behaviour).
+- **Verified (preview):** posAddPoint end-to-end **~0.35s** (was 15–27s on prod); partial-commit regression suite `tests/iteration84_partial_commit_test.py` still 25/25.
+- **Note for production:** on redeploy, `ensure_indexes()` builds `ix_pl_billnumber_kind` in the BACKGROUND (Atlas) — for a multi-million-row ledger this takes a few minutes; latency drops once the build completes. If NetworkTimeout 500s persist AFTER the index is built, that's Atlas capacity — scale the cluster tier / raise pool size (app-server scaling won't help).
+
+---
+
+
 ## 2026-07-07 — 🔴 Master Brain "no execution / fabricated batch progress" — bulk writes now atomic + full budget
 
 ⚠️ Redeploy required for production. Verified: `tests/iteration85_mb_bulk_execution_test.py` = 11/11 PASS.

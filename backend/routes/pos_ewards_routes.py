@@ -1429,10 +1429,12 @@ async def _apply_bill_credit(txn: Dict[str, Any]) -> Dict[str, Any]:
 
     # 2) BALANCE — atomically CLAIM the bill so the customer $inc runs exactly once, even
     #    across POS retries / self-heals. $inc (not absolute $set) also fixes the concurrent
-    #    same-customer bill race the old code had.
+    #    same-customer bill race the old code had. The claim ALSO flips commit_status in the
+    #    same write (no extra round-trip) — self-heal keys on `balance_applied`.
     claimed = await transactions_col.find_one_and_update(
         {"bill_number": bill_number, "balance_applied": {"$ne": True}},
-        {"$set": {"balance_applied": True, "balance_applied_at": _now_iso()}},
+        {"$set": {"balance_applied": True, "balance_applied_at": _now_iso(),
+                  "commit_status": "committed", "committed_at": _now_iso()}},
     )
     if claimed is not None and cust_id:
         cust_set = {"last_visit_at": _now_iso(), "tier": cr.get("new_tier")}
@@ -1449,16 +1451,10 @@ async def _apply_bill_credit(txn: Dict[str, Any]) -> Dict[str, Any]:
              }},
         )
 
-    # 3) mark the bill fully committed.
-    await transactions_col.update_one(
-        {"bill_number": bill_number},
-        {"$set": {"commit_status": "committed", "committed_at": _now_iso()}},
-    )
-
-    fresh = await customers_col.find_one(
-        {"id": cust_id}, {"_id": 0, "points_balance": 1, "tier": 1}) if cust_id else None
-    new_balance = int((fresh or {}).get("points_balance") or 0)
-    return {"new_balance": new_balance, "new_tier": (fresh or {}).get("tier") or cr.get("new_tier")}
+    # Report the balance optimistically (prev snapshot + credit) — matches the pre-fix
+    # behaviour and avoids an extra read on the hot POS path (balance is correctly $inc'd above).
+    new_balance = int(cr.get("prev_balance") or 0) + total_credit
+    return {"new_balance": new_balance, "new_tier": cr.get("new_tier")}
 
 
 # ---------------- Endpoint 9 — Bill Settlement (THE BIG ONE) ----------------

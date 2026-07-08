@@ -436,6 +436,11 @@ async def ensure_indexes():
         # (type, reference_type) — Master Brain double-redemption repair scan filters on
         # type=redeem + reference_type=transaction; without this it COLLSCANs the full ledger.
         (points_ledger_col, [("type", 1), ("reference_type", 1)], {"name": "ix_pl_type_reftype"}),
+        # bill_number — the LIVE posAddPoint credit path upserts the earn/bonus ledger rows
+        # keyed on (bill_number, ledger_kind, type). Without this every upsert COLLSCANs the
+        # multi-million-row ledger, making posAddPoint take 15-30s and time out. This makes each
+        # upsert an index hit (~1ms). Also powers the partial-commit audit's bill_number lookup.
+        (points_ledger_col, [("bill_number", 1), ("ledger_kind", 1), ("type", 1)], {"name": "ix_pl_billnumber_kind"}),
         # reference_id — the repair's legit-sibling lookup joins ledger rows by bill number.
         (points_ledger_col, [("reference_id", 1)], {"name": "ix_pl_reference_id"}),
         (points_ledger_col, [("created_at", -1)], {"name": "ix_pl_created"}),
