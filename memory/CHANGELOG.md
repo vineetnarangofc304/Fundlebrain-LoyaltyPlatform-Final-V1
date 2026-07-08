@@ -5,6 +5,16 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-08 (b) — 🔴 Bulk Bonus Points: "No mobile numbers detected" on a valid member file (headerless / phantom-empty-rows parser bug)
+
+⚠️ Redeploy required. User (urgent, prod): uploaded `Kazo Bulk Points-4.xlsx` (registered members) to Bulk Bonus Points → "No mobile numbers detected in that file." The mobiles were valid registered members.
+- **Root cause (`mb_attachments.py` parser):** the file is a single BARE column of 10-digit mobiles with **no header row**, plus ~999 phantom trailing empty rows (openpyxl). Two bugs stacked: (1) `_parse_xlsx`/`_parse_csv` always treated row 0 as the HEADER → the first mobile (`8888888888`) became the "column name" and there was no real header; (2) `_mobile_col_index` computed the mobile-likeness score over ALL rows INCLUDING the ~999 empties, so the score fell to ~0.045 (< the 0.6 threshold) → 0 mobiles detected.
+- **Fix:** new `_finalize_table()` used by both parsers — it (a) DROPS fully-empty rows and (b) auto-detects a HEADERLESS file (first row already normalises to a mobile) and synthesises generic column names (`col1…`), keeping every data row. `_mobile_col_index` now scores only NON-EMPTY cells (and scans up to 1000 rows). Headered files with a `Mobile`/`Points` column are unaffected (the first row is text labels → still treated as the header).
+- **Verified (preview, real HTTP + DB):** the user's file now `POST /master-brain/upload` → **10 mobiles detected** (row_count 10). Bulk-bonus preview on it → mobiles_in_file 10; seeding 2 of those mobiles → matched 2 / not_found 8 / 200 pts; apply credited both (10→110) with bonus ledger rows carrying `customer_mobile` + 30-day expiry. Regression `tests/iteration88_bulk_parse_headerless_test.py` 7/7 (headerless xlsx/csv detect all mobiles incl. the ex-header; headered csv keeps header + sums dup points; headered xlsx picks the mobile column over an id column).
+
+
+---
+
 ## 2026-07-08 — 🔴 Ledger visibility: every point change now carries `customer_mobile` (redemptions were invisible on the profile)
 
 ⚠️ Redeploy required. User (prod): "redemption ran, he redeemed points, profile shows the right points, but NO ledger entry — make sure a ledger entry happens for all these changes across all interfaces." (mobile 7992376665)

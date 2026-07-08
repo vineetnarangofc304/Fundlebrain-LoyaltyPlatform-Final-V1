@@ -47,14 +47,16 @@ def _mobile_col_index(headers: List[str], rows: List[List[Any]]) -> Optional[int
     for i, h in enumerate(headers):
         if any(hint in str(h).lower() for hint in MOBILE_HEADER_HINTS):
             return i
-    # 2) else the column whose values look most like mobiles
+    # 2) else the column whose NON-EMPTY values look most like mobiles (ignore blank
+    #    cells so hundreds of trailing empty rows can't dilute the score below threshold)
     if rows:
         best, best_score = None, 0.0
         for i in range(len(headers)):
-            vals = [r[i] for r in rows[:200] if i < len(r)]
+            vals = [r[i] for r in rows[:1000]
+                    if i < len(r) and str(r[i]).strip() not in ("", "None")]
             if not vals:
                 continue
-            score = sum(1 for v in vals if _norm_mobile(v)) / max(len(vals), 1)
+            score = sum(1 for v in vals if _norm_mobile(v)) / len(vals)
             if score > best_score:
                 best, best_score = i, score
         if best is not None and best_score >= 0.6:
@@ -146,13 +148,42 @@ def _detect_points_pairs(headers: List[str], rows: List[List[Any]]):
     return [{"mobile": m, "points": agg[m]} for m in order], dups
 
 
+def _row_is_empty(r: Any) -> bool:
+    return all(c is None or str(c).strip() == "" for c in r)
+
+
+def _looks_like_data_row(r: List[Any]) -> bool:
+    """A header row carries text labels; a DATA row carries values. We treat the first
+    row as DATA (i.e. the file is HEADERLESS) when any of its cells already normalises to
+    a valid mobile number — e.g. a bare single-column list of mobiles with no header."""
+    return any(_norm_mobile(c) for c in r)
+
+
+def _finalize_table(all_rows: List[Any]) -> (List[str], List[List[Any]]):
+    """Turn raw spreadsheet/CSV rows into (headers, data_rows):
+    - drops fully-empty rows (xlsx often reports hundreds of phantom trailing rows that
+      otherwise dilute the mobile-detection score to ~0),
+    - auto-detects a HEADERLESS file (first row is already data) and synthesises generic
+      column names so a bare list of mobiles is still parsed."""
+    rows = [list(r) for r in all_rows if not _row_is_empty(r)]
+    if not rows:
+        return [], []
+    if _looks_like_data_row(rows[0]):
+        width = max(len(r) for r in rows)
+        headers = [f"col{i + 1}" for i in range(width)]
+        return headers, rows
+    headers = [str(h) for h in rows[0]]
+    return headers, rows[1:]
+
+
 def _parse_csv(raw: bytes) -> Dict[str, Any]:
     text = raw.decode("utf-8", errors="replace")
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:
         raise ValueError("CSV is empty")
-    headers = [str(h) for h in rows[0]]
-    body = rows[1:]
+    headers, body = _finalize_table(rows)
+    if not headers:
+        raise ValueError("CSV is empty")
     return {"columns": headers, "rows": body}
 
 
@@ -160,12 +191,14 @@ def _parse_xlsx(raw: bytes) -> Dict[str, Any]:
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
     ws = wb.active
-    rows = [[("" if c is None else c) for c in r] for r in ws.iter_rows(values_only=True)]
+    all_rows = list(ws.iter_rows(values_only=True))
     wb.close()
-    if not rows:
+    if not all_rows:
         raise ValueError("Spreadsheet is empty")
-    headers = [str(h) for h in rows[0]]
-    return {"columns": headers, "rows": rows[1:]}
+    headers, body = _finalize_table(all_rows)
+    if not headers:
+        raise ValueError("Spreadsheet is empty")
+    return {"columns": headers, "rows": body}
 
 
 def _parse_pdf(raw: bytes) -> str:
