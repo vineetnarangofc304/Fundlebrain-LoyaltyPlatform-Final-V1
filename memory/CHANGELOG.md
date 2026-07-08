@@ -1,9 +1,20 @@
 # CHANGELOG — KAZO Fundle Platform
-
 (PRD.md holds the full problem statement, architecture, data rules and history.
 This file appends what was implemented, newest first.)
 
 ---
+
+## 2026-07-08 — ✨ Bulk Bonus Points — award loyalty points from a file (flat / top-up, validity, dup-proof)
+
+⚠️ Redeploy required. User asked for a controlled way to award bonus points in bulk (the doc showed a past incident where bonuses were granted repeatedly via chat and DUPLICATED — 4× +108 then double −324 reversals). Built a dedicated, deterministic ops feature instead of relying on the LLM.
+- **New page `/admin/bulk-bonus`** (MARKETING nav, master-admin only): (1) upload CSV / Excel (.xlsx) / PDF of mobile numbers, (2) enter points, (3) set validity, (4) choose **Flat points** (add N to everyone) or **Top-up to value** (award only `target − current balance`). Preview (matched / not-found / already-at-target / total points + sample) → reason → Award → result with **Undo**.
+- **Backend:** reuses the existing multi-format parser (`mb_attachments.ingest`, `POST /master-brain/upload`) + new `bulk_award_bonus()` tool and `POST /api/master-brain/bulk-bonus/run` (preview/apply). Posts `bonus` ledger rows with `expires_at`, `$inc` balance + lifetime_points_earned (tier is spend-based, untouched). Audit-logged, snapshotted, **UNDOABLE** (ledger rows tagged `fix_audit_id`).
+- **Duplicate-proof (the key ask):** each batch gets a content signature over (mode + value + validity input + the exact mobile:points set); an identical batch within 30 days is **BLOCKED** ("already awarded on … — would DOUBLE it") unless the user explicitly ticks *award again (force)*. This prevents the exact duplicate-bonus incident from the doc.
+- **Validity:** expiry date (YYYY-MM-DD) or N days, or none (never expires).
+- **Verified (preview, real HTTP upload + DB + UI):** `tests/iteration87_bulk_bonus_test.py` 15/15 — CSV upload detects mobiles; flat +500 credits all with expiry rows; duplicate batch blocked (balances unchanged); force awards again; undo reverses; top-up-to-1000 awards only the difference and skips those already at/above. UI smoke: upload → configure → preview panel with per-customer breakdown all render.
+
+---
+
 
 ## 2026-07-08 — 🔴 Missing-redemption repair: deterministic ops UI + index (Master Brain "can't do it" fixed)
 

@@ -429,7 +429,18 @@ async def ensure_indexes():
         # Without it that post-pass does a COLLSCAN per bill (O(n²)) and never
         # finishes on a 1M-line file — pegging the DB and 500-ing dashboards.
         (transactions_col, [("transaction_id", 1)], {"name": "ix_txn_transaction_id"}),
+        # id — the app's business PK. returnOrder, live-monitor recalc and every
+        # drill-down query transactions by {id}; without this each is a COLLSCAN
+        # of ~750K bills. IXSCAN makes it ~1ms.
+        (transactions_col, [("id", 1)], {"name": "ix_txn_id"}),
         # customers — segmentation / analytics dimensions
+        # id — the app's business PK. CRITICAL for the LIVE posAddPoint path:
+        # _apply_bill_credit credits the balance via update_one({"id": cust_id}),
+        # which WITHOUT this COLLSCANs ~940K customers on EVERY bill (15-30s under
+        # 100+ concurrent stores -> request timeout -> the store's bill is LOST).
+        # An IXSCAN makes it ~1ms. Also speeds every other {id} customer lookup
+        # (returnOrder, customer detail, live monitor, Master Brain tools).
+        (customers_col, [("id", 1)], {"name": "ix_cust_id"}),
         (customers_col, [("tier", 1)], {"name": "ix_cust_tier"}),
         (customers_col, [("home_store_id", 1)], {"name": "ix_cust_home_store"}),
         (customers_col, [("last_visit_at", -1)], {"name": "ix_cust_last_visit"}),

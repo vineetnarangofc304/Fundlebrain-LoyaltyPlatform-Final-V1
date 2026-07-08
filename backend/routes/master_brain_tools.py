@@ -802,6 +802,170 @@ def _parse_iso(ts: Any):
         return None
 
 
+def _bulk_bonus_signature(mode: str, value: int, validity_key: str,
+                          pairs: List[Dict[str, Any]]) -> str:
+    """Content hash of a bulk-bonus batch (mode + value + validity INPUT + the exact set of
+    mobile:points awards). Uses the validity input (not the computed expiry timestamp) so a
+    quick re-submit of the same batch produces the SAME signature and is caught as a duplicate."""
+    body = f"{mode}|{value}|{validity_key}|" + ";".join(
+        f"{p['mobile']}:{int(p['points'])}" for p in sorted(pairs, key=lambda x: str(x['mobile'])))
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+async def bulk_award_bonus(attachment_id: str = "", mode: str = "flat", value: int = 0,
+                           expiry_days: int = 0, expiry_date: str = "", reason: str = "",
+                           confirm: bool = False, force: bool = False, user=None) -> Dict[str, Any]:
+    """Award BONUS loyalty points in BULK to the mobiles listed in an uploaded CSV/XLSX/PDF.
+      mode='flat'  → add `value` points to every matched customer.
+      mode='topup' → top each matched customer UP TO `value` (award max(0, value - current balance)).
+    Validity: `expiry_date` (YYYY-MM-DD) wins, else `expiry_days` from now, else no expiry.
+    Points post as `bonus` (points_balance + lifetime_points_earned; tier is spend-based, untouched).
+    Preview with confirm=false, apply with confirm=true + reason. IDEMPOTENT — the SAME batch is
+    blocked within 30 days unless force=true (prevents the duplicate-bonus problem). Audited,
+    snapshotted, UNDOABLE."""
+    err = _require_master(user)
+    if err:
+        return err
+    mode = (mode or "flat").lower()
+    if mode not in ("flat", "topup"):
+        return {"error": "mode must be 'flat' or 'topup'."}
+    try:
+        value = int(value)
+    except Exception:
+        return {"error": "The points/target value must be a whole number."}
+    if value <= 0:
+        return {"error": "The points/target value must be greater than 0."}
+
+    from database import mb_attachments_col
+    att = await mb_attachments_col.find_one(
+        {"id": attachment_id, "user_id": user.get("id")}, {"_id": 0})
+    if not att:
+        return {"error": "Uploaded file not found — please upload the mobile-number file again."}
+    mobiles = list(dict.fromkeys(att.get("mobiles") or []))
+    if not mobiles:
+        return {"error": "No valid 10-digit mobile numbers were detected in that file."}
+
+    expires_at = None
+    validity_key = "noexp"
+    if (expiry_date or "").strip():
+        try:
+            d = datetime.fromisoformat(expiry_date.strip()[:10])
+            expires_at = d.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc).isoformat()
+            validity_key = "date:" + expiry_date.strip()[:10]
+        except Exception:
+            return {"error": "expiry_date must be in YYYY-MM-DD format."}
+    elif expiry_days and int(expiry_days) > 0:
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=int(expiry_days))).isoformat()
+        validity_key = f"days:{int(expiry_days)}"
+
+    cust_map = await _bulk_find_customers(mobiles)
+    pairs: List[Dict[str, Any]] = []
+    matched = not_found = skipped_zero = 0
+    for m in mobiles:
+        c = cust_map.get(_last10(m))
+        if not c:
+            not_found += 1
+            continue
+        matched += 1
+        cur = int(c.get("points_balance") or 0)
+        pts = value if mode == "flat" else max(0, value - cur)
+        if pts <= 0:
+            skipped_zero += 1
+            continue
+        pairs.append({"mobile": c.get("mobile"), "cust_id": c["id"], "points": pts,
+                      "balance_before": cur, "name": c.get("name"),
+                      "lifetime_before": int(c.get("lifetime_points_earned") or 0)})
+    total_points = sum(p["points"] for p in pairs)
+
+    sig = _bulk_bonus_signature(mode, value, validity_key, pairs)
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    prior = await mb_credit_receipts_col.find_one(
+        {"signature": sig, "created_at": {"$gte": since}}, {"_id": 0}, sort=[("created_at", -1)])
+
+    plan = {"action": "bulk_award_bonus", "mode": mode, "value": value,
+            "file": att.get("filename"), "expires_at": expires_at,
+            "mobiles_in_file": len(mobiles), "matched_customers": matched,
+            "not_found": not_found, "skipped_zero": skipped_zero,
+            "customers_to_credit": len(pairs), "total_points": total_points}
+    if prior:
+        plan["already_awarded"] = {"when": prior.get("created_at"), "by": prior.get("created_by"),
+                                   "audit_id": prior.get("audit_id"), "customers": prior.get("changed"),
+                                   "points": prior.get("total_points_credited")}
+
+    if not confirm:
+        plan["preview"] = True
+        plan["sample"] = [{"mobile": p["mobile"], "name": p["name"],
+                           "balance_before": p["balance_before"], "points_to_add": p["points"]}
+                          for p in pairs[:12]]
+        if prior and not force:
+            plan["blocked_prior"] = True
+            plan["warning"] = (f"This EXACT batch was already awarded on {prior.get('created_at')} by "
+                               f"{prior.get('created_by')} ({prior.get('changed')} customers, "
+                               f"{prior.get('total_points_credited')} pts). Awarding again would DOUBLE it — "
+                               "tick 'award again' (force) only if you truly intend a second award.")
+        return plan
+
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    if not pairs:
+        return {"error": "Nothing to award — no matched customer needs points for this batch "
+                         f"({not_found} not found, {skipped_zero} already at/above target)."}
+    if len(pairs) > INLINE_CAP:
+        return {"error": f"{len(pairs)} customers exceeds the {INLINE_CAP} cap — split the file and run it in parts."}
+    if prior and not force:
+        return {"error": "ALREADY_AWARDED", "blocked": True, **plan,
+                "message": (f"Blocked to prevent double-crediting — this exact batch was already awarded on "
+                            f"{prior.get('created_at')} by {prior.get('created_by')} "
+                            f"({prior.get('changed')} customers, {prior.get('total_points_credited')} pts; "
+                            f"audit {prior.get('audit_id')}). Re-submit with force=true only to award a SECOND time.")}
+
+    audit_id = str(uuid.uuid4())
+    email = user.get("email")
+    upd_ops: List[Any] = []
+    ledger_docs: List[Dict[str, Any]] = []
+    changes: List[Dict[str, Any]] = []
+    for p in pairs:
+        cid, pts = p["cust_id"], p["points"]
+        upd_ops.append(UpdateOne({"id": cid}, {"$inc": {"points_balance": pts,
+                                                        "lifetime_points_earned": pts}}))
+        ledger_docs.append({"id": str(uuid.uuid4()), "customer_id": cid,
+                            "customer_mobile": p["mobile"], "points": pts, "type": "bonus",
+                            "kind": "bonus", "reference_type": "bulk_bonus", "reason": reason,
+                            "note": f"Bulk bonus ({mode}) from {att.get('filename')}",
+                            "expires_at": expires_at, "created_at": _now_iso(),
+                            "created_by": email, "via": "bulk_bonus", "fix_audit_id": audit_id})
+        changes.append({"cust_id": cid, "mobile": p["mobile"],
+                        "points_before": p["balance_before"], "points_after": p["balance_before"] + pts,
+                        "lifetime_before": p["lifetime_before"], "lifetime_after": p["lifetime_before"] + pts})
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    for i in range(0, len(ledger_docs), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+    await _log_master(user, "bulk_award_bonus", "customers", "bulk", reason,
+                      {"mode": mode, "value": value, "expires_at": expires_at, "matched": matched,
+                       "changed": len(pairs), "total_points": total_points,
+                       "file": att.get("filename")}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "bulk_award_bonus", changes)
+    await mb_credit_receipts_col.insert_one({
+        "id": str(uuid.uuid4()), "signature": sig, "attachment_id": att.get("id"),
+        "filename": att.get("filename"), "audit_id": audit_id, "changed": len(pairs),
+        "matched": matched, "total_points_credited": total_points, "kind": "bulk_bonus",
+        "mode": mode, "value": value, "expires_at": expires_at, "reason": reason,
+        "created_at": _now_iso(), "created_by": email, "forced": bool(force)})
+    return {"ok": True, "applied": True, **plan, "audit_id": audit_id,
+            "message": (f"Awarded {total_points:,} bonus pts to {len(pairs):,} customer(s) "
+                        f"({'flat ' + str(value) if mode == 'flat' else 'top-up to ' + str(value)}) "
+                        f"from '{att.get('filename')}'"
+                        + (f", expiring {expires_at[:10]}" if expires_at else ", no expiry")
+                        + (f". {not_found} not found" if not_found else "")
+                        + (f", {skipped_zero} already at/above target" if skipped_zero else "")
+                        + f". Audit {audit_id} — undoable.")}
+
+
+
 async def _tool_reverse_duplicate_bonus_credits(filter_reason: str = "", since: str = "",
                                                  window_hours: int = 72, reason: str = "",
                                                  confirm: bool = False, user=None) -> Dict[str, Any]:

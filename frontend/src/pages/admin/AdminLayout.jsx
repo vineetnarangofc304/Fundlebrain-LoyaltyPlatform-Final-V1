@@ -45,6 +45,7 @@ const SECTIONS = [
       { to: "/admin/campaigns", icon: Send, label: "Campaigns", testid: "nav-campaigns" },
       { to: "/admin/auto-campaigns", icon: Cake, label: "Auto Campaigns", testid: "nav-auto-campaigns" },
       { to: "/admin/coupons", icon: Ticket, label: "Coupons", testid: "nav-coupons" },
+      { to: "/admin/bulk-bonus", icon: Award, label: "Bulk Bonus Points", testid: "nav-bulk-bonus", masterOnly: true },
     ],
   },
   {

@@ -40,6 +40,7 @@ import FundleBrain from "@/pages/admin/FundleBrain";
 import MasterBrain from "@/pages/admin/MasterBrain";
 import APIMonitor from "@/pages/admin/APIMonitor";
 import RedemptionRepairPage from "@/pages/admin/RedemptionRepairPage";
+import BulkBonusPage from "@/pages/admin/BulkBonusPage";
 import UserManagement from "@/pages/admin/UserManagement";
 import StoresPage from "@/pages/admin/Stores";
 import NPSPage from "@/pages/admin/NPS";
@@ -189,6 +190,7 @@ function App() {
             <Route path="master-brain" element={<MasterBrain />} />
             <Route path="api-monitor" element={<APIMonitor />} />
             <Route path="redemption-repair" element={<RedemptionRepairPage />} />
+            <Route path="bulk-bonus" element={<BulkBonusPage />} />
             <Route path="users" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><UserManagement /></ProtectedRoute>} />
             <Route path="stores" element={<StoresPage />} />
             <Route path="items" element={<ItemMaster />} />

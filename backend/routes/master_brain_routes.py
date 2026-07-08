@@ -801,6 +801,34 @@ async def redemption_repair_fix(body: RedemptionFixIn, user: dict = Depends(requ
     return res
 
 
+# ---- Bulk Bonus Points (deterministic, LLM-free — powers the ops UI) ----
+class BulkBonusIn(BaseModel):
+    attachment_id: str
+    mode: str = "flat"          # "flat" | "topup"
+    value: int = 0             # flat: points to add · topup: target balance
+    expiry_days: int = 0
+    expiry_date: str = ""      # YYYY-MM-DD (wins over expiry_days)
+    reason: str = ""
+    confirm: bool = False
+    force: bool = False
+
+
+@router.post("/bulk-bonus/run")
+async def bulk_bonus_run(body: BulkBonusIn, user: dict = Depends(require_master_admin)):
+    """Award bonus points in bulk to the mobiles in an uploaded file. Preview (confirm=false)
+    then apply (confirm=true + reason). Idempotent (blocks a duplicate batch unless force=true),
+    audit-logged, snapshotted, UNDOABLE. Upload the file first via POST /master-brain/upload."""
+    from routes.master_brain_tools import bulk_award_bonus
+    res = await bulk_award_bonus(
+        attachment_id=body.attachment_id, mode=body.mode, value=body.value,
+        expiry_days=body.expiry_days, expiry_date=body.expiry_date, reason=body.reason,
+        confirm=body.confirm, force=body.force, user=user)
+    # Genuine input errors → 400. A "blocked" duplicate returns 200 so the UI can offer force.
+    if res.get("error") and not res.get("blocked"):
+        raise HTTPException(400, res.get("message") or res["error"])
+    return res
+
+
 
 
 @router.get("/campaigns")
