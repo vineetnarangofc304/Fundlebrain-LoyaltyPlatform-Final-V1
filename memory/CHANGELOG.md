@@ -5,6 +5,29 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-09 — 📊 CRM Customer Report new columns + two new reports (Store-wise KPI & Weekly KPI)
+
+⚠️ Redeploy required. User: add **First Visit Account** + **Last Visit Account** and **Total Purchase (Bill amount with tax)** to the CRM Customer Report; add **two new reports** (Weekly KPI + Store-wise KPI) replicating the client Excel files with **all filters, sorting & graphs**. User choices: accounts show store **code + name**; total purchase = **Σ net_amount incl. GST**; **two brand-new pages**; **full matrix** as per file.
+
+### CRM Customer Report (+3 columns)
+- New denormalised customer fields: `first_visit_account` / `last_visit_account` (format `CODE · Name`, resolved from the store master) and `total_purchase` (Σ `net_amount`, post-discount incl. GST). Added to `CRM_COLUMNS` + `CRM_SORT_FIELDS` (`reports_kpi_routes.py`) and to the CRM report UI (`CRMCustomerReport.jsx`) — sortable, column-selectable, exported in CSV.
+- **Backfill:** `GET/POST /api/kpi-reports/crm-visit-accounts/{audit,backfill}` (`kpi_matrix_routes.py`) aggregates each customer's first/last bill store + Σ net_amount and stamps the fields (optional `mobile` scopes to one). **Kept fresh going forward** via a hook in `_apply_bill_credit` (posAddPoint): every settled bill updates `last_visit_account`, `$inc total_purchase`, and sets `first_visit_account` if empty.
+
+### Store-wise KPI Report (new — full matrix)
+- `GET /api/kpi-reports/store-wise-kpi` + `/export` → per-outlet **41-column** matrix: Overall Sales, Total Discount, Fresh & Return bills/value/discount, and the **New / Repeat / Mapped / Unmapped × Fresh / Return** matrix (transactions, order value, ATV) + Overall/New/Existing customer counts + Outlet **Email** (`{code}@KAZO.com`). Filters (date/zone/city/class/store), sorting, totals row.
+- UI `StoreWiseKPIReport.jsx` at `/admin/reports/store-wise-kpi` — KPI tiles, Top-10 sales bar, New-vs-Repeat chart, sortable table, column picker, CSV export.
+
+### Weekly KPI Report (new — business summary, bucketed)
+- `GET /api/kpi-reports/weekly-kpi?granularity=day|week|month` + `/export` → time-bucketed **~26-column** KPI table: total/mapped/new/repeat/unmapped orders, overall/new/repeat customers, new-vs-repeat ratio, sales/discount/mapped/unmapped sales, data-collection %, business ATV (+>10k), mapped/new/repeat ATV, mapped/repeat frequency, % unmapped/repeat orders. Memory-safe per-bucket distinct customer counts (group-by-mobile).
+- UI `WeeklyKPIReport.jsx` at `/admin/reports/weekly-kpi` — granularity selector, KPI tiles, Sales+ATV trend (ComposedChart), New-vs-Repeat orders chart, sortable table, column picker, CSV export.
+
+### Wiring & verification
+- Router registered in `server.py`; export registry (`exports_routes.py`) gained `store_wise_kpi` + `weekly_kpi`; nav items added under REPORTS (`AdminLayout.jsx`); routes in `App.js`.
+- **Verified:** testing_agent iteration_90 — backend 60/60 PASS, frontend 3/3 pages PASS (filters, sorting, export, backfill, posAddPoint hook). Note: a couple of derived Weekly KPI ratios (frequency) use the reference-file definitions and can be tuned. Pre-existing non-blocking `<option><span>` hydration warning noted (unrelated).
+
+
+---
+
 ## 2026-07-08 (b) — 🔴 Bulk Bonus Points: "No mobile numbers detected" on a valid member file (headerless / phantom-empty-rows parser bug)
 
 ⚠️ Redeploy required. User (urgent, prod): uploaded `Kazo Bulk Points-4.xlsx` (registered members) to Bulk Bonus Points → "No mobile numbers detected in that file." The mobiles were valid registered members.
