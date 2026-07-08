@@ -86,6 +86,8 @@ import UpdateMobile from "@/pages/admin/support_desk/UpdateMobile";
 import LegacyReportsHub from "@/pages/admin/legacy_reports/LegacyReportsHub";
 import ShopperBillReport from "@/pages/admin/ShopperBillReport";
 import StoreKPIReport from "@/pages/admin/StoreKPIReport";
+import StoreWiseKPIReport from "@/pages/admin/StoreWiseKPIReport";
+import WeeklyKPIReport from "@/pages/admin/WeeklyKPIReport";
 import CRMCustomerReport from "@/pages/admin/CRMCustomerReport";
 import KPITrends from "@/pages/admin/KPITrends";
 import DownloadsCenter from "@/pages/admin/DownloadsCenter";
@@ -234,6 +236,8 @@ function App() {
             <Route path="legacy-reports/occasions" element={<ProtectedRoute><LROccasions /></ProtectedRoute>} />
             <Route path="reports/shopper-bills" element={<ProtectedRoute><ShopperBillReport /></ProtectedRoute>} />
             <Route path="reports/store-kpi" element={<ProtectedRoute><StoreKPIReport /></ProtectedRoute>} />
+            <Route path="reports/store-wise-kpi" element={<ProtectedRoute><StoreWiseKPIReport /></ProtectedRoute>} />
+            <Route path="reports/weekly-kpi" element={<ProtectedRoute><WeeklyKPIReport /></ProtectedRoute>} />
             <Route path="reports/crm-customers" element={<ProtectedRoute><CRMCustomerReport /></ProtectedRoute>} />
             <Route path="reports/kpi-trends" element={<ProtectedRoute><KPITrends /></ProtectedRoute>} />
             <Route path="downloads" element={<ProtectedRoute><DownloadsCenter /></ProtectedRoute>} />

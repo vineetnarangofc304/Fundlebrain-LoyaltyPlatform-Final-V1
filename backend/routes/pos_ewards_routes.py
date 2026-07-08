@@ -1446,6 +1446,13 @@ async def _apply_bill_credit(txn: Dict[str, Any]) -> Dict[str, Any]:
         cust_set = {"last_visit_at": _now_iso(), "tier": cr.get("new_tier")}
         if cr.get("welcome_flag"):
             cust_set["welcome_bonus_given"] = True
+        # Denormalise the visit account (store CODE · NAME) so the CRM Customer Report
+        # can show/sort/filter/graph First & Last Visit Account + Total Purchase (incl. tax).
+        _code = (txn.get("store_code") or "").strip()
+        _name = (txn.get("store_name") or "").strip()
+        _acct = f"{_code} · {_name}" if _code and _name else (_code or _name)
+        if _acct:
+            cust_set["last_visit_account"] = _acct
         await customers_col.update_one(
             {"id": cust_id},
             {"$set": cust_set,
@@ -1453,9 +1460,15 @@ async def _apply_bill_credit(txn: Dict[str, Any]) -> Dict[str, Any]:
                 "points_balance": total_credit,
                 "lifetime_points_earned": total_credit,
                 "lifetime_spend": float(cr.get("lifetime_spend_delta") or 0),
+                "total_purchase": float(cr.get("lifetime_spend_delta") or 0),
                 "visit_count": 1,
              }},
         )
+        if _acct:
+            await customers_col.update_one(
+                {"id": cust_id, "$or": [{"first_visit_account": {"$exists": False}},
+                                        {"first_visit_account": None}, {"first_visit_account": ""}]},
+                {"$set": {"first_visit_account": _acct}})
 
     # Report the balance optimistically (prev snapshot + credit) — matches the pre-fix
     # behaviour and avoids an extra read on the hot POS path (balance is correctly $inc'd above).

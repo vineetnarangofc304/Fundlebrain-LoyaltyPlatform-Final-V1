@@ -312,17 +312,20 @@ CRM_COLUMNS: List[Tuple[str, str]] = [
     ("mobile", "Mobile"), ("name", "Name"), ("city", "City"), ("state", "State"),
     ("tier", "Tier"), ("card_validity", "Card Validity"),
     ("points_balance", "Point Balance"), ("lifetime_points_redeemed", "Redeem Points"),
-    ("lifetime_spend", "Total Billing"), ("visit_count", "Total Visits"),
+    ("lifetime_spend", "Total Billing"), ("total_purchase", "Total Purchase (incl. Tax)"),
+    ("visit_count", "Total Visits"),
     ("days_since_last_visit", "Days Since Last Visit"),
     ("last_visit_at", "Last Visit Date"), ("first_purchase_at", "First Visit Date"),
+    ("first_visit_account", "First Visit Account"), ("last_visit_account", "Last Visit Account"),
     ("registered_account", "Registered Account"), ("added_on", "Added On"),
     ("birthday", "DOB"), ("anniversary", "DOA"),
 ]
 
 CRM_SORT_FIELDS = {
     "mobile", "name", "city", "state", "tier", "points_balance",
-    "lifetime_points_redeemed", "lifetime_spend", "visit_count",
+    "lifetime_points_redeemed", "lifetime_spend", "total_purchase", "visit_count",
     "days_since_last_visit", "last_visit_at", "first_purchase_at", "added_on",
+    "first_visit_account", "last_visit_account",
 }
 
 

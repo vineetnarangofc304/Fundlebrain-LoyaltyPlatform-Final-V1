@@ -1,0 +1,32 @@
+{
+  "summary": "Independently validated Store-wise KPI + Weekly KPI reports, CRM Customer Report new columns, visit-account backfill and the posAddPoint POS hook. Backend: 60/60 assertions PASS (pytest single test aggregating all checks). Frontend: 3/3 pages render correctly (Store-wise KPI, Weekly KPI, CRM Customer Report) with proper KPI tiles, charts, sortable tables, Columns picker, Download CSV; nav items nav-store-wise-kpi and nav-weekly-kpi found under REPORTS.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "AdminLayout (all pages)", "issues": ["React hydration warning: <span> child of <option> - non-blocking but should be cleaned up (likely inside a <select><option> containing decorative <span>)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration90_kpi_matrix_test.py",
+    "/app/test_reports/pytest/iteration90.xml"
+  ],
+  "action_items": [
+    "(Nice-to-have) Fix hydration warning: an <option> element contains a <span> child somewhere in AdminLayout selects; browsers strip it but React logs a hydration error each page load."
+  ],
+  "critical_code_review_comments": [
+    "kpi_matrix_routes.py _finalize_matrix_row/_r2 hard-codes '—' for missing store fields — OK for display but means downstream numeric sorts on store_class are all '—' rows first; acceptable for now.",
+    "exports_routes.py _fetch_csv uses INTERNAL_BASE='http://localhost:8001/api' which is fine but bypasses ingress; if REACT_APP_BACKEND_URL/ingress differed for auth it could break — currently works.",
+    "reports_kpi_routes.py CRM_COLUMNS ordering places 'Total Purchase (incl. Tax)' right after 'Total Billing' which reads well in the CSV; frontend also renders both. Good.",
+    "posAddPoint hook increments both `lifetime_spend` and `total_purchase` by the same `lifetime_spend_delta` — semantically they diverge only if future logic ever decouples them; add a comment or share the same computed field."
+  ],
+  "updated_files": ["/app/backend/tests/iteration90_kpi_matrix_test.py (new)"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (login /crm/login) — works. POS x-api-key=ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI merchant KAZO_FUNDLE store K00055.",
+  "seed_data_creation": "Test customer with random digit-only mobile (starting 99900xxxxx) created, two bills settled via posAddPoint, verified last/first_visit_account + total_purchase, then cleaned up. Existing customer/mobile from transactions used for scoped backfill validation (customer_updated=0 because fields were already correct after main-agent's earlier backfill).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Store-wise KPI returns 15 rows with all 41 spec columns; Weekly KPI returns rows for day/week/month with 27 columns (>=26 required — spec said ~26). Sorting works for all numeric fields and period. Small-dataset exports go instant->ready via /api/exports/request. posAddPoint hook correctly stamps last_visit_account every bill, first_visit_account only on the first bill for new customers, and $inc total_purchase by net_amount, WITHOUT breaking earn (points_balance incremented). CRM Customer Report /api/kpi-reports/crm-customers exposes the 3 new fields and export CSV headers include 'Total Purchase (incl. Tax)', 'First Visit Account', 'Last Visit Account'. Frontend pages all render including charts and Columns picker.",
+  "rca of the issue": "N/A - validation-only run. Only test-side fix: initial test used uuid.hex which yields alpha chars; POS validates Indian mobile (10 digits starting 6-9), so a digit-only random mobile was required."
+}

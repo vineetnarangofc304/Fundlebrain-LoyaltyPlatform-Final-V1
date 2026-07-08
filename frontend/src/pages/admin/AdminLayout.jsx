@@ -111,6 +111,8 @@ const SECTIONS = [
       { to: "/admin/legacy-reports", icon: FileBarChart, label: "Reports (Legacy)", testid: "nav-legacy-reports" },
       { to: "/admin/reports/shopper-bills", icon: FileBarChart, label: "Shopper Bill Report", testid: "nav-shopper-bills" },
       { to: "/admin/reports/store-kpi", icon: StoreIcon, label: "Store KPI Report", testid: "nav-store-kpi" },
+      { to: "/admin/reports/store-wise-kpi", icon: StoreIcon, label: "Store-wise KPI", testid: "nav-store-wise-kpi" },
+      { to: "/admin/reports/weekly-kpi", icon: TrendingUp, label: "Weekly KPI", testid: "nav-weekly-kpi" },
       { to: "/admin/reports/crm-customers", icon: UserRound, label: "CRM Customer Report", testid: "nav-crm-report" },
       { to: "/admin/reports/kpi-trends", icon: TrendingUp, label: "KPI Trends", testid: "nav-kpi-trends" },
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },
