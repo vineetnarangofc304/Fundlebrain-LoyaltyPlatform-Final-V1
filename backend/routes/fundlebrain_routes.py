@@ -362,13 +362,15 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
         {"customer_mobile": mobile},
         {"_id": 0, "id": 1, "bill_number": 1, "bill_date": 1, "store_id": 1, "store_name": 1,
          "city": 1, "net_amount": 1, "gross_amount": 1, "discount_amount": 1, "tax_amount": 1,
-         "items": 1, "points_earned": 1, "points_redeemed": 1, "bonus_points": 1, "return_marker": 1}
+         "items": 1, "points_earned": 1, "points_redeemed": 1, "bonus_points": 1,
+         "return_marker": 1, "is_return": 1}
     ).sort("bill_date", -1).limit(25).to_list(25)
 
     # Points ledger (last 30)
     ledger = await points_ledger_col.find(
         {"customer_mobile": mobile},
-        {"_id": 0, "type": 1, "points": 1, "reason": 1, "bill_date": 1, "created_at": 1, "bill_number": 1}
+        {"_id": 0, "type": 1, "points": 1, "reason": 1, "note": 1, "reference_type": 1,
+         "ledger_kind": 1, "bill_date": 1, "created_at": 1, "bill_number": 1}
     ).sort("bill_date", -1).limit(30).to_list(30)
 
     # NPS history
