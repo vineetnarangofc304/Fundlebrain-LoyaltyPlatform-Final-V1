@@ -5,6 +5,27 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-10 — 🔴🔴 Points Integrity Center: identify & reverse 5 classes of points errors + prevent recurrence
+
+⚠️ Redeploy required, THEN run the reversals on production via the new page. User reported (production) 5 distinct points-integrity problems and asked for buttons to identify + reverse each. Built a dedicated ops page + endpoints + a new tool + 3 code fixes. All reversals are deterministic, audited and **undoable**.
+
+### Code fixes (stop the bleeding — prevent NEW bad data)
+- **Tier-upgrade bonus on legacy→KAZO migration** (`pos_ewards_routes.py` `_apply_bill_credit`): the upgrade bonus was `rank[new] > rank.get(old, 0)`, so a legacy old tier (not in KAZO `tier_rules`) defaulted to rank 0 and any migrated customer's first post-go-live bill looked like an "upgrade" → wrong 500-pt bonus. Now awarded **only when BOTH old & new tiers are recognized KAZO slabs AND it's a real slab-up** — migrations get no bonus.
+- **Redemption-repair double-backfill** (`master_brain_tools.py` `_scan_missing_live_redemptions` AND `_tool_audit_missing_redemption_ledger`): the OTP redeem is often keyed to a different bill number than the settlement bill, so exact-bill matching missed it and the repair backfilled a DUPLICATE (root cause of the negative balances). Added a **second-pass multiset match by (customer, |amount|)** — a bill is only "missing" if the customer has fewer non-voided redeem rows for that amount than bills claiming it. So the repair can never double-deduct again, and the audit count is accurate.
+
+### New tool + endpoints
+- New audited/undoable tool `_tool_reverse_tier_upgrade_bonus` (also in Master Brain chat) — voids `ledger_kind=tier_upgrade` bonus rows in a date window (optionally migrated-only / one mobile) and deducts the points.
+- New `routes/points_integrity_routes.py`: `/points-integrity/tier-upgrade-bonus/{preview,apply}`, `/historic-earn/{preview,apply}` (normalize historic auto-earn), `/negative-balances/{preview,apply}`, `/repair-runs` (recent audited runs) + `/undo/{audit_id}`.
+
+### New UI — Points Integrity Center (`/admin/points-integrity`, master-only)
+Six Scan→Reverse panels: **A** duplicate bonus credits (reuses `/master-brain/reverse-duplicate-credits`), **B** wrong tier-upgrade migration bonus, **C** auto-calculated historic earn (balance-only rule), **D** correct negative balances, **Repair runs** (one-click UNDO — e.g. reverse the bad redemption-repair backfill), **E** re-tier legacy customers (embeds existing `RetierSection`). Nav item added.
+
+### Verification
+- testing_agent iteration_91 — frontend 6/6 panels PASS; backend: Code Fix 1 verified (legacy customer gets 0 tier_upgrade rows; genuine kazo silver→gold still gets the bonus), Code Fix 2 verified on /fix; Issue-B preview→apply→undo verified (balance 1500→1000→1500, row voided then un-voided). Post-run: hardened the /audit path too (verified: a redemption covered by a different bill number is no longer over-reported).
+
+
+---
+
 ## 2026-07-09 — 📊 CRM Customer Report new columns + two new reports (Store-wise KPI & Weekly KPI)
 
 ⚠️ Redeploy required. User: add **First Visit Account** + **Last Visit Account** and **Total Purchase (Bill amount with tax)** to the CRM Customer Report; add **two new reports** (Weekly KPI + Store-wise KPI) replicating the client Excel files with **all filters, sorting & graphs**. User choices: accounts show store **code + name**; total purchase = **Σ net_amount incl. GST**; **two brand-new pages**; **full matrix** as per file.

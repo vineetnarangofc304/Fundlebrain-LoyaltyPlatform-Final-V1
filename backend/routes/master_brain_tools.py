@@ -2042,8 +2042,39 @@ async def _tool_audit_missing_redemption_ledger(sample_limit: int = 15, user=Non
                 "cutoff_date": cutoff,
                 "message": ("Couldn't cross-check redeem ledger rows within the time limit "
                             "right now. Please retry in a few seconds.")}
-    missing = [b for b in bills
-               if b.get("bill_number") not in covered_bills and b.get("id") not in covered_srcs]
+    unmatched = [b for b in bills
+                 if b.get("bill_number") not in covered_bills and b.get("id") not in covered_srcs]
+    # SECOND-PASS SAFETY (mirrors _scan_missing_live_redemptions): the OTP redeem is often
+    # keyed to a DIFFERENT bill number than the settlement bill, so an exact-bill match misses
+    # it. Also match by (customer, |amount|): a bill is only "missing" if the customer has
+    # FEWER non-voided redeem rows for that amount than bills claiming it — so the audit count
+    # matches what /fix would actually backfill (no over-reporting).
+    missing = unmatched
+    if unmatched:
+        from collections import Counter, defaultdict
+        mobiles = list({b.get("customer_mobile") for b in unmatched if b.get("customer_mobile")})
+        have: Dict[str, Counter] = defaultdict(Counter)
+        try:
+            for i in range(0, len(mobiles), 2000):
+                batch = mobiles[i:i + 2000]
+                async for lr in points_ledger_col.find(
+                        {"type": "redeem", "voided": {"$ne": True}, "customer_mobile": {"$in": batch}},
+                        {"_id": 0, "customer_mobile": 1, "points": 1}).max_time_ms(15000):
+                    m = lr.get("customer_mobile")
+                    amt = abs(int(lr.get("points") or 0))
+                    if m and amt:
+                        have[m][amt] += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"audit_missing_redemption_ledger pass-3 incomplete: {e}")
+        missing = []
+        used: Dict[str, Counter] = defaultdict(Counter)
+        for b in unmatched:
+            m = b.get("customer_mobile")
+            amt = abs(int(b.get("points_redeemed") or 0))
+            if m and amt and used[m][amt] < have.get(m, Counter()).get(amt, 0):
+                used[m][amt] += 1  # already ledgered for this customer+amount
+                continue
+            missing.append(b)
 
     def _pts(rows):
         return sum(int(r.get("points_redeemed") or 0) for r in rows)
