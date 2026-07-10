@@ -311,11 +311,16 @@ export default function CustomerDetail() {
               <thead><tr><th>Bill #</th><th>Date</th><th className="text-right">Net ₹</th><th className="text-right">Pts +</th><th>Payment</th><th>Coupon</th></tr></thead>
               <tbody>
                 {data.recent_transactions.map((t) => (
-                  <tr key={t.id}>
-                    <td className="font-mono text-xs">{t.bill_number}</td>
+                  <tr key={t.id} data-testid={`cust-bill-${t.bill_number}`}>
+                    <td className="font-mono text-xs">
+                      {t.bill_number}
+                      {t.is_return && <span className="ml-2 pill pill-rose text-[10px]">RETURN</span>}
+                    </td>
                     <td className="text-xs">{fmtDate(t.bill_date)}</td>
                     <td className="text-right font-mono">{fmtMoney2(t.net_amount)}</td>
-                    <td className="text-right font-mono text-emerald-700">+{t.points_earned}</td>
+                    <td className={`text-right font-mono ${(t.points_earned || 0) < 0 ? "text-rose-700" : "text-emerald-700"}`}>
+                      {(t.points_earned || 0) >= 0 ? "+" : ""}{t.points_earned || 0}
+                    </td>
                     <td><span className="pill pill-neutral">{t.payment_mode}</span></td>
                     <td className="text-xs">{t.coupon_code || "—"}</td>
                   </tr>

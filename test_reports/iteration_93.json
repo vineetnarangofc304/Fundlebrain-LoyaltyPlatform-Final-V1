@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration 93: Regression tests for POS return ledger attribution fix. Verified purchase earn + return reversal write ledger rows with customer_mobile, RET- bill_number, ledger_kind='return'. Core regression (ledger query by customer_mobile ONLY missing return row) is FIXED. All 6 pytest cases pass. Cleanup executed (test customer/mobile/transactions/ledger deleted).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/dashboard/customer-by-mobile/{mobile}",
+        "issue": "recent_transactions projection for the RET- bill omits is_return:true flag (uses return_marker:'Return' instead, and points_earned is negative). The customer-360-by-id endpoint returns is_return:true. Frontend depending on is_return flag might not render the RETURN pill consistently across the two endpoints."
+      },
+      {
+        "endpoint": "GET /api/dashboard/customer-by-mobile/{mobile}",
+        "issue": "points_ledger projection omits ledger_kind field (returns type='adjust' only). The DB row correctly has ledger_kind='return' and customer-360-by-id endpoint returns it. Minor inconsistency between the two ledger projections."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration93_return_ledger_regression_test.py",
+    "/app/test_reports/pytest/iteration_93.xml"
+  ],
+  "action_items": [
+    "Consider normalizing the recent_transactions projection so both customer-360-by-id and customer-by-mobile expose is_return:true for RET- bills (frontend RETURN pill uniformity).",
+    "Consider including ledger_kind in customer-by-mobile points_ledger projection for parity with customer-360-by-id."
+  ],
+  "critical_code_review_comments": [
+    "Router prefix mismatch in review_request: the customer-by-mobile endpoint is mounted at /api/dashboard/customer-by-mobile/{mobile} (fundlebrain router uses prefix='/dashboard'), NOT /api/fundlebrain/... — verified in server.py line 44/104 + fundlebrain_routes.py line 23. The docstring/comment in fundlebrain_routes.py should be updated for clarity."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration93_return_ledger_regression_test.py (new pytest regression suite)"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "not tested"},
+  "test_credentials": "CRM: superadmin@fundle.io / Fundle@2026 ; POS x-api-key: ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI ; merchant_id KAZO_FUNDLE ; customer_key K00055",
+  "seed_data_creation": "Test mobile 9812345670 + bill QATEST-<timestamp>; created and cleaned up automatically at end of pytest run (module-scoped autouse cleanup fixture).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Fix is verified. Return ledger row now has customer_mobile, bill_number='RET-<orig>', ledger_kind='return', negative points. The customer-360 by-id ($or) and by-mobile (mobile-only) endpoints both surface the return row, timeline, and recent_transactions. Two minor projection inconsistencies between the two endpoints are noted (ledger_kind + is_return flag). Original prod customer 9899533604 will need a backfill script by main agent to repair the historical return ledger row that was written without customer_mobile before the fix — this test suite does not attempt that backfill.",
+  "rca of the issue": "RCA: return_order() previously inserted the reversal points_ledger row with only customer_id and no customer_mobile/bill_number/ledger_kind. Any read that filtered points_ledger by customer_mobile alone (e.g. /api/dashboard/customer-by-mobile) therefore returned 0 return rows, making the RETURN invisible on Customer 360 Earn·burn timeline and yielding a stale/incorrect points_balance display. Fix (validated): return_order at ~line 2199-2245 now writes return_bill_number ('RET-<orig>-<short>') once and inserts points_ledger with {customer_mobile, customer_id, bill_number:return_bill_number, ledger_kind:'return', original_bill_number, points:<negative>}. Mitigation for historic prod row (9899533604): main agent should run a one-off backfill to set customer_mobile/bill_number/ledger_kind on the orphaned return ledger row(s)."
+}

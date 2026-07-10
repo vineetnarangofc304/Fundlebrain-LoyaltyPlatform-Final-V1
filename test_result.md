@@ -101,3 +101,83 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  User (production) reported for customer 9899533604 (omkar patil): the "Earn · burn timeline"
+  (points ledger) shows "No ledger entries", the customer should have 68 points but Points
+  Balance shows 0, and a RETURN bill happened but is not showing on the profile.
+
+backend:
+  - task: "POS returnOrder writes a fully-attributed reversal ledger row (customer_mobile + bill_number + ledger_kind)"
+    implemented: true
+    working: "NA"
+    file: "routes/pos_ewards_routes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE (reproduced in preview): the /api/pos/returnOrder reversal ledger row was
+            inserted with ONLY customer_id — no customer_mobile, no bill_number, no ledger_kind.
+            This violates the iter-106 rule "every ledger write must carry customer_mobile". Effect:
+            the return (burn) is INVISIBLE on every mobile-keyed read — the /customer-by-mobile
+            profile endpoint and all mobile-keyed reports/tools query points_ledger by
+            customer_mobile ONLY. FIX: capture the RET- bill number once, attach it + customer_mobile
+            + ledger_kind:"return" + original_bill_number to the reversal ledger row. Verified via
+            tests/repro_return_ledger.py: after a purchase(+earn)+return, "LEDGER by customer_mobile
+            ONLY" went 2 -> 3 (the return row is now visible by mobile), balance math correct
+            (2100 earn -> 1300 after -800 return).
+
+frontend:
+  - task: "Customer 360 'Last 10 bills' renders return rows correctly (sign + RETURN pill)"
+    implemented: true
+    working: "NA"
+    file: "pages/admin/CustomerDetail.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            The Pts+ column hardcoded "+{points_earned}" which rendered a return as "+-68". Fixed to
+            show the correct sign (rose colour for negative) and a "RETURN" pill next to the bill#.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.1"
+  test_sequence: 93
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "POS returnOrder writes a fully-attributed reversal ledger row (customer_mobile + bill_number + ledger_kind)"
+    - "Customer 360 'Last 10 bills' renders return rows correctly (sign + RETURN pill)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Please verify the purchase -> return -> profile flow end-to-end against the live preview POS
+        endpoints. Steps:
+        1) POST {BASE}/api/pos/posAddPoint with header x-api-key: ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI,
+           body merchant_id "KAZO_FUNDLE", customer_key "K00055", a NEW test mobile (e.g. 9812345670),
+           transaction {number:"QATEST-<unique>", amount:2000, net_amount:2000, taxes:[]}. Expect 200
+           with points_earned > 0 and new_balance credited.
+        2) POST {BASE}/api/pos/returnOrder same headers, body merchant_id/customer_key, mobile (same),
+           transaction {number:"QATEST-<same>", return_amount:-800, return_net_amount:-800,
+           return_loyalty_gross_amount:-800}. Expect 200.
+        3) GET {BASE}/api/dashboard/customer-360/<customer_id> (login superadmin@fundle.io / Fundle@2026
+           to get a token). Verify: points_ledger contains BOTH an "earn" row and an "adjust"/return row
+           (the return row MUST have customer_mobile set and a bill_number starting "RET-");
+           recent_transactions includes the RET- bill with is_return true; balance reflects earn minus
+           the reversed points.
+        4) ALSO GET {BASE}/api/fundlebrain/customer-by-mobile/<mobile> (this endpoint queries ledger by
+           customer_mobile ONLY) and confirm the return/adjust row now appears there too (this is the
+           core regression — it was invisible before the fix).
+        Clean up the test customer/mobile afterward if possible. This is BACKEND-focused; a light
+        frontend smoke of the Customer 360 page (superadmin) to confirm no render errors is a plus.

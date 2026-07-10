@@ -2197,13 +2197,14 @@ async def return_order(payload: Dict[str, Any], request: Request,
     )
 
     return_id = uuid.uuid4().hex
+    return_bill_number = f"RET-{orig_bill or 'NOBILL'}-{uuid.uuid4().hex[:6]}"
     await transactions_col.insert_one({
         "id": return_id,
         "customer_id": customer_id,
         "customer_mobile": mobile,
         "store_id": (original or {}).get("store_id"),
         "store_name": (original or {}).get("store_name"),
-        "bill_number": f"RET-{orig_bill or 'NOBILL'}-{uuid.uuid4().hex[:6]}",
+        "bill_number": return_bill_number,
         "original_bill_number": orig_bill or None,
         "bill_date": _now_iso(),
         "gross_amount": return_gross,
@@ -2216,13 +2217,21 @@ async def return_order(payload: Dict[str, Any], request: Request,
         "source": "pos_ewards",
         "created_at": _now_iso(),
     })
+    # Reversal ledger row — MUST carry customer_mobile + bill_number so the burn shows on the
+    # mobile-keyed Customer 360 "Earn · burn timeline" and every mobile-keyed report/tool
+    # (redeem/return rows were historically written with only customer_id → invisible; see
+    # the iter-106 ledger-visibility fix). `ledger_kind` mirrors the earn/redeem rows.
     await points_ledger_col.insert_one({
         "id": uuid.uuid4().hex,
         "customer_id": customer_id,
+        "customer_mobile": mobile,
         "type": "adjust",
+        "ledger_kind": "return",
         "points": -points_to_reverse,
         "reference_type": "return",
         "reference_id": return_id,
+        "bill_number": return_bill_number,
+        "original_bill_number": orig_bill or None,
         "note": f"Return of bill {orig_bill}" if orig_bill else "Return (no original bill ref)",
         "created_at": _now_iso(),
     })
