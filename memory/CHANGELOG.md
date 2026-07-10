@@ -5,6 +5,17 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-07-11 — 🔴 Three P0 fixes: Store-KPI New/Repeat=0, non-OTP redeem double-deduct, tax-inclusive earning
+
+⚠️ Redeploy required. Verified: testing_agent iteration_92 = 29/29 backend PASS (+ `tests/iteration92_pos_p0_fixes_test.py`).
+
+- **FIX 1 — Store-wise / Weekly KPI "New/Repeat" & "New/Existing customers" read 0.** Root cause: live POS bills via `posAddPoint` never stored the `new_or_existing` field (only historic CSV uploads did), so the KPI aggregations (`_IS_NEW`/`_IS_EXISTING`, which `$toLower`-match "new"/"existing") counted 0 for every live bill. Fix: (a) `posAddPoint` now stamps `new_or_existing` on the transaction — a customer's FIRST purchase bill = "new" (`is_new_customer or prev_visits==0`), every later bill = "existing"; (b) new audited backfill `GET /api/kpi-reports/new-or-existing/audit` + `POST /api/kpi-reports/new-or-existing/backfill` (`kpi_matrix_routes._compute_new_or_existing`) that sets ALL mapped bills to "existing" then flips each customer's earliest non-return bill to "new" (also normalises any legacy CSV casing to the exact lowercase the KPI matches; optional `mobile` scope). (c) UI: `StoreWiseKPIReport.jsx` shows an amber banner + "Fix New/Repeat" button when `overall_customers>0` but new+existing==0, one-click running the backfill.
+- **FIX 2 — Non-OTP redemption double-deduction / negative balances (`posRedeemPointRequest`).** The non-OTP branch deducted points with NO idempotency guard → a POS network retry of the same bill deducted twice. Fix: an atomic upsert-CLAIM on the redeem ledger keyed by `(type=redeem, reference_type=transaction, reference_id=bill_number)` — only the request that INSERTS the row (`res.upserted_id` set) deducts; any retry finds the row and returns `already_redeemed:true` WITHOUT deducting again. Mirrors the per-bill idempotency the OTP flow already had. (Bill-less payloads keep the plain single deduction — KAZO POS always sends a bill number.)
+- **FIX 3 — Earning must be on the PRE-TAX bill (before GST), for BOTH POS payload styles (user: "a and b both").** New `_earn_base(txn, amount, net, tax_gst, cfg)`: (1) an explicit pre-tax field (`net_amount_before_tax`/`loyalty_gross_amount`) wins; (2) loyalty-config `earn_amount_includes_tax` FORCES it — `inclusive`→strip GST, `exclusive`→use amount as-is; (3) `auto` (default)→auto-detect: if the POS also sent a distinct pre-tax `net_amount` such that net+GST≈amount, the amount is tax-inclusive→earn on net; else treat amount as pre-tax. UI: a segmented Auto/Pre-tax/Tax-inclusive selector added to Loyalty Rules → EARN ENGINE.
+- **Verified:** unit self-test of `_earn_base` (all 4 modes correct); testing_agent 29/29 — new/existing stamping + backfill + KPI totals non-zero, non-OTP retry returns already_redeemed with no 2nd deduction, earn base = 5000 (not 5900) across auto/inclusive/exclusive.
+
+---
+
 ## 2026-07-10 — 🔴🔴 Points Integrity Center: identify & reverse 5 classes of points errors + prevent recurrence
 
 ⚠️ Redeploy required, THEN run the reversals on production via the new page. User reported (production) 5 distinct points-integrity problems and asked for buttons to identify + reverse each. Built a dedicated ops page + endpoints + a new tool + 3 code fixes. All reversals are deterministic, audited and **undoable**.
