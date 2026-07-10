@@ -496,3 +496,81 @@ async def crm_visit_accounts_backfill(body: VisitBackfillIn, user=Depends(get_cu
     updated, scanned = await _compute_visit_accounts((body.mobile or "").strip() or None)
     return {"ok": True, "customers_updated": updated, "mobiles_scanned": scanned,
             "message": f"Updated visit accounts + total purchase for {updated} customer(s)."}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# New / Existing denormalisation on transactions (drives the Store-wise / Weekly
+# KPI New-vs-Repeat matrix). Definition: a customer's EARLIEST purchase bill = "new",
+# every later bill = "existing". Live posAddPoint stamps this per bill going forward;
+# this backfill retro-fills it on all existing mapped transactions (and normalises any
+# legacy CSV casing to the exact lowercase the KPI aggregations match).
+# ══════════════════════════════════════════════════════════════════════════════
+async def _compute_new_or_existing(mobile_filter: Optional[str]) -> Tuple[int, int, int]:
+    """Set new_or_existing on every MAPPED transaction: default all to "existing", then flip
+    each customer's earliest non-return bill to "new". Returns (new_count, existing_count,
+    mobiles_scanned)."""
+    match: Dict[str, Any] = {"customer_mobile": {"$nin": [None, ""]}}
+    if mobile_filter:
+        match["customer_mobile"] = mobile_filter
+
+    # 1) default every mapped bill to "existing"
+    with pymongo.timeout(1800):
+        existing_res = await transactions_col.update_many(
+            match, {"$set": {"new_or_existing": "existing"}})
+
+    # 2) find each customer's EARLIEST non-return bill id (collect first, then batch-update
+    #    so we never mutate the collection while its aggregation cursor is open)
+    pipe = [
+        {"$match": {**match, "is_return": {"$ne": True}}},
+        {"$sort": {"bill_date": 1}},
+        {"$group": {"_id": "$customer_mobile", "first_id": {"$first": "$id"}}},
+    ]
+    first_ids: List[str] = []
+    with pymongo.timeout(1800):
+        async for g in transactions_col.aggregate(pipe, allowDiskUse=True):
+            fid = g.get("first_id")
+            if fid:
+                first_ids.append(fid)
+
+    new_count = 0
+    for i in range(0, len(first_ids), 5000):
+        with pymongo.timeout(300):
+            res = await transactions_col.update_many(
+                {"id": {"$in": first_ids[i:i + 5000]}}, {"$set": {"new_or_existing": "new"}})
+            new_count += (res.modified_count or 0)
+
+    existing_count = max((existing_res.modified_count or 0) - new_count, 0)
+    return new_count, existing_count, len(first_ids)
+
+
+class NewExistingBackfillIn(BaseModel):
+    mobile: str = ""
+
+
+@router.get("/new-or-existing/audit")
+async def new_or_existing_audit(user=Depends(get_current_user)):
+    """Breakdown of new_or_existing across mapped transactions (drives the KPI New/Repeat
+    counts). `missing` are mapped bills with no usable value — these read as 0 New/Repeat."""
+    pipe = [
+        {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
+        {"$group": {"_id": {"$toLower": {"$ifNull": ["$new_or_existing", ""]}}, "count": {"$sum": 1}}},
+    ]
+    with pymongo.timeout(300):
+        rows = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(50)
+    by = {(r.get("_id") or ""): int(r.get("count") or 0) for r in rows}
+    total_mapped = sum(by.values())
+    new_cnt = by.get("new", 0)
+    existing_cnt = by.get("existing", 0)
+    missing = total_mapped - new_cnt - existing_cnt
+    return {"total_mapped": total_mapped, "new": new_cnt, "existing": existing_cnt,
+            "missing": missing, "breakdown": by}
+
+
+@router.post("/new-or-existing/backfill")
+async def new_or_existing_backfill(body: NewExistingBackfillIn, user=Depends(get_current_user)):
+    """Retro-fill new_or_existing on all mapped transactions (earliest bill per customer =
+    "new", rest = "existing"). Optional `mobile` scopes to one customer. Fixes the Store-wise
+    / Weekly KPI New-vs-Repeat metrics reading zero for live bills / mismatched legacy casing."""
+    new_c, exist_c, scanned = await _compute_new_or_existing((body.mobile or "").strip() or None)
+    return {"ok": True, "new": new_c, "existing": exist_c, "mobiles_scanned": scanned,
+            "message": f"Stamped {new_c} New + {exist_c} Existing bill(s) across {scanned} customer(s)."}

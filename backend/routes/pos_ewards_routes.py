@@ -332,6 +332,36 @@ def _gst_from_taxes(taxes: Any) -> float:
     return total
 
 
+def _earn_base(txn: Dict[str, Any], amount: float, net: float, tax_gst: float,
+               cfg: Dict[str, Any]) -> float:
+    """Resolve the PRE-TAX bill value points are earned on (KAZO rule: earn on the Total
+    Bill Amount BEFORE GST). POS payloads vary — some send `amount` PRE-tax (GST separate in
+    taxes[]), some send `amount` TAX-INCLUSIVE. This handles BOTH so tax is never counted:
+
+      1. An explicit pre-tax field (`net_amount_before_tax` / `loyalty_gross_amount`) wins.
+      2. Loyalty config `earn_amount_includes_tax` can FORCE it:
+         "inclusive"/true → strip GST from the amount; "exclusive"/false → use as-is (pre-tax).
+      3. "auto" (default) → auto-detect: if the POS also sent a distinct pre-tax `net_amount`
+         such that net + GST ≈ amount, the amount is tax-inclusive → earn on that net; else
+         treat the amount as pre-tax (the KAZO canonical)."""
+    explicit = _parse_float(txn.get("net_amount_before_tax"))
+    if explicit > 0:
+        return round(explicit, 2)
+    base = amount or _parse_float(txn.get("loyalty_gross_amount")) or net
+    if base <= 0:
+        return base
+    mode = str(cfg.get("earn_amount_includes_tax", "auto")).strip().lower()
+    if mode in ("inclusive", "incl", "true", "1", "yes"):
+        return round(max(base - tax_gst, 0.0), 2)
+    if mode in ("exclusive", "excl", "false", "0", "no"):
+        return base
+    # auto: a distinct pre-tax net that + GST reconstructs the amount ⇒ amount is tax-inclusive
+    net_val = _parse_float(txn.get("net_amount"))
+    if tax_gst > 0 and 0 < net_val < base and abs(base - (net_val + tax_gst)) <= max(1.0, base * 0.01):
+        return round(net_val, 2)
+    return base
+
+
 def _redemption_discount(payload: Dict[str, Any]) -> float:
     """Total discount on a redemption payload. KAZO RULE: points redemption is NOT allowed
     on a discounted bill — block it whenever ANY discount is present. Sums the bill-level
@@ -1077,25 +1107,68 @@ async def pos_redeem_point_request(payload: Dict[str, Any], request: Request,
                        api_key_label=cred.get("label"))
         return resp
     else:
-        # Non-OTP: deduct immediately
-        await customers_col.update_one(
-            {"id": cust["id"]},
-            {"$inc": {"points_balance": -points_requested,
-                       "lifetime_points_redeemed": points_requested}},
-        )
-        await points_ledger_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "customer_id": cust["id"],
-            "customer_mobile": mobile,
-            "type": "redeem",
-            "kind": "redeem",
-            "points": -points_requested,
-            "reference_type": "transaction",
-            "reference_id": bill_number,
-            "bill_number": bill_number,
-            "note": "POS non-OTP redemption",
-            "created_at": _now_iso(),
-        })
+        # Non-OTP: deduct immediately — but GUARD against double deduction on POS network
+        # retries. Atomically CLAIM the per-bill redeem ledger row via an upsert keyed on the
+        # bill number: only the request that INSERTS the row (upserted_id set) deducts points;
+        # any retry finds the row already present and returns an idempotent success WITHOUT
+        # deducting again. Mirrors the per-bill idempotency of the OTP flow and prevents the
+        # negative-balance / double-deduction incidents. (A bill-less payload can't be de-duped
+        # deterministically, so it falls back to the plain single deduction.)
+        effective_bill = (bill_number or "").strip()
+        if effective_bill:
+            res = await points_ledger_col.update_one(
+                {"type": "redeem", "reference_type": "transaction", "reference_id": effective_bill},
+                {"$setOnInsert": {
+                    "id": uuid.uuid4().hex,
+                    "customer_id": cust["id"],
+                    "customer_mobile": mobile,
+                    "type": "redeem",
+                    "kind": "redeem",
+                    "points": -points_requested,
+                    "reference_type": "transaction",
+                    "reference_id": effective_bill,
+                    "bill_number": effective_bill,
+                    "note": "POS non-OTP redemption",
+                    "created_at": _now_iso(),
+                }},
+                upsert=True,
+            )
+            if res.upserted_id is None:
+                # A redeem row for this bill already exists → idempotent retry, do NOT deduct.
+                resp = _ok({"points_value": str(points_requested),
+                            "points_monetary_value": str(points_value),
+                            "authentication": False,
+                            "already_redeemed": True})
+                await _log_api(endpoint=endpoint, method="POST", status=200,
+                               ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
+                               bill_number=bill_number, error="idempotent (bill already redeemed, non-OTP)",
+                               payload=payload, response=resp, api_key_label=cred.get("label"))
+                return resp
+            # We claimed the redemption — deduct the balance exactly once.
+            await customers_col.update_one(
+                {"id": cust["id"]},
+                {"$inc": {"points_balance": -points_requested,
+                           "lifetime_points_redeemed": points_requested}},
+            )
+        else:
+            await customers_col.update_one(
+                {"id": cust["id"]},
+                {"$inc": {"points_balance": -points_requested,
+                           "lifetime_points_redeemed": points_requested}},
+            )
+            await points_ledger_col.insert_one({
+                "id": uuid.uuid4().hex,
+                "customer_id": cust["id"],
+                "customer_mobile": mobile,
+                "type": "redeem",
+                "kind": "redeem",
+                "points": -points_requested,
+                "reference_type": "transaction",
+                "reference_id": bill_number,
+                "bill_number": bill_number,
+                "note": "POS non-OTP redemption",
+                "created_at": _now_iso(),
+            })
         body = {
             "points_value": str(points_requested),
             "points_monetary_value": str(points_value),
@@ -1550,6 +1623,9 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     store_name = store.get("name") if store else None
     store_code = store.get("code") if store else None
 
+    # Loyalty config loaded up-front so the earn base (pre-tax vs tax-inclusive) resolves here.
+    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
+
     # Amounts — KAZO canonical: `amount` is the PRE-TAX loyalty base; GST comes from the
     # taxes[] array. Bill Amount (with tax) = amount + GST. Computed up-front so a
     # NON-LOYALTY "Lost Customer" bill (invalid/no mobile) is still recorded with its
@@ -1564,9 +1640,10 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     discount = _parse_float(txn.get("discount"))
     # loyalty_flag: earn UNLESS the POS explicitly disables it.
     loyalty_flag = str(txn.get("loyalty_flag", "1")).strip().lower() not in {"0", "false", "no", "n", "off"}
-    # Points are earned on `amount` (pre-tax). Fall back to loyalty_gross_amount/net for
-    # legacy payloads that don't send `amount`.
-    loyalty_base = amount or _parse_float(txn.get("loyalty_gross_amount")) or net
+    # Points are earned on the PRE-TAX bill value. `_earn_base` handles BOTH POS payload
+    # styles (amount pre-tax OR amount tax-inclusive) and honours the loyalty-config
+    # `earn_amount_includes_tax` override, so GST is never counted toward earning.
+    loyalty_base = _earn_base(txn, amount, net, tax_gst, cfg)
     order_time = _normalize_order_time(txn.get("order_time"))
     items = _map_pos_items(txn.get("items") or [])
     payment_mode = "unknown"
@@ -1625,8 +1702,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
                        payload=payload, response=resp, api_key_label=cred.get("label"))
         return resp
 
-    # Upsert customer (valid Indian mobile only)
-    cfg = await loyalty_config_col.find_one({"id": "default"}, {"_id": 0}) or {}
+    # Upsert customer (valid Indian mobile only) — cfg already loaded above.
     existing = await customers_col.find_one({"mobile": mobile}, {"_id": 0})
     customer_doc_update = {
         "name": (c.get("name") or "").strip() or (existing.get("name") if existing else ""),
@@ -1733,6 +1809,13 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     # customer gets a DOUBLE point reduction (once at redeem, once on the bill).
     prev_balance = int(cust.get("points_balance") or 0)
 
+    # New vs Existing — denormalised on the bill for the Store-wise / Weekly KPI reports.
+    # A customer's FIRST purchase bill is "new"; every later bill is "existing" (matches the
+    # backfill definition of earliest bill per customer = New). prev_visits reflects the
+    # customer's state BEFORE this bill (visit_count is $inc'd in _apply_bill_credit).
+    prev_visits = int((existing or {}).get("visit_count") or 0)
+    new_or_existing = "new" if (is_new_customer or prev_visits == 0) else "existing"
+
     txn_doc = {
         "id": txn_id,
         "customer_id": cust["id"],
@@ -1767,6 +1850,7 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         "loyalty_flag": loyalty_flag,
         "earn_pause_reason": earn_pause_reason or None,
         "is_return": False,
+        "new_or_existing": new_or_existing,
         "source": "pos_ewards",
         "created_at": _now_iso(),
         # --- Partial-commit safety (see _apply_bill_credit) ---

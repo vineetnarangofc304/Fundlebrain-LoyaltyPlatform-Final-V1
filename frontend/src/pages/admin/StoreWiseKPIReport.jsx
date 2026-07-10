@@ -9,7 +9,8 @@ import { requestExport } from "@/lib/exportClient";
 import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "./_shared";
 import { ColumnPicker, ReportTable, useColumns } from "./reportkit";
 import { fmtINR, fmtMoney2, fmtNum } from "@/lib/format";
-import { Download, Search, RefreshCw } from "lucide-react";
+import { Download, Search, RefreshCw, Wrench } from "lucide-react";
+import { toast } from "sonner";
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Cell, Legend } from "recharts";
 
 const monthStart = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10); };
@@ -78,6 +79,7 @@ export default function StoreWiseKPIReport() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [fixing, setFixing] = useState(false);
 
   const { visible, toggle, reset } = useColumns(COLS, "kazo-storewise-cols");
   const set = (k, v) => setParams((p) => ({ ...p, [k]: v }));
@@ -105,6 +107,18 @@ export default function StoreWiseKPIReport() {
   useEffect(() => { fetchData(); /* eslint-disable-next-line */ }, [params.sort_by, params.sort_dir]);
 
   const onSort = (sf) => setParams((p) => ({ ...p, sort_by: sf, sort_dir: p.sort_by === sf && p.sort_dir === "desc" ? "asc" : "desc" }));
+
+  const runNewExistingFix = async () => {
+    if (!window.confirm("Recalculate New vs Existing on all mapped transactions?\n\nEach customer's earliest bill becomes New, the rest Existing. This fixes the New/Repeat metrics reading zero. It is safe and can be re-run anytime.")) return;
+    setFixing(true);
+    try {
+      const r = await api.post("/kpi-reports/new-or-existing/backfill", {});
+      toast.success(r.data?.message || "New/Existing data fixed");
+      await fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to fix New/Existing data");
+    } finally { setFixing(false); }
+  };
 
   const exportCsv = async () => {
     setExporting(true);
@@ -135,6 +149,9 @@ export default function StoreWiseKPIReport() {
         actions={
           <div className="flex items-center gap-2">
             <ColumnPicker columns={COLS} visible={visible} toggle={toggle} reset={reset} testid="swkpi-cols" />
+            <button onClick={runNewExistingFix} disabled={fixing} className="k-btn k-btn-outline" data-testid="swkpi-fix-newrepeat" title="Recalculate New vs Existing on all mapped bills">
+              <Wrench className={`w-3.5 h-3.5 ${fixing ? "animate-pulse" : ""}`} /> {fixing ? "Fixing…" : "Fix New/Repeat"}
+            </button>
             <button onClick={exportCsv} disabled={exporting} className="k-btn k-btn-outline" data-testid="swkpi-export">
               <Download className={`w-3.5 h-3.5 ${exporting ? "animate-pulse" : ""}`} /> {exporting ? "Preparing…" : "Download CSV"}
             </button>
@@ -142,6 +159,17 @@ export default function StoreWiseKPIReport() {
         }
       />
       <div className="p-8 space-y-6">
+        {(t.overall_customers > 0 && (t.new_customer_count || 0) + (t.existing_customers || 0) === 0) && (
+          <div className="chart-card p-4 border-l-4 border-amber-500 bg-amber-50 flex items-center justify-between gap-3 flex-wrap" data-testid="swkpi-newrepeat-warning">
+            <div className="text-sm text-amber-900">
+              <b>New / Repeat metrics read zero</b> because these bills aren't classified yet. Click
+              <b> Fix New/Repeat</b> to recalculate (earliest bill per customer = New).
+            </div>
+            <button onClick={runNewExistingFix} disabled={fixing} className="k-btn kazo-bg-burgundy text-white k-btn-sm" data-testid="swkpi-fix-newrepeat-banner">
+              <Wrench className={`w-3.5 h-3.5 ${fixing ? "animate-pulse" : ""}`} /> {fixing ? "Fixing…" : "Fix now"}
+            </button>
+          </div>
+        )}
         <div className="chart-card p-5 space-y-4" data-testid="swkpi-filters">
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
             <div><label className={lblCls}>Start date</label><input type="date" value={params.start_date} onChange={(e) => set("start_date", e.target.value)} className={selCls} data-testid="swkpi-start" /></div>

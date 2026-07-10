@@ -128,6 +128,32 @@ export default function LoyaltyConfigurator() {
                       onChange={(v) => setField("min_bill_for_earn", parseFloat(v) || 0)}
                       testid="cfg-min-bill" />
           </div>
+
+          <div className="mt-6">
+            <Label>Earn base — is the POS bill amount pre-tax or tax-inclusive?</Label>
+            <div className="flex border border-black/15 max-w-lg" data-testid="cfg-earn-tax-mode">
+              {[
+                ["auto", "Auto-detect"],
+                ["exclusive", "Pre-tax (before GST)"],
+                ["inclusive", "Tax-inclusive"],
+              ].map(([val, lbl]) => {
+                const active = String(cfg.earn_amount_includes_tax || "auto") === val;
+                return (
+                  <button key={val}
+                    onClick={() => setField("earn_amount_includes_tax", val)}
+                    className={`flex-1 py-2 text-sm ${active ? "kazo-bg-burgundy text-white" : "bg-white"}`}
+                    data-testid={`cfg-earn-tax-${val}`}
+                  >{lbl}</button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-neutral-500 mt-2">
+              KAZO rule: points are always earned on the <b>Total Bill Amount before GST</b>.
+              Choose <b>Pre-tax</b> if the POS sends <code>amount</code> without tax,
+              <b> Tax-inclusive</b> if <code>amount</code> already includes GST (it will be stripped),
+              or <b>Auto-detect</b> to infer it per bill from the pre-tax net the POS sends.
+            </p>
+          </div>
         </SectionCard>
 
         {/* Tier Management */}
