@@ -10,7 +10,7 @@ import time
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-loyalty-ops.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-loyalty-hub-2.preview.emergentagent.com").rstrip("/")
 EMAIL = "superadmin@fundle.io"
 PASSWORD = "Fundle@2026"
 

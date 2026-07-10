@@ -13,7 +13,7 @@ import uuid
 import httpx
 from motor.motor_asyncio import AsyncIOMotorClient
 
-API = os.environ.get("API_URL") or "https://kazo-loyalty-ops.preview.emergentagent.com"
+API = os.environ.get("API_URL") or "https://kazo-loyalty-hub-2.preview.emergentagent.com"
 MONGO = os.environ["MONGO_URL"]
 DBN = os.environ["DB_NAME"]
 XKEY = "ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI"

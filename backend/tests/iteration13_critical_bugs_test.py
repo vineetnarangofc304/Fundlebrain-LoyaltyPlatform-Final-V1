@@ -13,7 +13,7 @@ import io
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-loyalty-ops.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-loyalty-hub-2.preview.emergentagent.com").rstrip("/")
 SUPER_EMAIL = "superadmin@fundle.io"
 SUPER_PASS = "Fundle@2026"
 

@@ -5,7 +5,7 @@ import io
 import pytest
 import requests
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-loyalty-ops.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://kazo-loyalty-hub-2.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 
 

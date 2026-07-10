@@ -20,7 +20,7 @@ import httpx
 import pytest
 from motor.motor_asyncio import AsyncIOMotorClient
 
-API = os.environ.get("API_URL") or "https://kazo-loyalty-ops.preview.emergentagent.com"
+API = os.environ.get("API_URL") or "https://kazo-loyalty-hub-2.preview.emergentagent.com"
 MONGO = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DBN = os.environ.get("DB_NAME", "kazo_fundle_db")
 XKEY = "ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI"
