@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration 91 – Points Integrity Center. Backend: 33 checks executed; 32 PASS, 1 FAIL. Frontend: all 6 panels render, nav item present, scans return clean numbers (no undefined/NaN), Issue-B panel has 2 date inputs + 1 checkbox + mobile input. CODE FIX 1 (tier-upgrade guard) fully verified — legacy-tier customer gets 0 tier_upgrade ledger rows; kazo silver→gold customer still gets exactly 1 row with points=500. CODE FIX 2 verified on the /redemption-repair/fix preview (multiset match: live_bills_to_fix=1, points_to_deduct=999 — BILL_A covered, only BILL_C flagged). Issue-B end-to-end preview→apply→undo works (balance 1500→1000→1500, row voided then un-voided, audit_id present in /repair-runs, undo restores). Issue-A/C/D preview endpoints return required keys.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/master-brain/redemption-repair/audit",
+       "issue": "CODE FIX 2 was applied to _scan_missing_live_redemptions (used by /redemption-repair/fix) but NOT to _tool_audit_missing_redemption_ledger. As a result, a bill BILL_A with points_redeemed=1650 whose redemption is covered by a separate non-voided redeem ledger row (bill_number=BILL_B, same customer+amount) STILL appears in the /audit sample and in bills_missing_redeem_ledger. The /fix (used to actually backfill) correctly excludes it, so no double-backfill occurs — but the AUDIT panel/report will over-count. Fix: after the exact-bill unmatched list is computed at lines 2045-2046 of master_brain_tools.py, apply the same customer+amount multiset fallback that _scan_missing_live_redemptions uses (lines 2529-2553) before returning `missing`."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration91_points_integrity_test.py",
+    "/app/test_reports/pytest/iteration91.xml"
+  ],
+  "action_items": [
+    "Propagate the multiset (mobile+amount) fallback from _scan_missing_live_redemptions into _tool_audit_missing_redemption_ledger so GET /api/master-brain/redemption-repair/audit does not over-report bills whose redemption is already ledgered against a different bill_number. Non-blocking for correctness (fix path doesn't double-backfill) but the audit panel will display an inflated 'bills_missing_redeem_ledger' number."
+  ],
+  "critical_code_review_comments": [
+    "master_brain_tools.py: the multiset (mobile+amount) safety was intentionally added only to _scan_missing_live_redemptions but the parallel audit tool duplicates the exact-bill logic and is now out-of-sync — extract the missing/matched computation into a single helper so /audit and /fix cannot diverge again.",
+    "points_integrity_routes.py: /historic-earn/preview and /negative-balances/preview accept no filters — they run globally. Fine for preview but the review instructed testing agent to NOT apply C/D on all data — the API surface would benefit from an optional mobile scope on the C preview/apply too, for parity with tier-upgrade-bonus.",
+    "pos_ewards_routes.py:1717 — tier upgrade guard (`old_tier in rank and new_tier in rank and rank[new_tier] > rank[old_tier]`) is correct; consider logging when a legacy tier is encountered so ops can see why a bonus was suppressed.",
+    "PointsIntegrityPage.jsx: repair-runs list uses distinct 'Undo' buttons — good; verify a run's undone rows are visually distinguished (`(undone)` suffix seen in DOM — OK)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration91_points_integrity_test.py (new)"
+  ],
+  "success_rate": {"backend": "97%", "frontend": "100%"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026; POS x-api-key=ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI merchant KAZO_FUNDLE store K00055; cutoff=2026-06-08.",
+  "seed_data_creation": "Three unique test customers (mobiles under 7300001xxx) created & cleaned up in the same test run: (a) Legacy-Platinum migrated cust for FIX1 legacy path, (b) silver kazo cust who legitimately upgrades to gold for FIX1 regression, (c) migrated cust with a 500-point tier_upgrade bonus row for Issue-B e2e. Also a customer with BILL_A settlement (points_redeemed=1650) + separate BILL_B redeem ledger row + BILL_C genuinely missing for FIX2 verification. All rows deleted at end. loyalty_config gold.upgrade_bonus was temporarily set to 500 and restored to 0.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The one failing check (FIX2/audit) is a real code miss: _tool_audit_missing_redemption_ledger doesn't apply the multiset fallback. The /fix endpoint IS hardened correctly, so operational risk (double backfill) is contained — only the audit numbers are inflated. loyalty_config points_cutoff_date=2026-06-08; all KAZO tier_rules currently have upgrade_bonus=0 in DB, so tests temporarily bump gold's upgrade_bonus. Cutoff and gold config are restored at end of test.",
+  "rca of the issue": "CODE FIX 2 was correctly applied to _scan_missing_live_redemptions() (lines ~2484-2553, used by /redemption-repair/fix), but its sibling _tool_audit_missing_redemption_ledger() (lines ~1991-2046, used by GET /redemption-repair/audit) still uses only the exact-bill matching pass and was not updated. Repro: seed a bill (points_redeemed=1650) and a separate non-voided redeem ledger row for the same customer+amount but a DIFFERENT bill_number; GET /api/master-brain/redemption-repair/audit still returns that bill in `sample` and increments `bills_missing_redeem_ledger`. Mitigation: after the exact-bill `missing` list is computed in _tool_audit_missing_redemption_ledger, run the same defaultdict(Counter) multiset dedupe used in _scan_missing_live_redemptions."
+}

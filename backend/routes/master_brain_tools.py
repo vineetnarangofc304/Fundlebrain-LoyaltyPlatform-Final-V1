@@ -2514,8 +2514,43 @@ async def _scan_missing_live_redemptions(cutoff: str, mobile: str = "") -> List[
                 {"type": "redeem", "voided": {"$ne": True}, "source_bill_id": {"$in": batch}},
                 {"_id": 0, "source_bill_id": 1}).max_time_ms(10000):
             covered_srcs.add(lr.get("source_bill_id"))
-    return [b for b in bills
-            if b.get("bill_number") not in covered_bills and b.get("id") not in covered_srcs]
+    # Bills NOT covered by an exact bill_number / source_bill_id match.
+    unmatched = [b for b in bills
+                 if b.get("bill_number") not in covered_bills and b.get("id") not in covered_srcs]
+    if not unmatched:
+        return []
+    # SECOND-PASS SAFETY (prevents the double-deduction the earlier repair caused): the OTP
+    # redemption is often keyed to a DIFFERENT bill number than the settlement bill, so an
+    # exact-bill match misses it and we'd wrongly backfill a duplicate. So we ALSO match by
+    # (customer, |amount|): for each customer we count how many non-voided redeem rows already
+    # exist per amount vs how many unmatched bills claim that amount, and only backfill the
+    # DEFICIT. A customer who already has a redeem row for the same amount is treated as
+    # covered even when the bill numbers differ.
+    from collections import Counter, defaultdict
+    mobiles = list({b.get("customer_mobile") for b in unmatched if b.get("customer_mobile")})
+    have: Dict[str, Counter] = defaultdict(Counter)  # mobile -> {amount: count of existing redeem rows}
+    for i in range(0, len(mobiles), 2000):
+        batch = mobiles[i:i + 2000]
+        async for lr in points_ledger_col.find(
+                {"type": "redeem", "voided": {"$ne": True}, "customer_mobile": {"$in": batch}},
+                {"_id": 0, "customer_mobile": 1, "points": 1}).max_time_ms(15000):
+            m = lr.get("customer_mobile")
+            amt = abs(int(lr.get("points") or 0))
+            if m and amt:
+                have[m][amt] += 1
+    still_missing: List[Dict[str, Any]] = []
+    used: Dict[str, Counter] = defaultdict(Counter)
+    for b in unmatched:
+        m = b.get("customer_mobile")
+        amt = abs(int(b.get("points_redeemed") or 0))
+        if not m or not amt:
+            still_missing.append(b)
+            continue
+        if used[m][amt] < have.get(m, Counter()).get(amt, 0):
+            used[m][amt] += 1  # an existing redeem row already covers this bill's redemption
+            continue
+        still_missing.append(b)
+    return still_missing
 
 
 async def _tool_fix_missing_redemption_ledger(reason: str = "", confirm: bool = False,
@@ -2710,6 +2745,118 @@ async def _tool_reverse_duplicate_adjustments(filter_reason: str = "", since: st
             "message": (f"Reversed duplicate adjustments for {len(changes)} customer(s): voided "
                         f"{total_surplus_rows} surplus rows and corrected balances by {total_restore} "
                         f"pts net. Audit {audit_id} — undoable.")}
+
+
+async def _tool_reverse_tier_upgrade_bonus(start: str = "", end: str = "",
+                                           migrated_only: bool = True, mobile: str = "",
+                                           reason: str = "", confirm: bool = False,
+                                           user=None) -> Dict[str, Any]:
+    """MUTATION (Master Admin). Reverse WRONG tier-upgrade bonus points awarded when migrated
+    customers were re-tiered from a LEGACY tier onto a KAZO slab by a live bill (their already
+    high historic lifetime spend qualified them, so it was NOT a bonus-earning upgrade). Finds
+    non-voided `tier_upgrade` bonus ledger rows in an optional [start, end] window (created_at
+    ISO date), optionally scoped to migrated (source=historic_upload) customers or one mobile;
+    voids them (kept for audit) and deducts the points from balance + lifetime_points_earned.
+    Preview first, then confirm=true + reason. Audit-logged, snapshotted, UNDOABLE."""
+    err = _require_master(user)
+    if err:
+        return err
+    match: Dict[str, Any] = {"type": "bonus", "ledger_kind": "tier_upgrade", "voided": {"$ne": True}}
+    cr: Dict[str, Any] = {}
+    if start:
+        cr["$gte"] = start
+    if end:
+        cr["$lte"] = end if len(end) > 10 else end + "T23:59:59"
+    if cr:
+        match["created_at"] = cr
+    if mobile:
+        match["customer_mobile"] = {"$regex": _last10(mobile) + "$"}
+    rows: List[Dict[str, Any]] = []
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        async for lr in points_ledger_col.find(
+                match, {"_id": 0, "id": 1, "customer_mobile": 1, "points": 1,
+                        "note": 1, "created_at": 1}):
+            rows.append(lr)
+    # optionally keep only migrated (historic_upload) customers
+    if migrated_only and rows:
+        mset = list({r.get("customer_mobile") for r in rows if r.get("customer_mobile")})
+        migrated: set = set()
+        for i in range(0, len(mset), 5000):
+            batch = mset[i:i + 5000]
+            async for c in customers_col.find(
+                    {"mobile": {"$in": batch}, "source": "historic_upload"},
+                    {"_id": 0, "mobile": 1}):
+                migrated.add(c["mobile"])
+        rows = [r for r in rows if r.get("customer_mobile") in migrated]
+    per_cust: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        m = r.get("customer_mobile")
+        if not m:
+            continue
+        agg = per_cust.setdefault(m, {"pts": 0, "rows": 0})
+        agg["pts"] += int(r.get("points") or 0)
+        agg["rows"] += 1
+    total_pts = sum(a["pts"] for a in per_cust.values())
+    plan = {"action": "reverse_tier_upgrade_bonus",
+            "window": {"start": start or "(all)", "end": end or "(all)"},
+            "migrated_only": migrated_only, "scope": (mobile or "ALL"),
+            "bonus_rows": len(rows), "customers_affected": len(per_cust),
+            "points_to_reverse": total_pts,
+            "sample": [{"mobile": m, "points": a["pts"], "rows": a["rows"]}
+                       for m, a in list(per_cust.items())[:10]]}
+    if not rows:
+        plan["message"] = "No tier-upgrade bonus rows match that scope. Nothing to reverse."
+        return plan
+    if not confirm:
+        plan["preview"] = True
+        plan["confirmation_required"] = ("This VOIDS the matched tier-upgrade bonus rows and deducts "
+                                         "those points from each customer's balance. Confirm with a reason.")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    audit_id = str(uuid.uuid4())
+    cust_map = await _bulk_find_customers(list(per_cust.keys()))
+    upd_ops: List[Any] = []
+    changes: List[Dict[str, Any]] = []
+    reversed_pts = 0
+    for m, a in per_cust.items():
+        cust = cust_map.get(_last10(m))
+        if not cust:
+            continue
+        cid = cust["id"]
+        cur = int(cust.get("points_balance") or 0)
+        lt = int(cust.get("lifetime_points_earned") or 0)
+        ex = int(a["pts"])
+        upd_ops.append(UpdateOne({"id": cid}, {"$inc": {"points_balance": -ex,
+                                                        "lifetime_points_earned": -ex}}))
+        changes.append({"cust_id": cid, "mobile": cust.get("mobile"),
+                        "points_before": cur, "points_after": cur - ex,
+                        "lifetime_before": lt, "lifetime_after": lt - ex})
+        reversed_pts += ex
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    # Void the tier-upgrade rows (kept for audit; undo un-voids via voided_by_audit).
+    row_ids = [r["id"] for r in rows if r.get("id")]
+    for i in range(0, len(row_ids), CREDIT_BATCH):
+        batch = row_ids[i:i + CREDIT_BATCH]
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.update_many(
+                {"id": {"$in": batch}},
+                [{"$set": {"voided": True, "voided_at": _now_iso(), "voided_by": user.get("email"),
+                           "voided_reason": f"Reversed wrong tier-upgrade migration bonus — {reason}",
+                           "voided_by_audit": audit_id,
+                           "original_points": {"$ifNull": ["$original_points", "$points"]}, "points": 0}}])
+    await _log_master(user, "reverse_tier_upgrade_bonus", "customers", "bulk", reason,
+                      {"bonus_rows": len(rows), "customers_affected": len(changes),
+                       "points_reversed": reversed_pts, "migrated_only": migrated_only}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "reverse_tier_upgrade_bonus", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "points_reversed": reversed_pts, "customers_corrected": len(changes),
+            "message": (f"Reversed {reversed_pts} tier-upgrade bonus points across {len(changes)} "
+                        f"customer(s); voided {len(row_ids)} bonus row(s). Audit {audit_id} — undoable.")}
+
 
 
 async def _tool_normalize_historical_points(reason: str = "", confirm: bool = False,
@@ -3136,6 +3283,7 @@ MASTER_TOOL_HANDLERS = {
     "grant_bonus_points": _tool_grant_bonus_points,
     "adjust_points": _tool_adjust_points,
     "fix_negative_balances": _tool_fix_negative_balances,
+    "reverse_tier_upgrade_bonus": _tool_reverse_tier_upgrade_bonus,
     "retier_customers": _tool_retier_customers,
     "set_customer_tier": _tool_set_customer_tier,
     "master_action_log": _tool_master_action_log,

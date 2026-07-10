@@ -1709,7 +1709,12 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     if new_tier != old_tier:
         ranked = sorted((cfg.get("tier_rules") or []), key=lambda x: x.get("min_lifetime_spend", 0))
         rank = {t.get("tier"): i for i, t in enumerate(ranked)}
-        if rank.get(new_tier, 0) > rank.get(old_tier, 0):
+        # Award the slab-up bonus ONLY when BOTH tiers are recognised KAZO tiers AND the
+        # customer genuinely moved UP a slab. If old_tier is a LEGACY / unknown value (e.g.
+        # a migrated customer whose historic tier isn't a configured KAZO slab), this is a
+        # migration RE-TIER driven by their already-high lifetime spend — NOT an upgrade
+        # earned by this bill — so NO bonus is given (prevents wrong migration bonuses).
+        if old_tier in rank and new_tier in rank and rank[new_tier] > rank[old_tier]:
             nt = next((t for t in ranked if t.get("tier") == new_tier), None)
             upgrade_bonus_points = int((nt or {}).get("upgrade_bonus", 0) or 0)
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="11.039" timestamp="2026-07-10T06:26:11.804000+00:00" hostname="agent-env-23d17535-dbe1-43df-80c6-40eed26e21a4"><testcase classname="backend.tests.iteration91_points_integrity_test" name="test_points_integrity_full" time="10.854"><failure message="Failed: 1 check(s) failed">backend/tests/iteration91_points_integrity_test.py:43: in test_points_integrity_full
+    asyncio.run(_run())
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+backend/tests/iteration91_points_integrity_test.py:410: in _run
+    pytest.fail(f"{len(failures)} check(s) failed")
+E   Failed: 1 check(s) failed</failure></testcase></testsuite></testsuites>
