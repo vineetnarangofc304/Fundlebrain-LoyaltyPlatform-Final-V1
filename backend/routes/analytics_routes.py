@@ -156,28 +156,35 @@ async def build_sales_rollup() -> None:
 
 
 async def rollup_loop() -> None:
-    """Background loop: keep the heavy all-time rollups fresh, off the request path."""
+    """Background loop: keep the heavy all-time dashboard rollups fresh, off the
+    request path (on a CSOT-disabled client), so the 'All time' report views never
+    run a full-collection scan on a request and time out. Each builder is guarded
+    independently so one failure never blocks the others."""
     await asyncio.sleep(15)   # let uvicorn bind + indexes start building
+    builders = [
+        ("sales", build_sales_rollup),
+        ("loyalty", build_loyalty_rollup),
+        ("store", build_store_rollup),
+        ("customer", build_customer_rollup),
+    ]
     while True:
-        try:
-            await build_sales_rollup()
-        except Exception as e:
-            logger.warning(f"sales rollup refresh failed: {e}")
+        for name, builder in builders:
+            try:
+                await builder()
+            except Exception as e:
+                logger.warning(f"{name} rollup refresh failed: {e}")
         await asyncio.sleep(_SALES_ROLLUP_INTERVAL)
 
 
 # Customer dashboard - RFM-style + cohorts
-@router.get("/customer-dashboard")
-@dash_cache("an-customer")
-async def customer_dashboard(
-    period_days: int = Query(0, ge=0, le=3650),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    user: dict = Depends(get_current_user),
-):
-    from ._date_range import parse_date_range
+CUSTOMER_ALLTIME_KEY = "an-customer|all"
+
+
+async def _compute_customer(cust_col, start_iso, end_iso, period_days, start_date, max_time_ms=None):
+    kw = {"allowDiskUse": True}
+    if max_time_ms:
+        kw["maxTimeMS"] = max_time_ms
     now = datetime.now(timezone.utc)
-    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
 
     # R1: New customer trend uses first_purchase_at (actual first bill date), not created_at.
     # R5: loyalty members only (must have mobile)
@@ -214,7 +221,7 @@ async def customer_dashboard(
         {"$sort": {"_id": 1}},
     ]
     try:
-        new_cust = await customers_col.aggregate(new_pipe, allowDiskUse=True).to_list(1200)
+        new_cust = await cust_col.aggregate(new_pipe, **kw).to_list(1200)
     except PyMongoError as e:
         logger.warning(f"customer-dashboard new_pipe timed out: {e}")
         new_cust = []
@@ -291,12 +298,12 @@ async def customer_dashboard(
     # Resilient: if a query still exceeds the server time limit on an extreme dataset, degrade
     # to empty buckets (HTTP 200) rather than 500-ing the whole dashboard.
     try:
-        top = await customers_col.aggregate(top_pipe, allowDiskUse=True).to_list(10)
+        top = await cust_col.aggregate(top_pipe, **kw).to_list(10)
     except PyMongoError as e:
         logger.warning(f"customer-dashboard top_pipe timed out: {e}")
         top = []
     try:
-        _fr = await customers_col.aggregate(facet_pipe, allowDiskUse=True).to_list(1)
+        _fr = await cust_col.aggregate(facet_pipe, **kw).to_list(1)
         facet = _fr[0] if _fr else {}
     except PyMongoError as e:
         logger.warning(f"customer-dashboard facet timed out: {e}")
@@ -346,6 +353,29 @@ async def customer_dashboard(
     }
 
 
+@router.get("/customer-dashboard")
+@dash_cache("an-customer")
+async def customer_dashboard(
+    period_days: int = Query(0, ge=0, le=3650),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    from ._date_range import parse_date_range
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    is_all_time = (period_days is None or period_days <= 0) and not start_date and not end_date
+    if is_all_time:
+        cached = await read_rollup(CUSTOMER_ALLTIME_KEY)
+        if cached is not None:
+            return cached
+    return await _compute_customer(customers_col, start_iso, end_iso, period_days, start_date)
+
+
+async def build_customer_rollup() -> None:
+    value = await _compute_customer(long_col("customers"), None, None, 0, None, max_time_ms=120000)
+    await write_rollup(CUSTOMER_ALLTIME_KEY, value)
+
+
 # Campaign performance dashboard
 @router.get("/campaign-dashboard")
 async def campaign_dashboard(user: dict = Depends(get_current_user)):
@@ -367,18 +397,15 @@ async def campaign_dashboard(user: dict = Depends(get_current_user)):
 
 
 # Loyalty dashboard
-@router.get("/loyalty-dashboard")
-@dash_cache("an-loyalty")
-async def loyalty_dashboard(
-    period_days: int = Query(0, ge=0, le=3650),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    user: dict = Depends(get_current_user),
-):
-    from ._date_range import parse_date_range
+LOYALTY_ALLTIME_KEY = "an-loyalty|all"
+
+
+async def _compute_loyalty(cust_col, ledger_col, start_iso, end_iso, period_days, start_date, max_time_ms=None):
+    kw = {"allowDiskUse": True}
+    if max_time_ms:
+        kw["maxTimeMS"] = max_time_ms
     # R5: loyalty members only (have mobile)
     loyalty_q: Dict[str, Any] = {"mobile": {"$nin": [None, ""]}}
-    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
     if start_iso:
         rng = {"$gte": start_iso}
         if end_iso:
@@ -390,7 +417,7 @@ async def loyalty_dashboard(
                      "total_spend": {"$sum": "$lifetime_spend"}, "total_points": {"$sum": "$points_balance"}}},
         {"$sort": {"avg_spend": -1}},
     ]
-    tiers = await customers_col.aggregate(tier_pipe, allowDiskUse=True).to_list(10)
+    tiers = await cust_col.aggregate(tier_pipe, **kw).to_list(10)
 
     # Points issued vs redeemed trend — by BILL DATE (R1). Respects the selected
     # window (was hardcoded to last 90 days); monthly buckets for long windows.
@@ -420,7 +447,7 @@ async def loyalty_dashboard(
         {"$group": {"_id": {"date": "$date", "type": "$type"}, "points": {"$sum": "$points"}}},
         {"$sort": {"_id.date": 1}},
     ]
-    rows = await points_ledger_col.aggregate(issued_pipe, allowDiskUse=True).to_list(3000)
+    rows = await ledger_col.aggregate(issued_pipe, **kw).to_list(3000)
     by_date = {}
     for r in rows:
         d = r["_id"]["date"]
@@ -440,18 +467,42 @@ async def loyalty_dashboard(
     }
 
 
-# Store performance dashboard
-@router.get("/store-dashboard")
-@dash_cache("an-store")
-async def store_dashboard(
-    period_days: int = 30,
+@router.get("/loyalty-dashboard")
+@dash_cache("an-loyalty")
+async def loyalty_dashboard(
+    period_days: int = Query(0, ge=0, le=3650),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
     from ._date_range import parse_date_range
     start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
-    start = start_iso or _start(period_days)
+    is_all_time = (period_days is None or period_days <= 0) and not start_date and not end_date
+    if is_all_time:
+        cached = await read_rollup(LOYALTY_ALLTIME_KEY)
+        if cached is not None:
+            return cached
+    try:
+        return await _compute_loyalty(customers_col, points_ledger_col, start_iso, end_iso, period_days, start_date)
+    except PyMongoError as e:
+        logger.warning(f"loyalty-dashboard live compute failed: {e}")
+        return {"tiers": [], "points_trend": []}
+
+
+async def build_loyalty_rollup() -> None:
+    value = await _compute_loyalty(long_col("customers"), long_col("points_ledger"),
+                                   None, None, 0, None, max_time_ms=120000)
+    await write_rollup(LOYALTY_ALLTIME_KEY, value)
+
+
+# Store performance dashboard
+STORE_ALLTIME_KEY = "an-store|all"
+
+
+async def _compute_store(txn_col, cust_col, stores_c, start, end_iso, max_time_ms=None):
+    kw = {"allowDiskUse": True}
+    if max_time_ms:
+        kw["maxTimeMS"] = max_time_ms
     bill_rng: Dict[str, Any] = {"$gte": start}
     if end_iso:
         bill_rng["$lt"] = end_iso
@@ -474,16 +525,16 @@ async def store_dashboard(
         }},
         {"$sort": {"net": -1}},
     ]
-    rows = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(300)
+    rows = await txn_col.aggregate(pipe, **kw).to_list(300)
     store_ids = [r["_id"] for r in rows]
-    stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}}, {"_id": 0})}
+    stores = {s["id"]: s async for s in stores_c.find({"id": {"$in": store_ids}}, {"_id": 0})}
 
     # R2: home customers per store (customers whose first bill was at this store)
     home_pipe = [
         {"$match": {"home_store_id": {"$in": store_ids}, "mobile": {"$nin": [None, ""]}}},
         {"$group": {"_id": "$home_store_id", "count": {"$sum": 1}}},
     ]
-    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe, allowDiskUse=True)}
+    home_counts = {r["_id"]: r["count"] async for r in cust_col.aggregate(home_pipe, **kw)}
 
     out = []
     region_agg: Dict[str, Dict[str, float]] = {}
@@ -509,6 +560,35 @@ async def store_dashboard(
         "regions": [{"region": k, "net": round(v["net"], 2), "txns": v["txns"]}
                     for k, v in sorted(region_agg.items(), key=lambda kv: -kv[1]["net"])],
     }
+
+
+@router.get("/store-dashboard")
+@dash_cache("an-store")
+async def store_dashboard(
+    period_days: int = 30,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    from ._date_range import parse_date_range
+    start_iso, end_iso = parse_date_range(start_date, end_date, period_days)
+    start = start_iso or _start(period_days)
+    is_all_time = (period_days is None or period_days <= 0) and not start_date and not end_date
+    if is_all_time:
+        cached = await read_rollup(STORE_ALLTIME_KEY)
+        if cached is not None:
+            return cached
+    try:
+        return await _compute_store(transactions_col, customers_col, stores_col, start, end_iso)
+    except PyMongoError as e:
+        logger.warning(f"store-dashboard live compute failed: {e}")
+        return {"stores": [], "regions": []}
+
+
+async def build_store_rollup() -> None:
+    value = await _compute_store(long_col("transactions"), long_col("customers"), long_col("stores"),
+                                 _start(0), None, max_time_ms=120000)
+    await write_rollup(STORE_ALLTIME_KEY, value)
 
 
 # NPS dashboard
