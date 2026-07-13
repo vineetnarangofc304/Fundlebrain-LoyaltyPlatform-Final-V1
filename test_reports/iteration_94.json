@@ -1,0 +1,26 @@
+{
+  "summary": "Iteration 94: Backend regression for Points Integrity Issue D — negative-balance repair TRUE-VALUE fix. 9/9 pytest cases pass. Verified: (1) SINGLE duplicate-redemption customer restored to POSITIVE true value (bal -60 -> 20, duplicate_excess=80, floored_to_zero=false, NOT zeroed). (2) SINGLE genuine over-redemption floored to 0 (bal -20 -> 0, duplicate_excess=0, floored_to_zero=true). (3) BULK preview returns customers_affected / total_negative_points / points_to_restore / customers_with_duplicates and a sample where every row has mobile, points_balance (current negative), and true_balance. (4) UNDO via /api/points-integrity/undo/{audit_id} correctly reverts each customer back to the original negative balance for both cases. (5) Re-preview after apply reports 'nothing to fix' (idempotency). (6) master_brain compensating adjust rows are excluded from duplicate detection so a correction is never mistaken for a duplicate.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration94_neg_balance_truevalue_test.py",
+    "/app/test_reports/pytest/iteration94.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_dup_redemption_excess groups by (bill_number OR reference_id, exact negative points) — correctly excludes reference_type=='master_brain' rows to prevent double-counting compensating adjustments.",
+    "Bulk apply uses BATCH=1000 with unordered bulk_write + insert_many; ok for standalone Mongo (no multi-doc txns).",
+    "INLINE_CAP=20000 short-circuit returns HTTP 400 with a clear message — good safety net for prod-scale runs.",
+    "Preview and apply both surface `floored_to_zero` boolean so UI can differentiate 'restored true value' vs 'floored to 0'."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration94_neg_balance_truevalue_test.py (new pytest regression suite, 9 tests)"
+  ],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "not tested (backend-only per request)"},
+  "test_credentials": "Master Admin: masteradmin@fundle.io / Master@2026",
+  "seed_data_creation": "Throwaway customers 9700000011 (duplicate-redemption, bal -60, expects true=20) and 9700000012 (over-redemption, bal -20, expects true=0). Auto-cleaned in module-scoped fixture teardown (customers + points_ledger rows both deleted).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Issue D true-value repair is fully verified: single (duplicate + over-redemption), bulk preview, and undo all work as spec'd. Bulk-apply was intentionally NOT run against real prod negatives (only scoped/single-mobile) per the review-request guardrail. If a future retest needs to verify bulk-apply end-to-end it should either scope by mobile or seed >=2 throwaway customers and assert customers_updated/points_restored strictly. Test file cleans up after itself so it is safe to re-run.",
+  "rca of the issue": "N/A — this was a verification of a fix, not a bug diagnosis. Fix behaves as documented."
+}

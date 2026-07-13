@@ -181,3 +181,40 @@ agent_communication:
            core regression — it was invisible before the fix).
         Clean up the test customer/mobile afterward if possible. This is BACKEND-focused; a light
         frontend smoke of the Customer 360 page (superadmin) to confirm no render errors is a plus.
+
+# ==== Iteration 94: Correct negative balances -> restore TRUE value (not 0) ====
+backend:
+  - task: "fix_negative_balances restores TRUE balance (current + duplicate-redemption excess, floored 0)"
+    implemented: true
+    working: "NA"
+    file: "routes/master_brain_tools.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Points Integrity Center Issue D previously hard-reset negatives to 0, losing points the
+            customer legitimately had. New behavior: target = max(0, current_balance + points wrongly
+            deducted by DUPLICATE redemption rows). New helpers _dup_redemption_excess (groups negative
+            non-master_brain ledger rows by bill_number|reference_id + amount; excess = (count-1)*|pts|)
+            and _neg_balance_targets. Both single (mobile) and bulk paths updated; compensating adjust
+            ledger row written; audited + snapshotted (UNDOABLE). Endpoints POST
+            /api/points-integrity/negative-balances/{preview,apply} (require_master_admin). Self-verified:
+            dup case -60->20, genuine over-redeem -20->0.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        VERIFY iteration 94 (Master Admin masteradmin@fundle.io / Master@2026; panel is master-only):
+        1) SINGLE preview+apply for a duplicate-redemption customer -> true POSITIVE balance (NOT 0),
+           compensating adjust ledger row written, re-preview shows nothing to fix.
+        2) SINGLE genuine over-redemption (no dup) -> floored to 0.
+        3) BULK preview (omit mobile) returns customers_affected, points_to_restore,
+           customers_with_duplicates + per-customer sample (points_balance -> true_balance); BULK apply corrects.
+        4) UNDO the apply (capture audit_id) and confirm the balance reverts to the original negative.
+        Seed throwaway negative customers (e.g. 9700000011/12) with ledger rows and CLEAN UP after.
+        Backend-focused; light frontend smoke of /admin/points-integrity Issue D panel is a plus.
+        Reference helper: /app/backend/tests/repro_neg_balance_truevalue.py (passing).
+

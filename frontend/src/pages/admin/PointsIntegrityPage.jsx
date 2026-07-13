@@ -196,18 +196,19 @@ export default function PointsIntegrityPage() {
       <RepairPanel
         code="D" testid="repair-negative"
         title="Correct negative point balances"
-        description="Corrects customers whose balance went negative (usually from double redemption entries). This restores each negative balance to 0 with a compensating ledger entry. TIP: for double redemptions caused by the redemption-repair, first UNDO that run below — it restores the exact points and voids the duplicate rows."
+        description="Corrects customers whose balance went negative (usually from double redemption entries). It restores each customer's TRUE balance — the current balance PLUS the points that were wrongly deducted by DUPLICATE redemptions — floored at 0 (never below). Customers with a genuine positive balance masked by duplicates are restored to that value, not zeroed. Each correction writes a compensating, undoable ledger entry. TIP: for double redemptions caused by the redemption-repair, you can also UNDO that run below."
         previewUrl="/points-integrity/negative-balances/preview"
         applyUrl="/points-integrity/negative-balances/apply"
         buildBody={() => ({ mobile: d.mobile || "" })}
         summarise={(p) => ({
           count: p.customers_affected || 0,
           headline: (p.customers_affected || 0) > 0
-            ? `${fmtNum(p.customers_affected)} customer(s) with negative balance — ${fmtNum(p.points_to_restore || 0)} points to restore.`
+            ? `${fmtNum(p.customers_affected)} customer(s) with negative balance — ${fmtNum(p.points_to_restore || 0)} points to restore (${fmtNum(p.customers_with_duplicates || 0)} from duplicate redemptions).`
             : "No negative balances found.",
           stats: [
             { label: "Customers", value: fmtNum(p.customers_affected || 0) },
             { label: "Points to restore", value: fmtNum(p.points_to_restore || 0) },
+            { label: "With duplicate redemptions", value: fmtNum(p.customers_with_duplicates || 0) },
           ],
         })}
         applyVerb="Correct now"

@@ -233,8 +233,55 @@ async def _tool_adjust_points(mobile: str, points: int, reason: str = "",
 # ============================================================
 # 3) Fix negative points balances (single or bulk)
 # ============================================================
+async def _dup_redemption_excess(mobile: Optional[str], cust_id: Optional[str]) -> int:
+    """Points WRONGLY deducted from one customer by DUPLICATE redemption ledger rows.
+    A duplicate = the SAME redemption (keyed by bill_number|reference_id + the exact negative
+    amount) recorded more than once. Excess = Σ over each duplicate group of (count-1)*|points|.
+    Only genuine redemption/return rows are considered — our own compensating `master_brain`
+    adjust rows are excluded so a correction is never mistaken for a duplicate."""
+    q = {"$or": [{"customer_mobile": mobile}, {"customer_id": cust_id}], "points": {"$lt": 0}}
+    groups: Dict[Any, int] = {}
+    async for r in points_ledger_col.find(
+            q, {"_id": 0, "points": 1, "bill_number": 1, "reference_id": 1, "reference_type": 1}):
+        if (r.get("reference_type") or "") == "master_brain":
+            continue  # skip our own compensating corrections
+        pts = int(r.get("points") or 0)
+        if pts >= 0:
+            continue
+        key = (r.get("bill_number") or r.get("reference_id") or "?", pts)
+        groups[key] = groups.get(key, 0) + 1
+    excess = 0
+    for (key, cnt) in groups.items():
+        if cnt > 1:
+            excess += (cnt - 1) * (-key[1])  # -key[1] = |points|
+    return excess
+
+
+async def _neg_balance_targets(fil: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """For every customer under `fil` with a negative balance, compute the TRUE balance =
+    current + points added back from duplicate redemptions, floored at 0. Returns a list of
+    {doc, cur, true, restored}. Bounded by INLINE_CAP+1 so callers can reject oversized runs."""
+    negs = await customers_col.find(
+        fil, {"_id": 1, "id": 1, "mobile": 1, "name": 1, "points_balance": 1}) \
+        .sort("points_balance", 1).limit(INLINE_CAP + 1).to_list(INLINE_CAP + 1)
+    out: List[Dict[str, Any]] = []
+    for d in negs:
+        cur = int(d.get("points_balance") or 0)
+        if cur >= 0:
+            continue
+        excess = await _dup_redemption_excess(d.get("mobile"), d.get("id"))
+        true_bal = max(0, cur + excess)
+        out.append({"doc": d, "cur": cur, "true": true_bal, "restored": true_bal - cur,
+                    "excess": excess})
+    return out
+
+
 async def _tool_fix_negative_balances(mobile: Optional[str] = None, reason: str = "",
                                       confirm: bool = False, user=None) -> Dict[str, Any]:
+    """Correct customers whose balance went negative (usually from DUPLICATE redemption rows).
+    Restores each customer's TRUE balance = current + points wrongly deducted by duplicate
+    redemptions, floored at 0 — NOT a blanket reset to 0. Preview (confirm=false) shows the
+    per-customer target; apply (confirm=true + reason) is audited, snapshotted and UNDOABLE."""
     err = _require_master(user)
     if err:
         return err
@@ -246,74 +293,80 @@ async def _tool_fix_negative_balances(mobile: Optional[str] = None, reason: str 
         if bal >= 0:
             return {"action": "fix_negative_balances", "mobile": cust.get("mobile"),
                     "current_balance": bal, "message": "Balance is not negative — nothing to fix."}
+        excess = await _dup_redemption_excess(cust.get("mobile"), cust.get("id"))
+        target = max(0, bal + excess)
+        restored = target - bal
         plan = {"action": "fix_negative_balances", "scope": "single", "mobile": cust.get("mobile"),
-                "current_balance": bal, "new_balance_after": 0, "points_restored": -bal}
+                "current_balance": bal, "duplicate_excess": excess, "new_balance_after": target,
+                "points_restored": restored, "floored_to_zero": (bal + excess) < 0}
         if not confirm:
             plan["preview"] = True
             return plan
         rerr = _need_reason(reason)
         if rerr:
             return rerr
-        await customers_col.update_one({"id": cust["id"]}, {"$set": {"points_balance": 0}})
-        await _ledger(cust.get("mobile"), -bal, "adjust", f"Negative-balance reset to 0 — {reason}", user)
+        await customers_col.update_one({"id": cust["id"]}, {"$set": {"points_balance": target}})
+        _note = (f"Negative balance corrected to true value {target} "
+                 f"(added back {excess} from duplicate redemptions) — {reason}" if excess
+                 else f"Negative balance floored to {target} — {reason}")
+        await _ledger(cust.get("mobile"), restored, "adjust", _note, user)
         audit_id = await _log_master(user, "fix_negative_balance", "customer", cust.get("id"), reason,
-                                     {"mobile": cust.get("mobile"), "balance_before": bal, "balance_after": 0})
+                                     {"mobile": cust.get("mobile"), "balance_before": bal,
+                                      "balance_after": target, "duplicate_excess": excess})
         await _record_snapshot(audit_id, "fix_negative_balance", [{
             "cust_id": cust["id"], "mobile": cust.get("mobile"),
-            "points_before": bal, "points_after": 0}])
+            "points_before": bal, "points_after": target}])
         return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
-                "message": f"Reset {cust.get('mobile')} from {bal} to 0 ({-bal} points restored)."}
+                "message": f"Corrected {cust.get('mobile')} from {bal} to {target} "
+                           f"({restored} points restored)."}
 
     # ---- Bulk: all customers with negative balance ----
     fil = {"points_balance": {"$lt": 0}}
     count = await customers_col.count_documents(fil)
-    agg = await customers_col.aggregate([
-        {"$match": fil}, {"$group": {"_id": None, "total": {"$sum": "$points_balance"}}}],
-        allowDiskUse=True).to_list(1)
-    total_neg = int(agg[0]["total"]) if agg else 0
-    sample = await customers_col.find(fil, {"_id": 0, "mobile": 1, "name": 1, "points_balance": 1}) \
-        .sort("points_balance", 1).limit(20).to_list(20)
+    if count > INLINE_CAP:
+        return {"error": f"{count} customers exceeds the inline cap ({INLINE_CAP}). This is too large to run "
+                         f"safely in one pass — please scope by mobile or contact the team for a batch job."}
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        targets = await _neg_balance_targets(fil)
+    total_neg = sum(t["cur"] for t in targets)
+    total_restored = sum(t["restored"] for t in targets)
+    dup_customers = sum(1 for t in targets if t["excess"] > 0)
+    sample = [{"mobile": t["doc"].get("mobile"), "name": t["doc"].get("name"),
+               "points_balance": t["cur"], "true_balance": t["true"],
+               "restored": t["restored"]} for t in targets[:20]]
     plan = {"action": "fix_negative_balances", "scope": "bulk_all_negatives",
-            "customers_affected": count, "total_negative_points": total_neg,
-            "points_to_restore": -total_neg, "sample": sample}
+            "customers_affected": len(targets), "customers_with_duplicates": dup_customers,
+            "total_negative_points": total_neg, "points_to_restore": total_restored,
+            "sample": sample}
     if not confirm:
         plan["preview"] = True
-        plan["confirmation_required"] = ("This will set EVERY negative balance to 0. Confirm count with the "
-                                         "user, capture a reason, then call again with confirm=true.")
+        plan["confirmation_required"] = (
+            "This sets each negative balance to its TRUE value — current balance + points that were "
+            "wrongly deducted by DUPLICATE redemptions, floored at 0 (never below). Confirm with a reason.")
         return plan
     rerr = _need_reason(reason)
     if rerr:
         return rerr
-    if count > INLINE_CAP:
-        return {"error": f"{count} customers exceeds the inline cap ({INLINE_CAP}). This is too large to run "
-                         f"safely inside a chat turn — please run smaller scopes or contact the team for a batch job."}
-    # Bounded batched apply
     updated = 0
     restored = 0
     changes: List[Dict[str, Any]] = []
-    last_id = None
-    while True:
-        q = dict(fil)
-        if last_id is not None:
-            q["_id"] = {"$gt": last_id}
-        docs = await customers_col.find(q, {"_id": 1, "id": 1, "mobile": 1, "points_balance": 1}) \
-            .sort("_id", 1).limit(BATCH).to_list(BATCH)
-        if not docs:
-            break
+    for i in range(0, len(targets), BATCH):
+        chunk = targets[i:i + BATCH]
         ops = []
         ledger_docs = []
-        for d in docs:
-            bal = int(d.get("points_balance") or 0)
-            if bal >= 0:
-                continue
-            ops.append(UpdateOne({"_id": d["_id"]}, {"$set": {"points_balance": 0}}))
-            restored += -bal
+        for t in chunk:
+            d, cur, tgt, rest = t["doc"], t["cur"], t["true"], t["restored"]
+            ops.append(UpdateOne({"_id": d["_id"]}, {"$set": {"points_balance": tgt}}))
+            restored += rest
             changes.append({"cust_id": d.get("id"), "mobile": d.get("mobile"),
-                            "points_before": bal, "points_after": 0})
+                            "points_before": cur, "points_after": tgt})
+            _note = (f"Negative balance corrected to true value (added back {t['excess']} "
+                     f"from duplicate redemptions) — {reason}" if t["excess"]
+                     else f"Negative balance floored to {tgt} — {reason}")
             ledger_docs.append({
-                "id": str(uuid.uuid4()), "customer_mobile": d.get("mobile"), "points": -bal,
+                "id": str(uuid.uuid4()), "customer_mobile": d.get("mobile"), "points": rest,
                 "type": "adjust", "kind": "adjust", "reference_type": "master_brain",
-                "reason": f"Negative-balance reset to 0 — {reason}", "created_at": _now_iso(),
+                "reason": _note, "created_at": _now_iso(),
                 "created_by": user.get("email"), "via": "master_brain",
             })
         if ops:
@@ -321,16 +374,16 @@ async def _tool_fix_negative_balances(mobile: Optional[str] = None, reason: str 
             updated += res.modified_count
         if ledger_docs:
             await points_ledger_col.insert_many(ledger_docs, ordered=False)
-        last_id = docs[-1]["_id"]
-        if len(docs) < BATCH:
-            break
     audit_id = await _log_master(user, "fix_negative_balances_bulk", "customers", "bulk", reason,
                                  {"customers_affected": updated, "points_restored": restored,
+                                  "customers_with_duplicates": dup_customers,
                                   "total_negative_before": total_neg})
     await _record_snapshot(audit_id, "fix_negative_balances_bulk", changes)
     return {"ok": True, "applied": True, "audit_id": audit_id, "customers_updated": updated,
-            "points_restored": restored,
-            "message": f"Reset {updated} customers to 0 ({restored} points restored). Logged to the action log."}
+            "points_restored": restored, "customers_with_duplicates": dup_customers,
+            "message": f"Corrected {updated} customers to their true balance "
+                       f"({restored} points restored; {dup_customers} had duplicate redemptions). "
+                       f"Logged to the action log."}
 
 
 # ============================================================
@@ -3047,10 +3100,13 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
         }, "required": ["mobile", "points"]}}},
     {"type": "function", "function": {
         "name": "fix_negative_balances",
-        "description": "MUTATION (Master Admin). Reset NEGATIVE points balances to 0. Pass a single `mobile` for "
-                       "one customer, or omit it to fix ALL customers with a negative balance (bulk). confirm=false "
-                       "previews the count + total + sample; confirm=true + reason applies in safe batches. Writes "
-                       "an audited points_ledger 'adjust' row per customer (reversible).",
+        "description": "MUTATION (Master Admin). Correct NEGATIVE points balances to their TRUE value — the "
+                       "current balance PLUS points that were wrongly deducted by DUPLICATE redemption rows, "
+                       "floored at 0 (never below). It does NOT blanket-reset to 0; a customer with a genuine "
+                       "positive balance masked by duplicate redemptions is restored to that positive value. Pass a "
+                       "single `mobile` for one customer, or omit it to fix ALL negatives (bulk). confirm=false "
+                       "previews per-customer current->true balance + totals; confirm=true + reason applies in safe "
+                       "batches. Writes an audited points_ledger 'adjust' row per customer (reversible).",
         "parameters": {"type": "object", "properties": {
             "mobile": {"type": "string", "description": "Optional — single customer; omit for ALL negatives"},
             "reason": {"type": "string"},
