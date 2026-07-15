@@ -1319,6 +1319,97 @@ async def _tool_reconcile_ledger_balance(mobile: str = "", strategy: str = "genu
 
 
 # ============================================================
+# 6a-bulk) BATCH ledger reconciliation — same math, many customers at once
+# ============================================================
+BULK_RECON_CAP = 3000
+
+
+async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str = "genuine",
+                                      window_hours: int = 72, floor_zero: bool = True,
+                                      reason: str = "", confirm: bool = False,
+                                      user=None) -> Dict[str, Any]:
+    """BATCH LEDGER RECONCILER (Master Admin). Runs the same per-customer ledger recompute as
+    `_tool_reconcile_ledger_balance` across MANY mobiles at once. Preview returns a full per-customer
+    table (current -> target + delta) using the chosen `strategy` candidate; apply sets each balance,
+    writes ONE compensating audited ledger row per customer (stamped fix_audit_id), snapshots all
+    before/after -> UNDOABLE as a single run. Not-found mobiles are reported, never created."""
+    err = _require_master(user)
+    if err:
+        return err
+    clean = list(dict.fromkeys(_last10(m) for m in (mobiles or []) if _last10(m)))
+    if not clean:
+        return {"error": "Paste at least one valid 10-digit mobile number."}
+    if len(clean) > BULK_RECON_CAP:
+        return {"error": f"{len(clean)} mobiles exceeds the {BULK_RECON_CAP} cap — split the list and run it in parts."}
+    cust_map = await _bulk_find_customers(clean)
+    rows_out: List[Dict[str, Any]] = []
+    not_found: List[str] = []
+    for m in clean:
+        c = cust_map.get(m)
+        if not c:
+            not_found.append(m)
+            continue
+        led = await _load_customer_ledger(c)
+        cand = _reconcile_candidates(c, led, window_hours)
+        tgt = _pick_target(cand, strategy)
+        floored = False
+        if floor_zero and tgt < 0:
+            tgt, floored = 0, True
+        rows_out.append({"mobile": c.get("mobile"), "cust_id": c["id"], "name": c.get("name"),
+                         **cand, "target_balance": tgt, "delta": tgt - cand["current_balance"],
+                         "floored_to_zero": floored})
+    to_change = [r for r in rows_out if r["delta"] != 0]
+    total_delta = sum(r["delta"] for r in to_change)
+    plan = {"action": "reconcile_ledger_bulk", "strategy": strategy, "window_hours": window_hours,
+            "mobiles_in": len(clean), "matched": len(rows_out), "not_found": len(not_found),
+            "to_change": len(to_change), "total_delta": total_delta}
+    if not confirm:
+        plan["preview"] = True
+        plan["sample"] = [{k: r[k] for k in ("mobile", "name", "current_balance", "raw_ledger_sum",
+                                             "dedup_ledger_sum", "genuine_ledger_sum",
+                                             "target_balance", "delta", "floored_to_zero")}
+                          for r in rows_out[:200]]
+        plan["not_found_sample"] = not_found[:50]
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    if not to_change:
+        return {"ok": True, "applied": False, **plan,
+                "message": f"Nothing to change — all {len(rows_out)} matched customers already match the '{strategy}' target."}
+    audit_id = str(uuid.uuid4())
+    email = user.get("email")
+    upd_ops: List[Any] = []
+    ledger_docs: List[Dict[str, Any]] = []
+    changes: List[Dict[str, Any]] = []
+    for r in to_change:
+        upd_ops.append(UpdateOne({"id": r["cust_id"]}, {"$set": {"points_balance": r["target_balance"]}}))
+        ledger_docs.append({"id": str(uuid.uuid4()), "customer_mobile": r["mobile"],
+                            "customer_id": r["cust_id"], "points": r["delta"], "type": "adjust",
+                            "kind": "adjust", "reference_type": "master_brain",
+                            "reason": f"Batch ledger reconciliation: {r['current_balance']} -> {r['target_balance']} ({strategy}) — {reason}",
+                            "created_at": _now_iso(), "created_by": email, "via": "master_brain",
+                            "fix_audit_id": audit_id})
+        changes.append({"cust_id": r["cust_id"], "mobile": r["mobile"],
+                        "points_before": r["current_balance"], "points_after": r["target_balance"]})
+    for i in range(0, len(upd_ops), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+    for i in range(0, len(ledger_docs), CREDIT_BATCH):
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
+    await _log_master(user, "reconcile_ledger_bulk", "customers", "bulk", reason,
+                      {"strategy": strategy, "matched": len(rows_out), "changed": len(to_change),
+                       "not_found": len(not_found), "total_delta": total_delta}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "reconcile_ledger_bulk", changes)
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan, "changed": len(to_change),
+            "message": (f"Reconciled {len(to_change)} customer(s) using the '{strategy}' strategy "
+                        f"(net {'+' if total_delta >= 0 else ''}{total_delta} pts). "
+                        f"{len(not_found)} not found. A compensating ledger entry was logged per "
+                        f"customer. Audit {audit_id} — undoable.")}
+
+
+# ============================================================
 # 6b) GENERIC GUARDED BULK FIELD UPDATE on the customers collection
 #     (so Master Brain can run a db.customers.updateMany-style fix itself
 #      instead of punting to the engineering team)

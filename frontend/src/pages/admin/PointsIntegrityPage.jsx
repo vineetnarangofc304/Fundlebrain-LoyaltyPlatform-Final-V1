@@ -12,7 +12,7 @@ import { toast } from "sonner";
 import { SectionHeading } from "./_shared";
 import RetierSection from "./_retier_section";
 import { fmtNum } from "@/lib/format";
-import { ShieldAlert, Search, Wrench, RotateCcw, AlertTriangle, RefreshCw, Scale } from "lucide-react";
+import { ShieldAlert, Search, Wrench, RotateCcw, AlertTriangle, RefreshCw, Scale, Users } from "lucide-react";
 
 const ACCENTS = { A: "burgundy", B: "amber", C: "indigo", D: "rose", E: "teal" };
 
@@ -217,6 +217,8 @@ export default function PointsIntegrityPage() {
       </RepairPanel>
 
       <LedgerReconcileSection />
+
+      <LedgerReconcileBatch />
 
       <RepairRuns />
 
@@ -424,6 +426,154 @@ function LedgerReconcileSection() {
       )}
       {done && (
         <div className="mt-4 p-4 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-900 text-sm" data-testid="reconcile-done">
+          {done.message}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/* Batch ledger reconciliation — paste many mobiles, preview a full per-customer table
+   (current -> target + delta) using the chosen strategy, then fix them all in ONE audited,
+   undoable run. Same math as the single tool. */
+function extractMobiles(text) {
+  const out = [];
+  const seen = new Set();
+  (text || "").split(/[^0-9]+/).forEach((tok) => {
+    const d = (tok || "").replace(/\D/g, "");
+    if (d.length >= 10) {
+      const m = d.slice(-10);
+      if (!seen.has(m)) { seen.add(m); out.push(m); }
+    }
+  });
+  return out;
+}
+
+function LedgerReconcileBatch() {
+  const [text, setText] = useState("");
+  const [strategy, setStrategy] = useState("genuine");
+  const [preview, setPreview] = useState(null);
+  const [reason, setReason] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [done, setDone] = useState(null);
+
+  const mobiles = extractMobiles(text);
+
+  const scan = async () => {
+    if (mobiles.length === 0) { toast.error("Paste at least one 10-digit mobile."); return; }
+    setScanning(true); setDone(null);
+    try {
+      const r = await api.post("/points-integrity/reconcile-ledger/bulk/preview", { mobiles, strategy });
+      setPreview(r.data);
+    } catch (e) { toast.error(e.response?.data?.detail || "Scan failed"); setPreview(null); }
+    finally { setScanning(false); }
+  };
+
+  const apply = async () => {
+    if (!reason.trim()) { toast.error("A reason is required."); return; }
+    setApplying(true);
+    try {
+      const r = await api.post("/points-integrity/reconcile-ledger/bulk/apply", { mobiles, strategy, reason: reason.trim() });
+      toast.success(r.data?.message || "Reconciled.");
+      setDone(r.data); setPreview(null); setReason("");
+    } catch (e) { toast.error(e.response?.data?.detail || "Action failed"); }
+    finally { setApplying(false); }
+  };
+
+  const p = preview;
+  return (
+    <div className="chart-card p-6" data-accent="indigo" data-testid="repair-reconcile-batch">
+      <SectionHeading eyebrow="ISSUE F · BATCH" title="Reconcile MANY balances from the ledger" accent="indigo" />
+      <p className="text-sm text-neutral-600 mt-2 leading-relaxed">
+        Fix a whole batch at once. Paste the affected mobile numbers (copy the mobile column straight from your
+        sheet — any separators work), pick a strategy, then <b>Scan</b> to preview every customer's current
+        balance and the recomputed target. Review the table, add a reason, and reconcile them all in one audited,
+        undoable run.
+      </p>
+
+      <div className="mt-4 grid gap-3">
+        <div>
+          <label className={lblCls}>Mobiles (paste one or many)</label>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}
+            placeholder={"9812345678\n9898989898\n..."}
+            className="w-full p-2.5 border border-neutral-300 rounded-lg text-sm font-mono" data-testid="reconcile-batch-text" />
+          <div className="text-xs text-neutral-500 mt-1" data-testid="reconcile-batch-count">
+            {mobiles.length} unique mobile(s) detected{mobiles.length > 3000 ? " — over the 3,000 cap, split the list." : ""}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-end gap-3">
+          <div><label className={lblCls}>Strategy</label>
+            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} className={inputCls} data-testid="reconcile-batch-strategy">
+              {STRATS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
+            </select></div>
+          <button onClick={scan} disabled={scanning || mobiles.length === 0} className="k-btn k-btn-outline flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-batch-scan">
+            <Search className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} /> {scanning ? "Scanning…" : "Scan batch"}
+          </button>
+        </div>
+        <p className="text-xs text-neutral-500">{STRATS.find((s) => s.v === strategy)?.hint}</p>
+      </div>
+
+      {p && (
+        <div className="mt-4 space-y-4" data-testid="reconcile-batch-preview">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Stat label="Matched" value={fmtNum(p.matched)} />
+            <Stat label="Will change" value={fmtNum(p.to_change)} />
+            <Stat label="Not found" value={fmtNum(p.not_found)} />
+            <Stat label="Net change" value={`${p.total_delta >= 0 ? "+" : ""}${fmtNum(p.total_delta)}`} />
+          </div>
+
+          {p.sample && p.sample.length > 0 && (
+            <div className="max-h-80 overflow-auto border border-neutral-200 rounded-lg" data-testid="reconcile-batch-table">
+              <table className="w-full text-xs">
+                <thead className="bg-neutral-50 sticky top-0">
+                  <tr className="text-left text-neutral-500">
+                    <th className="px-3 py-2 font-medium">Mobile</th>
+                    <th className="px-3 py-2 font-medium">Name</th>
+                    <th className="px-3 py-2 font-medium text-right">Current</th>
+                    <th className="px-3 py-2 font-medium text-right">Genuine</th>
+                    <th className="px-3 py-2 font-medium text-right">Target</th>
+                    <th className="px-3 py-2 font-medium text-right">Change</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-100">
+                  {p.sample.map((r, i) => (
+                    <tr key={i} className={r.delta !== 0 ? "" : "opacity-50"}>
+                      <td className="px-3 py-1.5 font-mono whitespace-nowrap">{r.mobile}</td>
+                      <td className="px-3 py-1.5 text-neutral-600 truncate max-w-[160px]" title={r.name}>{r.name || "—"}</td>
+                      <td className="px-3 py-1.5 text-right font-mono">{fmtNum(r.current_balance)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-neutral-500">{fmtNum(r.genuine_ledger_sum)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono font-semibold">{fmtNum(r.target_balance)}{r.floored_to_zero && <span className="ml-1 text-[10px] text-amber-600">floored</span>}</td>
+                      <td className={`px-3 py-1.5 text-right font-mono ${r.delta > 0 ? "text-emerald-700" : r.delta < 0 ? "text-rose-700" : "text-neutral-400"}`}>{r.delta >= 0 ? "+" : ""}{fmtNum(r.delta)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {p.matched > (p.sample?.length || 0) && (
+            <div className="text-xs text-neutral-500">Showing first {p.sample.length} of {fmtNum(p.matched)} matched. All matched customers will be reconciled on apply.</div>
+          )}
+          {p.not_found > 0 && (
+            <div className="text-xs text-amber-700">{fmtNum(p.not_found)} mobile(s) not found and will be skipped{p.not_found_sample?.length ? `: ${p.not_found_sample.slice(0, 8).join(", ")}${p.not_found > 8 ? "…" : ""}` : ""}.</div>
+          )}
+
+          {p.to_change > 0 ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)"
+                className="p-2.5 border border-neutral-300 rounded-lg text-sm flex-1 min-w-[260px]" data-testid="reconcile-batch-reason" />
+              <button onClick={apply} disabled={applying} className="k-btn kazo-bg-burgundy text-white flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-batch-apply">
+                <Users className="w-4 h-4" /> {applying ? "Applying…" : `Reconcile ${fmtNum(p.to_change)} customer(s)`}
+              </button>
+            </div>
+          ) : (
+            <div className="text-sm text-emerald-700">All matched customers already match the target — nothing to change.</div>
+          )}
+        </div>
+      )}
+      {done && (
+        <div className="mt-4 p-4 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-900 text-sm" data-testid="reconcile-batch-done">
           {done.message}
         </div>
       )}

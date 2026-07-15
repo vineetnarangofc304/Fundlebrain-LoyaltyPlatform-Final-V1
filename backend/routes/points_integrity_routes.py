@@ -7,6 +7,7 @@ Scan → Reverse each class of points error with a button (no chat required):
   * Issue C — auto-calculated historic earn      -> /points-integrity/historic-earn/*
   * Issue D — double redemption / negative bal   -> /points-integrity/negative-balances/* + repair-runs undo
   * Issue E — re-tier legacy customers           -> /loyalty/retier/* (existing)
+  * Issue F — reconcile a balance from the ledger -> /points-integrity/reconcile-ledger/* (+ /bulk/*)
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from routes.master_brain_routes import require_master_admin
 from routes.master_brain_tools import (
     _tool_reverse_tier_upgrade_bonus, _tool_normalize_historical_points,
     _tool_fix_negative_balances, _tool_undo_action, _tool_reconcile_ledger_balance,
+    _tool_reconcile_ledger_bulk,
 )
 
 router = APIRouter(prefix="/points-integrity", tags=["points-integrity"])
@@ -134,13 +136,42 @@ async def reconcile_apply(body: ReconcileIn, user: dict = Depends(require_master
     return res
 
 
+class ReconcileBulkIn(BaseModel):
+    mobiles: list[str] = []
+    strategy: str = "genuine"
+    window_hours: int = 72
+    reason: str = ""
+
+
+@router.post("/reconcile-ledger/bulk/preview")
+async def reconcile_bulk_preview(body: ReconcileBulkIn, user: dict = Depends(require_master_admin)):
+    res = await _tool_reconcile_ledger_bulk(
+        mobiles=body.mobiles, strategy=body.strategy, window_hours=body.window_hours,
+        confirm=False, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@router.post("/reconcile-ledger/bulk/apply")
+async def reconcile_bulk_apply(body: ReconcileBulkIn, user: dict = Depends(require_master_admin)):
+    if not body.reason.strip():
+        raise HTTPException(400, "A reason is required to reconcile balances.")
+    res = await _tool_reconcile_ledger_bulk(
+        mobiles=body.mobiles, strategy=body.strategy, window_hours=body.window_hours,
+        reason=body.reason.strip(), confirm=True, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
 # ── Recent repair runs + one-click undo (for reversing the bad redemption backfill) ──
 _UNDOABLE_ACTIONS = [
     "master_brain.fix_missing_redemption_ledger", "master_brain.reverse_tier_upgrade_bonus",
     "master_brain.normalize_historical_points", "master_brain.reverse_duplicate_bonus_credits",
     "master_brain.reverse_duplicate_adjustments", "master_brain.fix_negative_balances_bulk",
     "master_brain.fix_negative_balance", "master_brain.backfill_ledger_mobiles",
-    "master_brain.reconcile_ledger_balance",
+    "master_brain.reconcile_ledger_balance", "master_brain.reconcile_ledger_bulk",
 ]
 
 
