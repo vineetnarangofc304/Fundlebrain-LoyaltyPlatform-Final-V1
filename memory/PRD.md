@@ -33,6 +33,15 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Bug fix (Jul 15, 2026) — 🔴→🟢 reverse_duplicate_bonus_credits non-idempotency (runaway −750)
+From customer 9303632456 (LAXMI) Master Brain ledger: a top-up campaign ran 3× (+375×3) then "reverse duplicate bonus credits" ran 3× (−750×3 "Reversal of 2 duplicates"), producing a runaway negative + balance/ledger divergence (ledger net −1000, balance showed +875, correct = 500 = 125 opening + one 375 top-up).
+- ROOT CAUSE: the tool detected duplicates from original `type:'bonus'` rows but wrote its reversal as a `type:'adjust'` row and never voided the originals → every re-run re-detected the same duplicates and deducted again (NON-IDEMPOTENT).
+- FIX (`master_brain_tools.py` `_tool_reverse_duplicate_bonus_credits`): net out reversals ALREADY applied per customer (own master_brain `adjust` rows, reason ~ /duplicat/i — matches old + new wording) and only reverse OUTSTANDING = max(0, excess − already); skip already-fully/over-reversed customers. Preview exposes already_reversed + outstanding_to_reverse; result reports total_points_to_reverse + already_reversed_customers.
+- Verified testing_agent iteration_96 = 4/4 (pytest suite `tests/test_reverse_dup_bonus_idempotent.py`): single-shot exact reversal, 2nd/3rd run no-op, over-reversed customer skipped, undo restores exact balance+lifetime. ⚠️ Redeploy required.
+- PROD RECOVERY for the already-broken customers (batch): after redeploy, in Action Log UNDO the extra "reverse duplicate bonus credits" runs (newest first — undo uses per-run snapshots so it reverses exact balance impact even where ledger diverged), then run the (now idempotent) reversal ONCE. NOTE: correct per-customer credit tool is `credit_points_from_file` (mobile+points columns), NOT top-up (target-based) or flat adjust.
+- Non-blocking follow-ups (testing agent): tag reversal ledger rows with a stable machine key instead of relying on reason text; consider voiding the surplus bonus rows (currently left for audit); split master_brain_tools.py (3.5k lines).
+
+
 ### Wave 1 of BOPS punch-list (Jul 15, 2026) — 🟢 2 new reports + Shopper Bill dormant/lapsed fix
 User uploaded a "Kazo Doc" BOPS punch-list (~10 points). Wave 1 delivered (testing_agent iteration_95 = backend 13/13, frontend smoke clean):
 - **Point 9 — New vs Repeat (Daywise)** 🆕 `GET /api/bops-reports/new-vs-repeat-daywise` (+/export). Distinct customers per IST bill-day, split New vs Existing (fresh bills, `new_or_existing` tag) with total + %new/%existing + range totals; store/date filters. Page `/admin/reports/new-vs-repeat-daywise` (filters, KPI cards, stacked bar chart, table, CSV).
