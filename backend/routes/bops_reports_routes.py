@@ -105,7 +105,8 @@ async def new_vs_repeat_daywise(
     user: dict = Depends(get_current_user),
 ):
     match = _store_match(start_date, end_date, zone, city, store_class, store_id)
-    rows = await _new_vs_repeat_daywise(match)
+    with pymongo.timeout(90):
+        rows = await _new_vs_repeat_daywise(match)
     totals = {
         "new_customer_count": sum(r["new_customer_count"] for r in rows),
         "existing_customer_count": sum(r["existing_customer_count"] for r in rows),
@@ -228,11 +229,11 @@ async def customer_count_by_store(
             now = datetime.fromisoformat(as_of).replace(tzinfo=timezone.utc)
         except Exception:
             pass
-    rows = await _customer_count_by_store(now, store_id)
+    with pymongo.timeout(90):
+        rows = await _customer_count_by_store(now, store_id)
     return {"rows": rows, "count": len(rows), "totals": _ccs_totals(rows),
             "as_of": now.date().isoformat(),
             "columns": [{"key": k, "label": l} for k, l in CCS_COLUMNS]}
-
 
 @export_router.get("/customer-count-by-store/export")
 async def customer_count_by_store_export(
