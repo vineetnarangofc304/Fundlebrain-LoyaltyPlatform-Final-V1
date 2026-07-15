@@ -89,6 +89,8 @@ import ShopperBillReport from "@/pages/admin/ShopperBillReport";
 import StoreKPIReport from "@/pages/admin/StoreKPIReport";
 import StoreWiseKPIReport from "@/pages/admin/StoreWiseKPIReport";
 import WeeklyKPIReport from "@/pages/admin/WeeklyKPIReport";
+import NewVsRepeatDaywise from "@/pages/admin/NewVsRepeatDaywise";
+import CustomerCountByStore from "@/pages/admin/CustomerCountByStore";
 import CRMCustomerReport from "@/pages/admin/CRMCustomerReport";
 import KPITrends from "@/pages/admin/KPITrends";
 import DownloadsCenter from "@/pages/admin/DownloadsCenter";
@@ -240,6 +242,8 @@ function App() {
             <Route path="reports/store-kpi" element={<ProtectedRoute><StoreKPIReport /></ProtectedRoute>} />
             <Route path="reports/store-wise-kpi" element={<ProtectedRoute><StoreWiseKPIReport /></ProtectedRoute>} />
             <Route path="reports/weekly-kpi" element={<ProtectedRoute><WeeklyKPIReport /></ProtectedRoute>} />
+            <Route path="reports/new-vs-repeat-daywise" element={<ProtectedRoute><NewVsRepeatDaywise /></ProtectedRoute>} />
+            <Route path="reports/customer-count-by-store" element={<ProtectedRoute><CustomerCountByStore /></ProtectedRoute>} />
             <Route path="reports/crm-customers" element={<ProtectedRoute><CRMCustomerReport /></ProtectedRoute>} />
             <Route path="reports/kpi-trends" element={<ProtectedRoute><KPITrends /></ProtectedRoute>} />
             <Route path="downloads" element={<ProtectedRoute><DownloadsCenter /></ProtectedRoute>} />

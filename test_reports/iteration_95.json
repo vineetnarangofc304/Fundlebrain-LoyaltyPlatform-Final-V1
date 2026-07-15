@@ -1,0 +1,24 @@
+{
+  "summary": "BOPS Wave 1 tested end-to-end: New vs Repeat (Daywise) API+export, Store-wise Customer Count API+export, and Shopper Bill Report POINT-4 (dormant/lapsed with recent range) fix. Backend 13/13 pytest passed. Frontend smoke on /admin/reports/new-vs-repeat-daywise and /admin/reports/customer-count-by-store: both pages render, filters+Apply work, tables populate (NVR 18 rows / CCS 65 rows), KPI cards show, Download CSV / export buttons present, no runtime/page errors.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_bops_wave1.py",
+    "/app/test_reports/pytest/bops_wave1.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "bops_reports_routes.py: _pct returns 4-decimal ratio (0.5); frontend renders it as '100.0%' — verify all consumers expect fraction not percent. Ratio contract is fine but label 'pct_new' can mislead future integrators (consider naming 'ratio_new' or documenting).",
+    "customer_count_by_store: aggregation over ~800K customers ran in ~2-3s in preview; no maxTimeMS bound on the aggregate — under a larger dataset the request-wide db_deadline may fire mid-aggregate. Consider passing maxTimeMS explicitly.",
+    "shopper_report_routes bucket_max override drops both $gte and $gt but assumes bill_date field values are ISO strings; that matches current data but any legacy datetime docs would fail the string comparison silently."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bops_wave1.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (via /enterprise/login form -> POST /api/auth/login)",
+  "seed_data_creation": "None; used existing preview data (~800K customers, ~68 transactions; fresh new-tagged bills 2021-04-01).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Login: use /enterprise/login (data-testid enterprise-login-email, enterprise-login-password). /login redirects to marketing landing. Nav items nav-new-vs-repeat / nav-customer-count are under sidebar 'REPORTS' group which is collapsed by default until user navigates into a report page. Wide date range (2021-01-01..2026-12-31) is required to see non-zero New vs Repeat rows in preview. 'No Mapping' is 0 in preview by design (every customer has a mobile). Shopper Report POINT-4 verification: recency=dormant with start_date=2026-07-01 returned 2 rows and recency=lapsed returned 21 rows — regression fixed."
+}

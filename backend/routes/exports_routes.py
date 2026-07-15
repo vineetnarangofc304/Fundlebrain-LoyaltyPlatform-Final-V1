@@ -47,6 +47,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "kpi_trends":    {"label": "KPI Trends",            "path": "/kpi-reports/trend/export",      "filename": "kpi_trends"},
     "store_wise_kpi": {"label": "Store-wise KPI Report", "path": "/kpi-reports/store-wise-kpi/export", "filename": "store_wise_kpi"},
     "weekly_kpi":    {"label": "Weekly KPI Report",     "path": "/kpi-reports/weekly-kpi/export",  "filename": "weekly_kpi"},
+    "new_vs_repeat_daywise": {"label": "New vs Repeat (Daywise)", "path": "/bops-reports/new-vs-repeat-daywise/export", "filename": "new_vs_repeat_daywise"},
+    "customer_count_by_store": {"label": "Store-wise Customer Count", "path": "/bops-reports/customer-count-by-store/export", "filename": "customer_count_by_store"},
     "live_monitor":  {"label": "Live Bill Monitor",     "path": "/live-monitor/export",           "filename": "live_monitor"},
     # Legacy reports — GET endpoints that emit CSV when `export=csv` is passed.
     "legacy_customer_data":           {"label": "Customer Data",           "path": "/legacy-reports/customer-data",            "filename": "customer_data"},

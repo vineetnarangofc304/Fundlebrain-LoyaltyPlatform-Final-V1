@@ -114,6 +114,8 @@ const SECTIONS = [
       { to: "/admin/reports/store-kpi", icon: StoreIcon, label: "Store KPI Report", testid: "nav-store-kpi" },
       { to: "/admin/reports/store-wise-kpi", icon: StoreIcon, label: "Store-wise KPI", testid: "nav-store-wise-kpi" },
       { to: "/admin/reports/weekly-kpi", icon: TrendingUp, label: "Weekly KPI", testid: "nav-weekly-kpi" },
+      { to: "/admin/reports/new-vs-repeat-daywise", icon: TrendingUp, label: "New vs Repeat (Daywise)", testid: "nav-new-vs-repeat" },
+      { to: "/admin/reports/customer-count-by-store", icon: StoreIcon, label: "Customer Count by Store", testid: "nav-customer-count" },
       { to: "/admin/reports/crm-customers", icon: UserRound, label: "CRM Customer Report", testid: "nav-crm-report" },
       { to: "/admin/reports/kpi-trends", icon: TrendingUp, label: "KPI Trends", testid: "nav-kpi-trends" },
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },

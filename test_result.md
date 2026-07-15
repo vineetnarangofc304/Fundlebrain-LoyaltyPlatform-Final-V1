@@ -218,3 +218,86 @@ agent_communication:
         Backend-focused; light frontend smoke of /admin/points-integrity Issue D panel is a plus.
         Reference helper: /app/backend/tests/repro_neg_balance_truevalue.py (passing).
 
+
+# ==== Wave 1 (BOPS doc): points 7, 9 (new reports) + point 4 (fix) ====
+backend:
+  - task: "New vs Repeat (Daywise) report + CSV export"
+    implemented: true
+    working: "NA"
+    file: "routes/bops_reports_routes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            GET /api/bops-reports/new-vs-repeat-daywise + /export. Distinct customers per IST bill-day,
+            split New vs Existing (fresh bills only, new_or_existing tag), with total + %new/%existing +
+            per-range totals. Reuses _store_match (start_date/end_date/zone/city/store_class/store_id).
+            Self-verified: range incl 2021-04-01 -> 15 new / 0 existing / 100% new; empty ranges -> 0.
+  - task: "Store-wise Customer Count (recency segments) report + CSV export"
+    implemented: true
+    working: "NA"
+    file: "routes/bops_reports_routes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            GET /api/bops-reports/customer-count-by-store (+ /export). Groups the customers collection by
+            home_store_id, buckets by recency vs as_of (default today): Active(0-6M)/Win-Back-Lost(6-12M)/
+            At-Risk(12M+) + No-Mapping(no mobile) + Grand Total; resolves store name/zone/class. Self-verified:
+            64 stores, totals sum to 800,065 (active 209513 + no_mapping 0 + wbl 149862 + at_risk 440690).
+            NOTE (assumption): all 800K customers have a mobile so No-Mapping=0 in this dataset — flagged to user.
+  - task: "Shopper Bill Report — Dormant & Lapsed visible with a recent date range (point 4 fix)"
+    implemented: true
+    working: "NA"
+    file: "routes/shopper_report_routes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            BUG: dormant/lapsed + a recent start_date (default MTD range) produced an impossible window
+            (start_date > bucket cutoff) -> zero rows ("dormant & lapsed not visible"). FIX: in the recency
+            branch, drop the lower bound ($gte/$gt) on bill_date and keep only the bucket upper cap.
+            Self-verified: dormant/lapsed + range 2026-07-01..07-31 now return rows (was 0 before).
+
+frontend:
+  - task: "New vs Repeat (Daywise) + Store-wise Customer Count report pages"
+    implemented: true
+    working: "NA"
+    file: "pages/admin/NewVsRepeatDaywise.jsx, pages/admin/CustomerCountByStore.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Two new report pages under Reports nav (/admin/reports/new-vs-repeat-daywise and
+            /admin/reports/customer-count-by-store) with filters, KPI cards, chart (NVR), table (ReportTable),
+            and CSV export via requestExport. Fixed a ReportTable `visible` prop bug (must be a Set).
+            Both render cleanly (verified via screenshot).
+
+agent_communication:
+    - agent: "main"
+      message: |
+        VERIFY Wave 1 (login superadmin@fundle.io / Fundle@2026):
+        1) GET /api/bops-reports/new-vs-repeat-daywise?start_date=2021-01-01&end_date=2026-12-31 -> rows with
+           new/existing/total/%; totals present. Also /export returns a CSV.
+        2) GET /api/bops-reports/customer-count-by-store -> 64 store rows, each with active/no_mapping/
+           win_back_lost/at_risk/grand_total; totals sum to grand_total. Also /export CSV.
+        3) Shopper Bill Report point-4 fix: GET /api/shopper-report/bills?recency=dormant&start_date=2026-07-01&
+           end_date=2026-07-31 (and recency=lapsed) MUST now return rows (was 0 before). Also confirm recency=all
+           and recency=active still work.
+        4) Frontend: open /admin/reports/new-vs-repeat-daywise and /admin/reports/customer-count-by-store,
+           confirm they render, filters + Apply work, table populates, and Download CSV triggers an export.
+        Backend-first; frontend smoke of the two pages. Do NOT run bulk mutations. Reference: earlier iterations
+        93/94 passed.
+

@@ -341,6 +341,12 @@ async def shopper_bills(
         bucket_max = cut12 if recency == "lapsed" else cut6 if recency == "dormant" else None
         if bucket_max:
             bd = dict(match.get("bill_date") or {})
+            # Dormant/Lapsed customers' bills are ALL older than the bucket cutoff. A client
+            # that also sends a RECENT start_date (e.g. the default MTD range) would otherwise
+            # create an impossible window (start_date > bucket_max) → zero rows, which is the
+            # "dormant & lapsed not visible" bug. Drop the lower bound and keep only the upper cap.
+            bd.pop("$gte", None)
+            bd.pop("$gt", None)
             bd["$lt"] = bucket_max if "$lt" not in bd else min(bd["$lt"], bucket_max)
             match["bill_date"] = bd
         pipe: List[Dict[str, Any]] = [

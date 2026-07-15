@@ -56,6 +56,7 @@ from routes.legacy_reports_routes import router as legacy_reports_router
 from routes.shopper_report_routes import router as shopper_report_router, export_router as shopper_report_export_router
 from routes.reports_kpi_routes import router as kpi_reports_router, export_router as kpi_reports_export_router
 from routes.kpi_matrix_routes import router as kpi_matrix_router, export_router as kpi_matrix_export_router
+from routes.bops_reports_routes import router as bops_reports_router, export_router as bops_reports_export_router
 from routes.points_integrity_routes import router as points_integrity_router
 from routes.exports_routes import router as exports_router
 from routes.demo_routes import router as demo_router
@@ -120,6 +121,8 @@ api_router.include_router(kpi_reports_router)
 api_router.include_router(kpi_reports_export_router)
 api_router.include_router(kpi_matrix_router)
 api_router.include_router(kpi_matrix_export_router)
+api_router.include_router(bops_reports_router)
+api_router.include_router(bops_reports_export_router)
 api_router.include_router(points_integrity_router)
 api_router.include_router(exports_router)
 api_router.include_router(recon_router)
