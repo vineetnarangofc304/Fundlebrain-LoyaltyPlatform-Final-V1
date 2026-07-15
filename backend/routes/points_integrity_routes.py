@@ -18,7 +18,7 @@ from database import audit_logs_col
 from routes.master_brain_routes import require_master_admin
 from routes.master_brain_tools import (
     _tool_reverse_tier_upgrade_bonus, _tool_normalize_historical_points,
-    _tool_fix_negative_balances, _tool_undo_action,
+    _tool_fix_negative_balances, _tool_undo_action, _tool_reconcile_ledger_balance,
 )
 
 router = APIRouter(prefix="/points-integrity", tags=["points-integrity"])
@@ -103,12 +103,44 @@ async def neg_bal_apply(body: NegBalIn, user: dict = Depends(require_master_admi
     return res
 
 
+# ── Issue F: ledger reconciliation (deterministic, bypasses the broken action log) ──
+class ReconcileIn(BaseModel):
+    mobile: str = ""
+    strategy: str = "genuine"
+    target_balance: Optional[int] = None
+    window_hours: int = 72
+    reason: str = ""
+
+
+@router.post("/reconcile-ledger/preview")
+async def reconcile_preview(body: ReconcileIn, user: dict = Depends(require_master_admin)):
+    res = await _tool_reconcile_ledger_balance(
+        mobile=body.mobile.strip(), strategy=body.strategy, target_balance=body.target_balance,
+        window_hours=body.window_hours, confirm=False, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@router.post("/reconcile-ledger/apply")
+async def reconcile_apply(body: ReconcileIn, user: dict = Depends(require_master_admin)):
+    if not body.reason.strip():
+        raise HTTPException(400, "A reason is required to reconcile a balance.")
+    res = await _tool_reconcile_ledger_balance(
+        mobile=body.mobile.strip(), strategy=body.strategy, target_balance=body.target_balance,
+        window_hours=body.window_hours, reason=body.reason.strip(), confirm=True, user=user)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
 # ── Recent repair runs + one-click undo (for reversing the bad redemption backfill) ──
 _UNDOABLE_ACTIONS = [
     "master_brain.fix_missing_redemption_ledger", "master_brain.reverse_tier_upgrade_bonus",
     "master_brain.normalize_historical_points", "master_brain.reverse_duplicate_bonus_credits",
     "master_brain.reverse_duplicate_adjustments", "master_brain.fix_negative_balances_bulk",
     "master_brain.fix_negative_balance", "master_brain.backfill_ledger_mobiles",
+    "master_brain.reconcile_ledger_balance",
 ]
 
 

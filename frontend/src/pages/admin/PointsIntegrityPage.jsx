@@ -12,7 +12,7 @@ import { toast } from "sonner";
 import { SectionHeading } from "./_shared";
 import RetierSection from "./_retier_section";
 import { fmtNum } from "@/lib/format";
-import { ShieldAlert, Search, Wrench, RotateCcw, AlertTriangle, RefreshCw } from "lucide-react";
+import { ShieldAlert, Search, Wrench, RotateCcw, AlertTriangle, RefreshCw, Scale } from "lucide-react";
 
 const ACCENTS = { A: "burgundy", B: "amber", C: "indigo", D: "rose", E: "teal" };
 
@@ -216,6 +216,8 @@ export default function PointsIntegrityPage() {
         <div><label className={lblCls}>Mobile (optional)</label><input value={d.mobile} onChange={(e) => setD({ ...d, mobile: e.target.value })} placeholder="blank = all" className={`${inputCls} w-44 font-mono`} data-testid="neg-mobile" /></div>
       </RepairPanel>
 
+      <LedgerReconcileSection />
+
       <RepairRuns />
 
       <div className="chart-card p-6" data-accent="teal" data-testid="repair-retier">
@@ -278,3 +280,154 @@ function RepairRuns() {
     </div>
   );
 }
+
+/* Ledger Reconciliation — deterministic per-customer balance repair computed directly from the
+   points_ledger. Used when the action log is missing events so the normal Undo can't be trusted
+   (e.g. a top-up run several times, then a flat adjust wrongly used to reverse it). Shows the full
+   ledger + candidate balances; the admin confirms the correct target. Audited + undoable. */
+const STRATS = [
+  { v: "genuine", label: "Genuine (recommended)", hint: "Excludes our own reversal/adjust rows + collapses duplicates" },
+  { v: "dedup", label: "De-duplicated", hint: "Keeps everything, removes only exact duplicate rows" },
+  { v: "raw", label: "Raw ledger sum", hint: "Sum of every ledger row, as-is" },
+];
+
+function CandCard({ label, value, active, onClick, testid }) {
+  return (
+    <button type="button" onClick={onClick} data-testid={testid}
+      className={`text-left px-3 py-2 rounded-lg border transition-colors ${active ? "border-indigo-400 bg-indigo-50 ring-1 ring-indigo-300" : "border-neutral-200 bg-neutral-50 hover:bg-neutral-100"}`}>
+      <div className="text-[10px] uppercase tracking-[0.15em] text-neutral-500">{label}</div>
+      <div className="text-lg font-semibold text-neutral-900">{fmtNum(value)}</div>
+    </button>
+  );
+}
+
+function LedgerReconcileSection() {
+  const [mobile, setMobile] = useState("");
+  const [strategy, setStrategy] = useState("genuine");
+  const [preview, setPreview] = useState(null);
+  const [target, setTarget] = useState("");
+  const [reason, setReason] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [done, setDone] = useState(null);
+
+  const scan = async (strat = strategy) => {
+    if (!mobile.trim()) { toast.error("Enter a mobile number."); return; }
+    setScanning(true); setDone(null);
+    try {
+      const r = await api.post("/points-integrity/reconcile-ledger/preview", { mobile: mobile.trim(), strategy: strat });
+      setPreview(r.data);
+      setTarget(String(r.data.target_balance ?? ""));
+    } catch (e) { toast.error(e.response?.data?.detail || "Scan failed"); setPreview(null); }
+    finally { setScanning(false); }
+  };
+
+  const pickStrategy = (v) => { setStrategy(v); if (preview) scan(v); };
+
+  const apply = async () => {
+    if (!reason.trim()) { toast.error("A reason is required."); return; }
+    if (target === "" || isNaN(Number(target))) { toast.error("Enter a valid target balance."); return; }
+    setApplying(true);
+    try {
+      const r = await api.post("/points-integrity/reconcile-ledger/apply",
+        { mobile: mobile.trim(), strategy, target_balance: Number(target), reason: reason.trim() });
+      toast.success(r.data?.message || "Reconciled.");
+      setDone(r.data); setPreview(null); setReason("");
+    } catch (e) { toast.error(e.response?.data?.detail || "Action failed"); }
+    finally { setApplying(false); }
+  };
+
+  const p = preview;
+  return (
+    <div className="chart-card p-6" data-accent="indigo" data-testid="repair-reconcile">
+      <SectionHeading eyebrow="ISSUE F" title="Reconcile a balance from the ledger (bypasses the action log)" accent="indigo" />
+      <p className="text-sm text-neutral-600 mt-2 leading-relaxed">
+        Recomputes ONE customer's correct balance directly from the <b>points ledger</b> — for when the
+        Action Log is missing events (so the normal Undo can't be trusted), e.g. a top-up that ran several
+        times and was then wrongly reversed with a flat adjust. It shows the full ledger and candidate
+        balances; you confirm the correct target. Every correction is audited and undoable below.
+      </p>
+
+      <div className="mt-4 flex flex-wrap items-end gap-3">
+        <div><label className={lblCls}>Mobile</label>
+          <input value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="10-digit mobile"
+            className={`${inputCls} w-44 font-mono`} data-testid="reconcile-mobile" /></div>
+        <div><label className={lblCls}>Strategy</label>
+          <select value={strategy} onChange={(e) => pickStrategy(e.target.value)} className={inputCls} data-testid="reconcile-strategy">
+            {STRATS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
+          </select></div>
+        <button onClick={() => scan()} disabled={scanning} className="k-btn k-btn-outline flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-scan">
+          <Search className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} /> {scanning ? "Scanning…" : "Scan ledger"}
+        </button>
+      </div>
+      <p className="text-xs text-neutral-500 mt-1">{STRATS.find((s) => s.v === strategy)?.hint}</p>
+
+      {p && (
+        <div className="mt-4 space-y-4" data-testid="reconcile-preview">
+          <div className="flex items-center gap-2 text-sm text-neutral-700">
+            <Scale className="w-4 h-4 text-indigo-500" />
+            <span className="font-medium">{p.name || "Customer"}</span>
+            <span className="font-mono text-neutral-500">{p.mobile}</span>
+            <span className="text-neutral-400">· {fmtNum(p.ledger_rows)} ledger rows · {fmtNum(p.mb_adjust_rows)} reversal/adjust rows</span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <CandCard label="Current balance" value={p.current_balance} active={false} onClick={() => setTarget(String(p.current_balance))} testid="cand-current" />
+            <CandCard label="Raw ledger sum" value={p.raw_ledger_sum} active={Number(target) === p.raw_ledger_sum} onClick={() => setTarget(String(p.raw_ledger_sum))} testid="cand-raw" />
+            <CandCard label="De-duplicated" value={p.dedup_ledger_sum} active={Number(target) === p.dedup_ledger_sum} onClick={() => setTarget(String(p.dedup_ledger_sum))} testid="cand-dedup" />
+            <CandCard label="Genuine" value={p.genuine_ledger_sum} active={Number(target) === p.genuine_ledger_sum} onClick={() => setTarget(String(p.genuine_ledger_sum))} testid="cand-genuine" />
+          </div>
+
+          <div className="flex flex-wrap items-end gap-3">
+            <div><label className={lblCls}>Set balance to</label>
+              <input value={target} onChange={(e) => setTarget(e.target.value)} type="number"
+                className={`${inputCls} w-32 font-mono`} data-testid="reconcile-target" /></div>
+            <div className="text-sm text-neutral-600 pb-2">
+              Change: <b className={Number(target) - p.current_balance >= 0 ? "text-emerald-700" : "text-rose-700"}>
+                {Number(target) - p.current_balance >= 0 ? "+" : ""}{fmtNum((Number(target) || 0) - p.current_balance)}</b> points
+            </div>
+          </div>
+
+          {p.ledger && p.ledger.length > 0 && (
+            <div className="max-h-72 overflow-auto border border-neutral-200 rounded-lg" data-testid="reconcile-ledger-table">
+              <table className="w-full text-xs">
+                <thead className="bg-neutral-50 sticky top-0">
+                  <tr className="text-left text-neutral-500">
+                    <th className="px-3 py-2 font-medium">Date</th>
+                    <th className="px-3 py-2 font-medium">Type</th>
+                    <th className="px-3 py-2 font-medium text-right">Points</th>
+                    <th className="px-3 py-2 font-medium">Reason</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-100">
+                  {p.ledger.map((r, i) => (
+                    <tr key={i} className={r.is_mb_adjust ? "bg-amber-50" : ""}>
+                      <td className="px-3 py-1.5 whitespace-nowrap text-neutral-500">{r.date}</td>
+                      <td className="px-3 py-1.5">{r.type}{r.is_mb_adjust && <span className="ml-1 text-[10px] px-1 rounded bg-amber-200 text-amber-900">reversal</span>}</td>
+                      <td className={`px-3 py-1.5 text-right font-mono ${r.points < 0 ? "text-rose-700" : "text-emerald-700"}`}>{r.points >= 0 ? "+" : ""}{fmtNum(r.points)}</td>
+                      <td className="px-3 py-1.5 text-neutral-600 truncate max-w-[280px]" title={r.reason}>{r.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-3">
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)"
+              className="p-2.5 border border-neutral-300 rounded-lg text-sm flex-1 min-w-[260px]" data-testid="reconcile-reason" />
+            <button onClick={apply} disabled={applying} className="k-btn kazo-bg-burgundy text-white flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-apply">
+              <Wrench className="w-4 h-4" /> {applying ? "Applying…" : "Reconcile now"}
+            </button>
+          </div>
+        </div>
+      )}
+      {done && (
+        <div className="mt-4 p-4 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-900 text-sm" data-testid="reconcile-done">
+          {done.message}
+        </div>
+      )}
+    </div>
+  );
+}
+

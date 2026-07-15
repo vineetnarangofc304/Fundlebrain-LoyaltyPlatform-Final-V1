@@ -1183,6 +1183,142 @@ async def _tool_reverse_duplicate_bonus_credits(filter_reason: str = "", since: 
 
 
 # ============================================================
+# 6a) LEDGER RECONCILIATION — deterministic per-customer balance repair
+#     computed DIRECTLY from points_ledger (bypasses the audit/action log,
+#     which on prod is missing events so the snapshot-Undo can't be trusted).
+#     Fixes the "top-up ran several times, then a flat adjust was wrongly used
+#     to reverse it" corruption: the admin sees the full ledger + candidate
+#     balances, confirms the correct value, and it applies audited + undoable.
+# ============================================================
+RECON_LEDGER_MAX_ROWS = 5000
+
+
+def _dup_excess_over(rows: List[Dict[str, Any]], window_hours: int) -> int:
+    """Points added/removed MORE THAN ONCE by identical, time-clustered ledger rows.
+    Groups by (type, points, reason); within a group, rows created within window_hours of the
+    first are duplicates. Returns Σ (dupes * points) so it can be netted out of a ledger sum."""
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for r in rows:
+        key = (r.get("type"), int(r.get("points") or 0), (r.get("reason") or "").strip())
+        groups.setdefault(key, []).append(r)
+    excess = 0
+    for (_typ, pts, _rsn), grp in groups.items():
+        if len(grp) <= 1 or pts == 0:
+            continue
+        grp = sorted(grp, key=lambda r: r.get("created_at") or "")
+        t0 = _parse_iso(grp[0].get("created_at"))
+        dupes = 0
+        for r in grp[1:]:
+            tr = _parse_iso(r.get("created_at"))
+            if (t0 is None or tr is None) or (tr - t0).total_seconds() <= window_hours * 3600:
+                dupes += 1
+        excess += dupes * pts
+    return excess
+
+
+async def _load_customer_ledger(cust: Dict[str, Any]) -> List[Dict[str, Any]]:
+    strs, ints = _mobile_candidates(cust.get("mobile"))
+    q = {"$or": [{"customer_mobile": {"$in": strs + ints}}, {"customer_id": cust.get("id")}],
+         "voided": {"$ne": True}}
+    proj = {"_id": 0, "id": 1, "type": 1, "kind": 1, "points": 1, "reason": 1,
+            "reference_type": 1, "bill_number": 1, "created_at": 1}
+    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+        return await points_ledger_col.find(q, proj).sort("created_at", 1) \
+            .to_list(RECON_LEDGER_MAX_ROWS)
+
+
+def _reconcile_candidates(cust: Dict[str, Any], rows: List[Dict[str, Any]],
+                          window_hours: int) -> Dict[str, Any]:
+    current = int(cust.get("points_balance") or 0)
+    raw_sum = sum(int(r.get("points") or 0) for r in rows)
+    dedup_sum = raw_sum - _dup_excess_over(rows, window_hours)
+    genuine_rows = [r for r in rows
+                    if not (r.get("type") == "adjust" and r.get("reference_type") == "master_brain")]
+    genuine_sum = (sum(int(r.get("points") or 0) for r in genuine_rows)
+                   - _dup_excess_over(genuine_rows, window_hours))
+    return {"current_balance": current, "raw_ledger_sum": raw_sum,
+            "dedup_ledger_sum": dedup_sum, "genuine_ledger_sum": genuine_sum,
+            "ledger_rows": len(rows), "mb_adjust_rows": len(rows) - len(genuine_rows)}
+
+
+def _pick_target(cand: Dict[str, Any], strategy: str) -> int:
+    s = (strategy or "genuine").lower()
+    if s == "raw":
+        return cand["raw_ledger_sum"]
+    if s == "dedup":
+        return cand["dedup_ledger_sum"]
+    return cand["genuine_ledger_sum"]
+
+
+async def _tool_reconcile_ledger_balance(mobile: str = "", strategy: str = "genuine",
+                                         target_balance: Optional[int] = None,
+                                         window_hours: int = 72, floor_zero: bool = True,
+                                         reason: str = "", confirm: bool = False,
+                                         user=None) -> Dict[str, Any]:
+    """LEDGER RECONCILER (Master Admin). Recompute ONE customer's correct points balance directly
+    from `points_ledger` — repairs corruption (a top-up run several times, then a flat adjust
+    wrongly used to reverse it) when the action log is missing events so snapshot-Undo is
+    unreliable. Returns the FULL ledger + candidate balances so a human confirms the exact value:
+      • raw_ledger_sum     — Σ of every ledger row (as-is)
+      • dedup_ledger_sum   — raw minus provable duplicate (identical, time-clustered) rows
+      • genuine_ledger_sum — dedup EXCLUDING our own master_brain 'adjust' compensating rows
+                             (the botched reversals) — usually the true intended balance.
+    Apply sets points_balance to `target_balance` (admin-confirmed; else the `strategy` candidate)
+    and writes ONE compensating, audited, UNDOABLE adjust ledger row for the delta."""
+    err = _require_master(user)
+    if err:
+        return err
+    cust = await _find_customer(mobile)
+    if not cust:
+        return {"found": False, "mobile": mobile, "error": "No customer found for that mobile."}
+    rows = await _load_customer_ledger(cust)
+    cand = _reconcile_candidates(cust, rows, window_hours)
+    current = cand["current_balance"]
+    tgt = int(target_balance) if target_balance is not None else _pick_target(cand, strategy)
+    floored = False
+    if floor_zero and tgt < 0:
+        tgt, floored = 0, True
+    delta = tgt - current
+
+    plan = {"action": "reconcile_ledger_balance", "mobile": cust.get("mobile"),
+            "name": cust.get("name"), "strategy": strategy, **cand,
+            "target_balance": tgt, "delta": delta, "floored_to_zero": floored}
+    if not confirm:
+        plan["preview"] = True
+        plan["ledger"] = [
+            {"date": (r.get("created_at") or "")[:19].replace("T", " "),
+             "type": r.get("type") or r.get("kind"), "points": int(r.get("points") or 0),
+             "reason": r.get("reason") or "", "bill_number": r.get("bill_number") or "",
+             "is_mb_adjust": bool(r.get("type") == "adjust" and r.get("reference_type") == "master_brain")}
+            for r in rows[-200:]]
+        plan["confirmation_required"] = (
+            "Review the ledger + candidate balances, confirm the correct target with the user and a "
+            "reason, then call again confirm=true (optionally overriding target_balance).")
+        return plan
+    rerr = _need_reason(reason)
+    if rerr:
+        return rerr
+    if delta == 0:
+        return {"ok": True, "applied": False, **plan,
+                "message": f"{cust.get('mobile')} balance ({current}) already matches the target — nothing to change."}
+    audit_id = str(uuid.uuid4())
+    await customers_col.update_one({"id": cust["id"]}, {"$set": {"points_balance": tgt}})
+    await _ledger(cust.get("mobile"), delta, "adjust",
+                  f"Ledger reconciliation: balance {current} -> {tgt} ({strategy}) — {reason}",
+                  user, extra={"fix_audit_id": audit_id})
+    await _log_master(user, "reconcile_ledger_balance", "customer", cust.get("id"), reason,
+                      {"mobile": cust.get("mobile"), "balance_before": current, "balance_after": tgt,
+                       "strategy": strategy, "delta": delta, **cand}, audit_id=audit_id)
+    await _record_snapshot(audit_id, "reconcile_ledger_balance", [{
+        "cust_id": cust["id"], "mobile": cust.get("mobile"),
+        "points_before": current, "points_after": tgt}])
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan,
+            "message": (f"Reconciled {cust.get('mobile')} from {current} to {tgt} "
+                        f"({'+' if delta >= 0 else ''}{delta}) using the '{strategy}' strategy. "
+                        f"A compensating ledger entry was logged. Audit {audit_id} — undoable.")}
+
+
+# ============================================================
 # 6b) GENERIC GUARDED BULK FIELD UPDATE on the customers collection
 #     (so Master Brain can run a db.customers.updateMany-style fix itself
 #      instead of punting to the engineering team)
