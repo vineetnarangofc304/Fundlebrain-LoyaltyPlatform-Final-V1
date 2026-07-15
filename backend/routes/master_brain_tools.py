@@ -1071,39 +1071,79 @@ async def _tool_reverse_duplicate_bonus_credits(filter_reason: str = "", since: 
         total_excess_points += ex
         total_dupe_rows += dupes
 
+    # ── Idempotency / over-reversal guard (BUG FIX) ──────────────────────────
+    # This tool detects duplicates from the ORIGINAL `bonus` rows but records its reversal as an
+    # `adjust` row and never voids the bonus rows — so a REPEAT run re-detected the SAME duplicates
+    # and deducted again (the 3× -750 runaway seen on customer 9303632456). Net out the reversals
+    # ALREADY applied for each customer and only ever remove the OUTSTANDING surplus (never below 0).
+    # Prior reversals are our own master_brain `adjust` rows whose reason mentions "duplicat"
+    # (matches both old "Reversal of N duplicates" and new "Reversal of N duplicate bonus credit(s)").
+    prior_reversed: Dict[str, int] = {}
+    if per_customer:
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            async for r in points_ledger_col.aggregate([
+                {"$match": {"customer_mobile": {"$in": list(per_customer.keys())},
+                            "type": "adjust", "reference_type": "master_brain",
+                            "points": {"$lt": 0},
+                            "reason": {"$regex": "duplicat", "$options": "i"}}},
+                {"$group": {"_id": "$customer_mobile", "rev": {"$sum": "$points"}}},
+            ]):
+                prior_reversed[r["_id"]] = -int(r.get("rev") or 0)
+    already_reversed_customers = 0
+    total_outstanding = 0
+    for m, c in per_customer.items():
+        already = int(prior_reversed.get(m, 0))
+        c["already_reversed"] = already
+        c["outstanding"] = max(0, int(c["excess_points"]) - already)
+        if c["outstanding"] <= 0:
+            already_reversed_customers += 1
+        total_outstanding += c["outstanding"]
+    effective = {m: c for m, c in per_customer.items() if c["outstanding"] > 0}
+
     plan = {"action": "reverse_duplicate_bonus_credits",
             "filter_reason": filter_reason or "(all master_brain bonus)",
             "since": since_iso, "window_hours": window_hours,
-            "customers_affected": len(per_customer),
+            "customers_affected": len(effective),
             "duplicate_rows": total_dupe_rows,
-            "total_excess_points": total_excess_points}
+            "total_excess_points": total_excess_points,
+            "total_points_to_reverse": total_outstanding,
+            "already_reversed_customers": already_reversed_customers}
     if not confirm:
         plan["preview"] = True
         plan["sample"] = [{"mobile": m, "excess_points": c["excess_points"],
+                           "already_reversed": c["already_reversed"],
+                           "outstanding_to_reverse": c["outstanding"],
                            "duplicate_extra_rows": c["dupe_rows"]}
                           for m, c in list(per_customer.items())[:10]]
         if not per_customer:
             plan["note"] = "No duplicate master_brain bonus credits found in this scope."
+        elif not effective:
+            plan["note"] = (f"Found {len(per_customer)} customer(s) with duplicate bonus credits, but their "
+                            f"surplus was ALREADY reversed — nothing outstanding to reverse (idempotent).")
         plan["confirmation_required"] = ("Confirm with the user + capture a reason, then call again with "
-                                          "confirm=true. Reverses only the SURPLUS credits (keeps ONE each).")
+                                          "confirm=true. Reverses only the OUTSTANDING surplus (keeps ONE each; "
+                                          "never re-reverses what was already corrected).")
         return plan
-    if not per_customer:
+    if not effective:
         return {"ok": True, "applied": True, **plan,
-                "message": "No duplicate master_brain bonus credits found in that scope — nothing to reverse."}
+                "message": ("Nothing outstanding to reverse — the duplicate bonus credits in that scope were "
+                            "already corrected (idempotent, no double-deduction).")}
     rerr = _need_reason(reason)
     if rerr:
         return rerr
 
-    cust_map = await _bulk_find_customers(list(per_customer.keys()))
+    cust_map = await _bulk_find_customers(list(effective.keys()))
     upd_ops: List[Any] = []
     ledger_docs: List[Dict[str, Any]] = []
     changes: List[Dict[str, Any]] = []
     reversed_points = 0
-    for m, c in per_customer.items():
+    for m, c in effective.items():
         cust = cust_map.get(_last10(m))
         if not cust:
             continue
-        ex = int(c["excess_points"])
+        ex = int(c["outstanding"])
+        if ex <= 0:
+            continue
         cid = cust["id"]
         cur = int(cust.get("points_balance") or 0)
         lt = int(cust.get("lifetime_points_earned") or 0)

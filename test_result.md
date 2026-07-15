@@ -301,3 +301,47 @@ agent_communication:
         Backend-first; frontend smoke of the two pages. Do NOT run bulk mutations. Reference: earlier iterations
         93/94 passed.
 
+
+# ==== Bug fix: reverse_duplicate_bonus_credits non-idempotency (runaway -750) ====
+backend:
+  - task: "reverse_duplicate_bonus_credits is idempotent (nets out prior reversals, never over-deducts)"
+    implemented: true
+    working: "NA"
+    file: "routes/master_brain_tools.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE (from customer 9303632456 Master Brain ledger screenshot): a top-up campaign was run
+            3x (+375 x3) and then reverse_duplicate_bonus_credits was run 3x, each deducting -750 ("Reversal of
+            2 duplicates") -> runaway negative + balance/ledger divergence. The tool detected duplicates from the
+            original type:'bonus' rows but wrote its reversal as a type:'adjust' row and NEVER voided the bonus
+            rows, so every re-run re-detected the same duplicates and deducted again (non-idempotent).
+            FIX: before applying, sum the reversals ALREADY applied per customer (our own master_brain 'adjust'
+            rows with reason ~ /duplicat/i) and only reverse the OUTSTANDING surplus = max(0, excess - already).
+            Customers already fully/over-reversed are skipped. Preview now shows already_reversed +
+            outstanding_to_reverse; result reports total_points_to_reverse + already_reversed_customers.
+            Self-verified (tests/repro_dup_bonus_idempotent.py): Case A 3 dup top-ups (bal 1250) -> run1 reverses
+            750 -> 500; run2/run3 do NOTHING (stays 500). Case B already over-reversed (bal -250) -> tool reverses
+            NOTHING (does not drop further). Undo of a reversal run still restores exact balance (verified earlier).
+
+agent_communication:
+    - agent: "main"
+      message: |
+        VERIFY the reverse_duplicate_bonus_credits idempotency fix (Master Admin masteradmin@fundle.io / Master@2026).
+        The tool is invoked through the Master Brain agent flow (no plain REST endpoint), so the reliable path is to
+        run/extend /app/backend/tests/repro_dup_bonus_idempotent.py (invokes the real handler
+        routes.master_brain_tools._tool_reverse_duplicate_bonus_credits against the DB) and assert:
+        1) A customer with N duplicate master_brain bonus rows (same mobile/points/reason within window) is reversed
+           by exactly (N-1)*points ONCE; balance + lifetime_points_earned drop by that amount only.
+        2) Running the tool again for the same scope reverses NOTHING (idempotent) — balance unchanged.
+        3) A customer already OVER-reversed (prior reversal adjust rows summing >= the surplus) is skipped — balance
+           does NOT drop further.
+        4) Preview (confirm=false) returns total_points_to_reverse and already_reversed_customers and a sample with
+           outstanding_to_reverse.
+        Seed throwaway customers (e.g. 9700000101/102) with customers + points_ledger rows and CLEAN UP after.
+        Backend-only. Prior passing iterations: 93 (return ledger), 94 (neg-balance true value), 95 (BOPS wave1).
+

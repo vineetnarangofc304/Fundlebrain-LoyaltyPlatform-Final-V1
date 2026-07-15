@@ -1,0 +1,22 @@
+{
+  "summary": "Verified idempotency + undo fix for reverse_duplicate_bonus_credits (regression of customer 9303632456 runaway negative balance). Converted the standalone repro into a pytest suite that calls the REAL production handler against MongoDB and exercises all 5 requested behaviors. All 4 tests pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_reverse_dup_bonus_idempotent.py",
+    "/app/test_reports/pytest/iteration96.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Prior-reversal detection uses regex /duplicat/i on the reason field. Robust against both wordings ('Reversal of N duplicates' and 'Reversal of N duplicate bonus credit(s)') but is text-based; consider tagging future reversal ledger rows with a stable machine key (e.g., reference_type='reverse_duplicate_bonus_credits' or a dedicated meta field) so netting no longer depends on human-readable copy.",
+    "Duplicate bonus ledger rows are LEFT IN PLACE (only a compensating adjust is written). This is called out in the docstring for audit reasons, but means aggregate reports over `type:'bonus'` will still show the surplus unless callers filter by `voided` or exclude adjust-linked bonus rows.",
+    "master_brain_tools.py is 3508 lines — well over the 700-line file-size guideline. Consider splitting per tool (reverse_duplicate_bonus_credits, bulk_award_bonus, undo, etc.) into modules under routes/master_brain/ for maintainability. Not blocking."
+  ],
+  "updated_files": ["/app/backend/tests/test_reverse_dup_bonus_idempotent.py"],
+  "success_rate": {"backend": "100% (4/4)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "masteradmin@fundle.io / Master@2026 (handler user dict built directly from users collection; no login needed)",
+  "seed_data_creation": "Throwaway customers mobile 9700000101/02/03, prefixed reason 'TEST_' and name 'TEST_DupBonus'. Fully cleaned up via module-scope autouse fixture.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite for the reverse_duplicate_bonus_credits idempotency fix lives at /app/backend/tests/test_reverse_dup_bonus_idempotent.py — run with: cd /app/backend && PYTHONPATH=/app/backend pytest tests/test_reverse_dup_bonus_idempotent.py -v. Covers: (A) single-shot exact (N-1)*points reversal + 2nd/3rd run no-op, (B) over-reversed customer skipped, (C) preview shape (total_excess_points/total_points_to_reverse/already_reversed_customers/sample.[excess_points,already_reversed,outstanding_to_reverse]), (D) UNDO restores prior balance+lifetime. Seeds/cleans mobiles 9700000101-03 so it is safe to re-run against real DB."
+}
