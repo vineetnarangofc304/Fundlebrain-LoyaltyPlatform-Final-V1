@@ -1218,13 +1218,17 @@ def _dup_excess_over(rows: List[Dict[str, Any]], window_hours: int) -> int:
 
 async def _load_customer_ledger(cust: Dict[str, Any]) -> List[Dict[str, Any]]:
     strs, ints = _mobile_candidates(cust.get("mobile"))
-    q = {"$or": [{"customer_mobile": {"$in": strs + ints}}, {"customer_id": cust.get("id")}],
-         "voided": {"$ne": True}}
     proj = {"_id": 0, "id": 1, "type": 1, "kind": 1, "points": 1, "reason": 1,
-            "reference_type": 1, "bill_number": 1, "created_at": 1}
-    with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
-        return await points_ledger_col.find(q, proj).sort("created_at", 1) \
-            .to_list(RECON_LEDGER_MAX_ROWS)
+            "reference_type": 1, "bill_number": 1, "created_at": 1, "voided": 1}
+    # Query ONLY by the indexed `customer_mobile` (ix_pl_mobile). The previous `$or` with the
+    # UNINDEXED `customer_id` + a `voided:{$ne}` negation forced a full 1.5M-doc collection scan
+    # per customer (~5s each) — a 10-mobile batch took ~53s and timed out on prod. `voided` is
+    # filtered in Python; only ~89 legacy orphan rows lack a mobile (handled by the mobile backfill).
+    with pymongo.timeout(60):
+        rows = await points_ledger_col.find(
+            {"customer_mobile": {"$in": strs + ints}}, proj
+        ).sort("created_at", 1).to_list(RECON_LEDGER_MAX_ROWS)
+    return [r for r in rows if not r.get("voided")]
 
 
 def _reconcile_candidates(cust: Dict[str, Any], rows: List[Dict[str, Any]],
