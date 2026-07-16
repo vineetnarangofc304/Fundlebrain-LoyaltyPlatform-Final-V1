@@ -110,6 +110,7 @@ class ReconcileIn(BaseModel):
     mobile: str = ""
     strategy: str = "genuine"
     target_balance: Optional[int] = None
+    expiry_date: str = ""
     window_hours: int = 72
     reason: str = ""
 
@@ -118,7 +119,7 @@ class ReconcileIn(BaseModel):
 async def reconcile_preview(body: ReconcileIn, user: dict = Depends(require_master_admin)):
     res = await _tool_reconcile_ledger_balance(
         mobile=body.mobile.strip(), strategy=body.strategy, target_balance=body.target_balance,
-        window_hours=body.window_hours, confirm=False, user=user)
+        expiry_date=body.expiry_date, window_hours=body.window_hours, confirm=False, user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])
     return res
@@ -130,7 +131,8 @@ async def reconcile_apply(body: ReconcileIn, user: dict = Depends(require_master
         raise HTTPException(400, "A reason is required to reconcile a balance.")
     res = await _tool_reconcile_ledger_balance(
         mobile=body.mobile.strip(), strategy=body.strategy, target_balance=body.target_balance,
-        window_hours=body.window_hours, reason=body.reason.strip(), confirm=True, user=user)
+        expiry_date=body.expiry_date, window_hours=body.window_hours,
+        reason=body.reason.strip(), confirm=True, user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])
     return res
@@ -141,6 +143,7 @@ class ReconcileBulkIn(BaseModel):
     strategy: str = "genuine"
     fixed_value: Optional[int] = None
     only_raise: bool = False
+    expiry_date: str = ""
     window_hours: int = 72
     reason: str = ""
 
@@ -149,7 +152,8 @@ class ReconcileBulkIn(BaseModel):
 async def reconcile_bulk_preview(body: ReconcileBulkIn, user: dict = Depends(require_master_admin)):
     res = await _tool_reconcile_ledger_bulk(
         mobiles=body.mobiles, strategy=body.strategy, fixed_value=body.fixed_value,
-        only_raise=body.only_raise, window_hours=body.window_hours, confirm=False, user=user)
+        only_raise=body.only_raise, expiry_date=body.expiry_date,
+        window_hours=body.window_hours, confirm=False, user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])
     return res
@@ -161,8 +165,8 @@ async def reconcile_bulk_apply(body: ReconcileBulkIn, user: dict = Depends(requi
         raise HTTPException(400, "A reason is required to reconcile balances.")
     res = await _tool_reconcile_ledger_bulk(
         mobiles=body.mobiles, strategy=body.strategy, fixed_value=body.fixed_value,
-        only_raise=body.only_raise, window_hours=body.window_hours,
-        reason=body.reason.strip(), confirm=True, user=user)
+        only_raise=body.only_raise, expiry_date=body.expiry_date,
+        window_hours=body.window_hours, reason=body.reason.strip(), confirm=True, user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])
     return res

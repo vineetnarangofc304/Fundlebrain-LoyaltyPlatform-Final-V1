@@ -1256,9 +1256,9 @@ def _pick_target(cand: Dict[str, Any], strategy: str) -> int:
 
 async def _tool_reconcile_ledger_balance(mobile: str = "", strategy: str = "genuine",
                                          target_balance: Optional[int] = None,
-                                         window_hours: int = 72, floor_zero: bool = True,
-                                         reason: str = "", confirm: bool = False,
-                                         user=None) -> Dict[str, Any]:
+                                         expiry_date: str = "", window_hours: int = 72,
+                                         floor_zero: bool = True, reason: str = "",
+                                         confirm: bool = False, user=None) -> Dict[str, Any]:
     """LEDGER RECONCILER (Master Admin). Recompute ONE customer's correct points balance directly
     from `points_ledger` — repairs corruption (a top-up run several times, then a flat adjust
     wrongly used to reverse it) when the action log is missing events so snapshot-Undo is
@@ -1306,10 +1306,17 @@ async def _tool_reconcile_ledger_balance(mobile: str = "", strategy: str = "genu
         return {"ok": True, "applied": False, **plan,
                 "message": f"{cust.get('mobile')} balance ({current}) already matches the target — nothing to change."}
     audit_id = str(uuid.uuid4())
+    _exp = None
+    if (expiry_date or "").strip() and delta > 0:
+        try:
+            _ed = datetime.fromisoformat(expiry_date.strip()[:10])
+            _exp = _ed.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc).isoformat()
+        except Exception:
+            return {"error": "expiry_date must be in YYYY-MM-DD format."}
     await customers_col.update_one({"id": cust["id"]}, {"$set": {"points_balance": tgt}})
     await _ledger(cust.get("mobile"), delta, "adjust",
                   f"Ledger reconciliation: balance {current} -> {tgt} ({strategy}) — {reason}",
-                  user, extra={"fix_audit_id": audit_id})
+                  user, extra={"fix_audit_id": audit_id, "expires_at": _exp})
     await _log_master(user, "reconcile_ledger_balance", "customer", cust.get("id"), reason,
                       {"mobile": cust.get("mobile"), "balance_before": current, "balance_after": tgt,
                        "strategy": strategy, "delta": delta, **cand}, audit_id=audit_id)
@@ -1330,17 +1337,19 @@ BULK_RECON_CAP = 3000
 
 async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str = "genuine",
                                       fixed_value: Optional[int] = None, only_raise: bool = False,
-                                      window_hours: int = 72, floor_zero: bool = True,
-                                      reason: str = "", confirm: bool = False,
-                                      user=None) -> Dict[str, Any]:
+                                      expiry_date: str = "", window_hours: int = 72,
+                                      floor_zero: bool = True, reason: str = "",
+                                      confirm: bool = False, user=None) -> Dict[str, Any]:
     """BATCH LEDGER RECONCILER (Master Admin). Runs the same per-customer ledger recompute as
     `_tool_reconcile_ledger_balance` across MANY mobiles at once. `strategy`:
       genuine/dedup/raw -> recompute the target from each customer's ledger, OR
       'fixed'           -> set every customer to `fixed_value` (e.g. a top-up-to-500 campaign).
     `only_raise=True` never LOWERS a balance (top-up semantics: target = max(current, chosen)).
-    Preview returns a full per-customer table (current -> target + delta); apply sets each balance,
-    writes ONE compensating audited ledger row per customer (stamped fix_audit_id), snapshots all
-    before/after -> UNDOABLE as a single run. Not-found mobiles are reported, never created."""
+    `expiry_date` (YYYY-MM-DD) sets the point validity — when a customer is CREDITED (delta>0) the
+    compensating ledger row carries this `expires_at` so the restored points expire correctly
+    (blank = no expiry). Preview returns a full per-customer table (current -> target + delta);
+    apply sets each balance, writes ONE compensating audited ledger row per customer (stamped
+    fix_audit_id), snapshots all before/after -> UNDOABLE as a single run. Not-found reported."""
     err = _require_master(user)
     if err:
         return err
@@ -1348,6 +1357,13 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
         if fixed_value is None:
             return {"error": "Enter the fixed target balance (e.g. 500) for the 'Fixed target' strategy."}
         fixed_value = int(fixed_value)
+    expires_at = None
+    if (expiry_date or "").strip():
+        try:
+            _d = datetime.fromisoformat(expiry_date.strip()[:10])
+            expires_at = _d.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc).isoformat()
+        except Exception:
+            return {"error": "expiry_date must be in YYYY-MM-DD format."}
     clean = list(dict.fromkeys(_last10(m) for m in (mobiles or []) if _last10(m)))
     if not clean:
         return {"error": "Paste at least one valid 10-digit mobile number."}
@@ -1384,6 +1400,7 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
     lowered = sum(1 for r in to_change if r["delta"] < 0)
     plan = {"action": "reconcile_ledger_bulk", "strategy": strategy, "window_hours": window_hours,
             "fixed_value": fixed_value if strategy == "fixed" else None, "only_raise": only_raise,
+            "expiry_date": expires_at,
             "mobiles_in": len(clean), "matched": len(rows_out), "not_found": len(not_found),
             "to_change": len(to_change), "total_delta": total_delta, "lowered": lowered}
     if not confirm:
@@ -1412,6 +1429,7 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
                             "kind": "adjust", "reference_type": "master_brain",
                             "reason": f"Batch ledger reconciliation: {r['current_balance']} -> {r['target_balance']} ({strategy}) — {reason}",
                             "created_at": _now_iso(), "created_by": email, "via": "master_brain",
+                            "expires_at": (expires_at if r["delta"] > 0 else None),
                             "fix_audit_id": audit_id})
         changes.append({"cust_id": r["cust_id"], "mobile": r["mobile"],
                         "points_before": r["current_balance"], "points_after": r["target_balance"]})
@@ -1427,8 +1445,9 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
     await _record_snapshot(audit_id, "reconcile_ledger_bulk", changes)
     return {"ok": True, "applied": True, "audit_id": audit_id, **plan, "changed": len(to_change),
             "message": (f"Reconciled {len(to_change)} customer(s) using the '{strategy}' strategy "
-                        f"(net {'+' if total_delta >= 0 else ''}{total_delta} pts). "
-                        f"{len(not_found)} not found. A compensating ledger entry was logged per "
+                        f"(net {'+' if total_delta >= 0 else ''}{total_delta} pts"
+                        + (f"; credited points expire {expires_at[:10]}" if expires_at else "; no expiry on restored points")
+                        + f"). {len(not_found)} not found. A compensating ledger entry was logged per "
                         f"customer. Audit {audit_id} — undoable.")}
 
 

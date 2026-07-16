@@ -460,6 +460,7 @@ function LedgerReconcileBatch() {
   const [strategy, setStrategy] = useState("fixed");
   const [fixedValue, setFixedValue] = useState("500");
   const [onlyRaise, setOnlyRaise] = useState(true);
+  const [expiryDate, setExpiryDate] = useState("");
   const [preview, setPreview] = useState(null);
   const [reason, setReason] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -469,7 +470,7 @@ function LedgerReconcileBatch() {
   const mobiles = extractMobiles(text);
 
   const payload = () => ({
-    mobiles, strategy, only_raise: onlyRaise,
+    mobiles, strategy, only_raise: onlyRaise, expiry_date: expiryDate || "",
     ...(strategy === "fixed" ? { fixed_value: Number(fixedValue) } : {}),
   });
 
@@ -530,11 +531,14 @@ function LedgerReconcileBatch() {
             <input type="checkbox" checked={onlyRaise} onChange={(e) => setOnlyRaise(e.target.checked)} data-testid="reconcile-batch-onlyraise" />
             Only raise (top-up — never lower a higher balance)
           </label>
+          <div><label className={lblCls}>Point validity / expiry</label>
+            <input value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} type="date"
+              className={inputCls} data-testid="reconcile-batch-expiry" /></div>
           <button onClick={scan} disabled={scanning || mobiles.length === 0} className="k-btn k-btn-outline flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-batch-scan">
             <Search className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} /> {scanning ? "Scanning…" : "Scan batch"}
           </button>
         </div>
-        <p className="text-xs text-neutral-500">{BATCH_STRATS.find((s) => s.v === strategy)?.hint}</p>
+        <p className="text-xs text-neutral-500">{BATCH_STRATS.find((s) => s.v === strategy)?.hint}{expiryDate ? ` · Credited points will expire ${expiryDate}.` : " · Restored points won't expire unless you set a validity date."}</p>
       </div>
 
       {p && (
