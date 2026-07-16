@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useMemo } from "react";
 import api, { API_URL } from "@/lib/api";
 import { PageHeader } from "./_shared";
 import { fmtDate } from "@/lib/format";
-import { Plus, Upload, Download, Edit2, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Upload, Download, Edit2, ChevronLeft, ChevronRight, KeyRound } from "lucide-react";
 import { toast } from "sonner";
 
 // Canonical Indian states + union territories (for the State dropdown)
@@ -34,6 +34,34 @@ export default function StoresPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const fileRef = useRef();
+
+  const isSuper = (() => { try { return JSON.parse(localStorage.getItem("kazo_user") || "{}").role === "super_admin"; } catch { return false; } })();
+  const [loginCount, setLoginCount] = useState(null);
+  const [seeding, setSeeding] = useState(false);
+
+  const loadLoginCount = () => {
+    if (!isSuper) return;
+    api.get("/store-logins").then((r) => setLoginCount(r.data.count)).catch(() => {});
+  };
+  useEffect(() => { loadLoginCount(); }, []);
+
+  const seedLogins = async () => {
+    setSeeding(true);
+    try {
+      const r = await api.post("/store-logins/seed");
+      toast.success(r.data?.message || "Store logins generated.");
+      loadLoginCount();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed to generate logins"); }
+    finally { setSeeding(false); }
+  };
+
+  const downloadLogins = () => {
+    const token = localStorage.getItem("kazo_token");
+    fetch(`${API_URL}/store-logins/download`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => { if (!r.ok) throw new Error(); return r.blob(); })
+      .then((b) => { const u = URL.createObjectURL(b); const a = document.createElement("a"); a.href = u; a.download = "kazo_store_logins.csv"; a.click(); URL.revokeObjectURL(u); })
+      .catch(() => toast.error("Download failed"));
+  };
 
   const load = () => api.get("/stores").then((r) => setStores(r.data));
   useEffect(() => { load(); }, []);
@@ -97,6 +125,28 @@ export default function StoresPage() {
           </>
         } />
       <div className="p-8">
+        {isSuper && (
+          <div className="bg-white border border-black/10 p-4 mb-4 flex flex-wrap items-center gap-4" data-testid="store-logins-panel">
+            <div className="flex items-center gap-2">
+              <KeyRound className="w-5 h-5 text-[var(--kazo-burgundy,#7a1f2b)]" />
+              <div>
+                <div className="font-medium text-sm">Store Logins</div>
+                <div className="text-xs text-neutral-500">
+                  One Store-Manager login per store, stored securely for download.
+                  {loginCount != null && <span className="ml-1 font-mono">{loginCount} login{loginCount === 1 ? "" : "s"} on file.</span>}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 ml-auto">
+              <button className="k-btn k-btn-outline k-btn-sm" onClick={seedLogins} disabled={seeding} data-testid="seed-store-logins">
+                <KeyRound className="w-3.5 h-3.5" /> {seeding ? "Generating…" : "Generate logins for all stores"}
+              </button>
+              <button className="k-btn kazo-bg-burgundy k-btn-sm" onClick={downloadLogins} disabled={!loginCount} data-testid="download-store-logins">
+                <Download className="w-3.5 h-3.5" /> Download credentials CSV
+              </button>
+            </div>
+          </div>
+        )}
         {/* Top bar — count + page-size selector */}
         <div className="flex items-center justify-between mb-3">
           <div className="text-xs text-neutral-500 font-mono" data-testid="stores-count">
