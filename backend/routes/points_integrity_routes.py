@@ -139,6 +139,8 @@ async def reconcile_apply(body: ReconcileIn, user: dict = Depends(require_master
 class ReconcileBulkIn(BaseModel):
     mobiles: list[str] = []
     strategy: str = "genuine"
+    fixed_value: Optional[int] = None
+    only_raise: bool = False
     window_hours: int = 72
     reason: str = ""
 
@@ -146,8 +148,8 @@ class ReconcileBulkIn(BaseModel):
 @router.post("/reconcile-ledger/bulk/preview")
 async def reconcile_bulk_preview(body: ReconcileBulkIn, user: dict = Depends(require_master_admin)):
     res = await _tool_reconcile_ledger_bulk(
-        mobiles=body.mobiles, strategy=body.strategy, window_hours=body.window_hours,
-        confirm=False, user=user)
+        mobiles=body.mobiles, strategy=body.strategy, fixed_value=body.fixed_value,
+        only_raise=body.only_raise, window_hours=body.window_hours, confirm=False, user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])
     return res
@@ -158,7 +160,8 @@ async def reconcile_bulk_apply(body: ReconcileBulkIn, user: dict = Depends(requi
     if not body.reason.strip():
         raise HTTPException(400, "A reason is required to reconcile balances.")
     res = await _tool_reconcile_ledger_bulk(
-        mobiles=body.mobiles, strategy=body.strategy, window_hours=body.window_hours,
+        mobiles=body.mobiles, strategy=body.strategy, fixed_value=body.fixed_value,
+        only_raise=body.only_raise, window_hours=body.window_hours,
         reason=body.reason.strip(), confirm=True, user=user)
     if res.get("error"):
         raise HTTPException(400, res["error"])

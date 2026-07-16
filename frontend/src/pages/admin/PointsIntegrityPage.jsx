@@ -293,6 +293,11 @@ const STRATS = [
   { v: "raw", label: "Raw ledger sum", hint: "Sum of every ledger row, as-is" },
 ];
 
+const BATCH_STRATS = [
+  { v: "fixed", label: "Fixed target (set everyone to a value)", hint: "Sets every matched customer to the value you enter — e.g. 500 after a top-up-to-500 campaign." },
+  ...STRATS,
+];
+
 function CandCard({ label, value, active, onClick, testid }) {
   return (
     <button type="button" onClick={onClick} data-testid={testid}
@@ -452,7 +457,9 @@ function extractMobiles(text) {
 
 function LedgerReconcileBatch() {
   const [text, setText] = useState("");
-  const [strategy, setStrategy] = useState("genuine");
+  const [strategy, setStrategy] = useState("fixed");
+  const [fixedValue, setFixedValue] = useState("500");
+  const [onlyRaise, setOnlyRaise] = useState(true);
   const [preview, setPreview] = useState(null);
   const [reason, setReason] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -461,11 +468,17 @@ function LedgerReconcileBatch() {
 
   const mobiles = extractMobiles(text);
 
+  const payload = () => ({
+    mobiles, strategy, only_raise: onlyRaise,
+    ...(strategy === "fixed" ? { fixed_value: Number(fixedValue) } : {}),
+  });
+
   const scan = async () => {
     if (mobiles.length === 0) { toast.error("Paste at least one 10-digit mobile."); return; }
+    if (strategy === "fixed" && (fixedValue === "" || isNaN(Number(fixedValue)))) { toast.error("Enter the fixed target balance."); return; }
     setScanning(true); setDone(null);
     try {
-      const r = await api.post("/points-integrity/reconcile-ledger/bulk/preview", { mobiles, strategy });
+      const r = await api.post("/points-integrity/reconcile-ledger/bulk/preview", payload());
       setPreview(r.data);
     } catch (e) { toast.error(e.response?.data?.detail || "Scan failed"); setPreview(null); }
     finally { setScanning(false); }
@@ -475,7 +488,7 @@ function LedgerReconcileBatch() {
     if (!reason.trim()) { toast.error("A reason is required."); return; }
     setApplying(true);
     try {
-      const r = await api.post("/points-integrity/reconcile-ledger/bulk/apply", { mobiles, strategy, reason: reason.trim() });
+      const r = await api.post("/points-integrity/reconcile-ledger/bulk/apply", { ...payload(), reason: reason.trim() });
       toast.success(r.data?.message || "Reconciled.");
       setDone(r.data); setPreview(null); setReason("");
     } catch (e) { toast.error(e.response?.data?.detail || "Action failed"); }
@@ -506,13 +519,22 @@ function LedgerReconcileBatch() {
         <div className="flex flex-wrap items-end gap-3">
           <div><label className={lblCls}>Strategy</label>
             <select value={strategy} onChange={(e) => setStrategy(e.target.value)} className={inputCls} data-testid="reconcile-batch-strategy">
-              {STRATS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
+              {BATCH_STRATS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
             </select></div>
+          {strategy === "fixed" && (
+            <div><label className={lblCls}>Set everyone to</label>
+              <input value={fixedValue} onChange={(e) => setFixedValue(e.target.value)} type="number"
+                className={`${inputCls} w-28 font-mono`} data-testid="reconcile-batch-fixed" placeholder="500" /></div>
+          )}
+          <label className="flex items-center gap-2 text-sm text-neutral-700 pb-2">
+            <input type="checkbox" checked={onlyRaise} onChange={(e) => setOnlyRaise(e.target.checked)} data-testid="reconcile-batch-onlyraise" />
+            Only raise (top-up — never lower a higher balance)
+          </label>
           <button onClick={scan} disabled={scanning || mobiles.length === 0} className="k-btn k-btn-outline flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-batch-scan">
             <Search className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} /> {scanning ? "Scanning…" : "Scan batch"}
           </button>
         </div>
-        <p className="text-xs text-neutral-500">{STRATS.find((s) => s.v === strategy)?.hint}</p>
+        <p className="text-xs text-neutral-500">{BATCH_STRATS.find((s) => s.v === strategy)?.hint}</p>
       </div>
 
       {p && (
@@ -543,7 +565,7 @@ function LedgerReconcileBatch() {
                       <td className="px-3 py-1.5 font-mono whitespace-nowrap">{r.mobile}</td>
                       <td className="px-3 py-1.5 text-neutral-600 truncate max-w-[160px]" title={r.name}>{r.name || "—"}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{fmtNum(r.current_balance)}</td>
-                      <td className="px-3 py-1.5 text-right font-mono text-neutral-500">{fmtNum(r.genuine_ledger_sum)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-neutral-500">{r.genuine_ledger_sum == null ? "—" : fmtNum(r.genuine_ledger_sum)}</td>
                       <td className="px-3 py-1.5 text-right font-mono font-semibold">{fmtNum(r.target_balance)}{r.floored_to_zero && <span className="ml-1 text-[10px] text-amber-600">floored</span>}</td>
                       <td className={`px-3 py-1.5 text-right font-mono ${r.delta > 0 ? "text-emerald-700" : r.delta < 0 ? "text-rose-700" : "text-neutral-400"}`}>{r.delta >= 0 ? "+" : ""}{fmtNum(r.delta)}</td>
                     </tr>
@@ -554,6 +576,9 @@ function LedgerReconcileBatch() {
           )}
           {p.matched > (p.sample?.length || 0) && (
             <div className="text-xs text-neutral-500">Showing first {p.sample.length} of {fmtNum(p.matched)} matched. All matched customers will be reconciled on apply.</div>
+          )}
+          {p.lowered > 0 && (
+            <div className="text-xs text-rose-700" data-testid="reconcile-batch-lowered">⚠ {fmtNum(p.lowered)} customer(s) would have their balance LOWERED to the target. Tick "Only raise" above if you don't want to reduce balances that are already higher.</div>
           )}
           {p.not_found > 0 && (
             <div className="text-xs text-amber-700">{fmtNum(p.not_found)} mobile(s) not found and will be skipped{p.not_found_sample?.length ? `: ${p.not_found_sample.slice(0, 8).join(", ")}${p.not_found > 8 ? "…" : ""}` : ""}.</div>

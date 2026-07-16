@@ -1329,17 +1329,25 @@ BULK_RECON_CAP = 3000
 
 
 async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str = "genuine",
+                                      fixed_value: Optional[int] = None, only_raise: bool = False,
                                       window_hours: int = 72, floor_zero: bool = True,
                                       reason: str = "", confirm: bool = False,
                                       user=None) -> Dict[str, Any]:
     """BATCH LEDGER RECONCILER (Master Admin). Runs the same per-customer ledger recompute as
-    `_tool_reconcile_ledger_balance` across MANY mobiles at once. Preview returns a full per-customer
-    table (current -> target + delta) using the chosen `strategy` candidate; apply sets each balance,
+    `_tool_reconcile_ledger_balance` across MANY mobiles at once. `strategy`:
+      genuine/dedup/raw -> recompute the target from each customer's ledger, OR
+      'fixed'           -> set every customer to `fixed_value` (e.g. a top-up-to-500 campaign).
+    `only_raise=True` never LOWERS a balance (top-up semantics: target = max(current, chosen)).
+    Preview returns a full per-customer table (current -> target + delta); apply sets each balance,
     writes ONE compensating audited ledger row per customer (stamped fix_audit_id), snapshots all
     before/after -> UNDOABLE as a single run. Not-found mobiles are reported, never created."""
     err = _require_master(user)
     if err:
         return err
+    if strategy == "fixed":
+        if fixed_value is None:
+            return {"error": "Enter the fixed target balance (e.g. 500) for the 'Fixed target' strategy."}
+        fixed_value = int(fixed_value)
     clean = list(dict.fromkeys(_last10(m) for m in (mobiles or []) if _last10(m)))
     if not clean:
         return {"error": "Paste at least one valid 10-digit mobile number."}
@@ -1353,20 +1361,31 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
         if not c:
             not_found.append(m)
             continue
-        led = await _load_customer_ledger(c)
-        cand = _reconcile_candidates(c, led, window_hours)
-        tgt = _pick_target(cand, strategy)
+        # 'fixed' needs no ledger scan; other strategies recompute from the ledger.
+        if strategy == "fixed":
+            cand = {"current_balance": int(c.get("points_balance") or 0), "raw_ledger_sum": None,
+                    "dedup_ledger_sum": None, "genuine_ledger_sum": None,
+                    "ledger_rows": None, "mb_adjust_rows": None}
+            base = fixed_value
+        else:
+            led = await _load_customer_ledger(c)
+            cand = _reconcile_candidates(c, led, window_hours)
+            base = _pick_target(cand, strategy)
+        cur = cand["current_balance"]
+        tgt = max(base, cur) if only_raise else base
         floored = False
         if floor_zero and tgt < 0:
             tgt, floored = 0, True
         rows_out.append({"mobile": c.get("mobile"), "cust_id": c["id"], "name": c.get("name"),
-                         **cand, "target_balance": tgt, "delta": tgt - cand["current_balance"],
+                         **cand, "target_balance": tgt, "delta": tgt - cur,
                          "floored_to_zero": floored})
     to_change = [r for r in rows_out if r["delta"] != 0]
     total_delta = sum(r["delta"] for r in to_change)
+    lowered = sum(1 for r in to_change if r["delta"] < 0)
     plan = {"action": "reconcile_ledger_bulk", "strategy": strategy, "window_hours": window_hours,
+            "fixed_value": fixed_value if strategy == "fixed" else None, "only_raise": only_raise,
             "mobiles_in": len(clean), "matched": len(rows_out), "not_found": len(not_found),
-            "to_change": len(to_change), "total_delta": total_delta}
+            "to_change": len(to_change), "total_delta": total_delta, "lowered": lowered}
     if not confirm:
         plan["preview"] = True
         plan["sample"] = [{k: r[k] for k in ("mobile", "name", "current_balance", "raw_ledger_sum",
