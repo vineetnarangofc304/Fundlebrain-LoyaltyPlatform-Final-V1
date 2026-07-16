@@ -1443,12 +1443,15 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
                       {"strategy": strategy, "matched": len(rows_out), "changed": len(to_change),
                        "not_found": len(not_found), "total_delta": total_delta}, audit_id=audit_id)
     await _record_snapshot(audit_id, "reconcile_ledger_bulk", changes)
+    applied_rows = [{"mobile": r["mobile"], "name": r["name"],
+                     "previous": r["current_balance"], "new_balance": r["target_balance"]}
+                    for r in to_change[:1000]]
     return {"ok": True, "applied": True, "audit_id": audit_id, **plan, "changed": len(to_change),
-            "message": (f"Reconciled {len(to_change)} customer(s) using the '{strategy}' strategy "
+            "applied_rows": applied_rows,
+            "message": (f"Moved {len(to_change)} customer(s) to their {('genuine' if strategy == 'genuine' else strategy)} points "
                         f"(net {'+' if total_delta >= 0 else ''}{total_delta} pts"
-                        + (f"; credited points expire {expires_at[:10]}" if expires_at else "; no expiry on restored points")
-                        + f"). {len(not_found)} not found. A compensating ledger entry was logged per "
-                        f"customer. Audit {audit_id} — undoable.")}
+                        + (f"; credited points expire {expires_at[:10]}" if expires_at else "")
+                        + f"). {len(not_found)} not found. Audit {audit_id} — undoable.")}
 
 
 # ============================================================

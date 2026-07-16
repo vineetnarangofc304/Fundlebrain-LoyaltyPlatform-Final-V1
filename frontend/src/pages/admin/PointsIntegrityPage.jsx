@@ -288,14 +288,9 @@ function RepairRuns() {
    (e.g. a top-up run several times, then a flat adjust wrongly used to reverse it). Shows the full
    ledger + candidate balances; the admin confirms the correct target. Audited + undoable. */
 const STRATS = [
-  { v: "genuine", label: "Genuine (recommended)", hint: "Excludes our own reversal/adjust rows + collapses duplicates" },
+  { v: "genuine", label: "Genuine (recommended)", hint: "The correct balance = ledger minus the wrong reversal/adjust rows, duplicates collapsed" },
   { v: "dedup", label: "De-duplicated", hint: "Keeps everything, removes only exact duplicate rows" },
   { v: "raw", label: "Raw ledger sum", hint: "Sum of every ledger row, as-is" },
-];
-
-const BATCH_STRATS = [
-  { v: "fixed", label: "Fixed target (set everyone to a value)", hint: "Sets every matched customer to the value you enter — e.g. 500 after a top-up-to-500 campaign." },
-  ...STRATS,
 ];
 
 function CandCard({ label, value, active, onClick, testid }) {
@@ -457,10 +452,7 @@ function extractMobiles(text) {
 
 function LedgerReconcileBatch() {
   const [text, setText] = useState("");
-  const [strategy, setStrategy] = useState("fixed");
-  const [fixedValue, setFixedValue] = useState("500");
-  const [onlyRaise, setOnlyRaise] = useState(true);
-  const [expiryDate, setExpiryDate] = useState("");
+  const [strategy, setStrategy] = useState("genuine");
   const [preview, setPreview] = useState(null);
   const [reason, setReason] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -469,17 +461,11 @@ function LedgerReconcileBatch() {
 
   const mobiles = extractMobiles(text);
 
-  const payload = () => ({
-    mobiles, strategy, only_raise: onlyRaise, expiry_date: expiryDate || "",
-    ...(strategy === "fixed" ? { fixed_value: Number(fixedValue) } : {}),
-  });
-
   const scan = async () => {
     if (mobiles.length === 0) { toast.error("Paste at least one 10-digit mobile."); return; }
-    if (strategy === "fixed" && (fixedValue === "" || isNaN(Number(fixedValue)))) { toast.error("Enter the fixed target balance."); return; }
     setScanning(true); setDone(null);
     try {
-      const r = await api.post("/points-integrity/reconcile-ledger/bulk/preview", payload());
+      const r = await api.post("/points-integrity/reconcile-ledger/bulk/preview", { mobiles, strategy });
       setPreview(r.data);
     } catch (e) { toast.error(e.response?.data?.detail || "Scan failed"); setPreview(null); }
     finally { setScanning(false); }
@@ -489,22 +475,22 @@ function LedgerReconcileBatch() {
     if (!reason.trim()) { toast.error("A reason is required."); return; }
     setApplying(true);
     try {
-      const r = await api.post("/points-integrity/reconcile-ledger/bulk/apply", { ...payload(), reason: reason.trim() });
-      toast.success(r.data?.message || "Reconciled.");
+      const r = await api.post("/points-integrity/reconcile-ledger/bulk/apply", { mobiles, strategy, reason: reason.trim() });
+      toast.success(r.data?.message || "Moved to genuine points.");
       setDone(r.data); setPreview(null); setReason("");
     } catch (e) { toast.error(e.response?.data?.detail || "Action failed"); }
     finally { setApplying(false); }
   };
 
   const p = preview;
+  const label = strategy === "genuine" ? "genuine" : strategy;
   return (
     <div className="chart-card p-6" data-accent="indigo" data-testid="repair-reconcile-batch">
-      <SectionHeading eyebrow="ISSUE F · BATCH" title="Reconcile MANY balances from the ledger" accent="indigo" />
+      <SectionHeading eyebrow="ISSUE F · BATCH" title="Move many customers to their genuine points" accent="indigo" />
       <p className="text-sm text-neutral-600 mt-2 leading-relaxed">
-        Fix a whole batch at once. Paste the affected mobile numbers (copy the mobile column straight from your
-        sheet — any separators work), pick a strategy, then <b>Scan</b> to preview every customer's current
-        balance and the recomputed target. Review the table, add a reason, and reconcile them all in one audited,
-        undoable run.
+        Paste the affected mobile numbers, <b>Scan</b> to see each customer's <b>wrong (current)</b> balance next to
+        the <b>genuine (correct)</b> balance recomputed from the ledger, then <b>Move all to genuine points</b> —
+        confirmed and audited in one run. After it completes you'll see everyone's updated points below.
       </p>
 
       <div className="mt-4 grid gap-3">
@@ -518,27 +504,15 @@ function LedgerReconcileBatch() {
           </div>
         </div>
         <div className="flex flex-wrap items-end gap-3">
-          <div><label className={lblCls}>Strategy</label>
+          <div><label className={lblCls}>Correct value from</label>
             <select value={strategy} onChange={(e) => setStrategy(e.target.value)} className={inputCls} data-testid="reconcile-batch-strategy">
-              {BATCH_STRATS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
+              {STRATS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
             </select></div>
-          {strategy === "fixed" && (
-            <div><label className={lblCls}>Set everyone to</label>
-              <input value={fixedValue} onChange={(e) => setFixedValue(e.target.value)} type="number"
-                className={`${inputCls} w-28 font-mono`} data-testid="reconcile-batch-fixed" placeholder="500" /></div>
-          )}
-          <label className="flex items-center gap-2 text-sm text-neutral-700 pb-2">
-            <input type="checkbox" checked={onlyRaise} onChange={(e) => setOnlyRaise(e.target.checked)} data-testid="reconcile-batch-onlyraise" />
-            Only raise (top-up — never lower a higher balance)
-          </label>
-          <div><label className={lblCls}>Point validity / expiry</label>
-            <input value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} type="date"
-              className={inputCls} data-testid="reconcile-batch-expiry" /></div>
           <button onClick={scan} disabled={scanning || mobiles.length === 0} className="k-btn k-btn-outline flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-batch-scan">
             <Search className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} /> {scanning ? "Scanning…" : "Scan batch"}
           </button>
         </div>
-        <p className="text-xs text-neutral-500">{BATCH_STRATS.find((s) => s.v === strategy)?.hint}{expiryDate ? ` · Credited points will expire ${expiryDate}.` : " · Restored points won't expire unless you set a validity date."}</p>
+        <p className="text-xs text-neutral-500">{STRATS.find((s) => s.v === strategy)?.hint}</p>
       </div>
 
       {p && (
@@ -557,9 +531,8 @@ function LedgerReconcileBatch() {
                   <tr className="text-left text-neutral-500">
                     <th className="px-3 py-2 font-medium">Mobile</th>
                     <th className="px-3 py-2 font-medium">Name</th>
-                    <th className="px-3 py-2 font-medium text-right">Current</th>
-                    <th className="px-3 py-2 font-medium text-right">Genuine</th>
-                    <th className="px-3 py-2 font-medium text-right">Target</th>
+                    <th className="px-3 py-2 font-medium text-right">Wrong (current)</th>
+                    <th className="px-3 py-2 font-medium text-right">Genuine (correct)</th>
                     <th className="px-3 py-2 font-medium text-right">Change</th>
                   </tr>
                 </thead>
@@ -568,9 +541,8 @@ function LedgerReconcileBatch() {
                     <tr key={i} className={r.delta !== 0 ? "" : "opacity-50"}>
                       <td className="px-3 py-1.5 font-mono whitespace-nowrap">{r.mobile}</td>
                       <td className="px-3 py-1.5 text-neutral-600 truncate max-w-[160px]" title={r.name}>{r.name || "—"}</td>
-                      <td className="px-3 py-1.5 text-right font-mono">{fmtNum(r.current_balance)}</td>
-                      <td className="px-3 py-1.5 text-right font-mono text-neutral-500">{r.genuine_ledger_sum == null ? "—" : fmtNum(r.genuine_ledger_sum)}</td>
-                      <td className="px-3 py-1.5 text-right font-mono font-semibold">{fmtNum(r.target_balance)}{r.floored_to_zero && <span className="ml-1 text-[10px] text-amber-600">floored</span>}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-rose-700">{fmtNum(r.current_balance)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono font-semibold text-emerald-700">{fmtNum(r.target_balance)}{r.floored_to_zero && <span className="ml-1 text-[10px] text-amber-600">floored</span>}</td>
                       <td className={`px-3 py-1.5 text-right font-mono ${r.delta > 0 ? "text-emerald-700" : r.delta < 0 ? "text-rose-700" : "text-neutral-400"}`}>{r.delta >= 0 ? "+" : ""}{fmtNum(r.delta)}</td>
                     </tr>
                   ))}
@@ -579,10 +551,7 @@ function LedgerReconcileBatch() {
             </div>
           )}
           {p.matched > (p.sample?.length || 0) && (
-            <div className="text-xs text-neutral-500">Showing first {p.sample.length} of {fmtNum(p.matched)} matched. All matched customers will be reconciled on apply.</div>
-          )}
-          {p.lowered > 0 && (
-            <div className="text-xs text-rose-700" data-testid="reconcile-batch-lowered">⚠ {fmtNum(p.lowered)} customer(s) would have their balance LOWERED to the target. Tick "Only raise" above if you don't want to reduce balances that are already higher.</div>
+            <div className="text-xs text-neutral-500">Showing first {p.sample.length} of {fmtNum(p.matched)} matched. All matched customers will be moved to their {label} points on apply.</div>
           )}
           {p.not_found > 0 && (
             <div className="text-xs text-amber-700">{fmtNum(p.not_found)} mobile(s) not found and will be skipped{p.not_found_sample?.length ? `: ${p.not_found_sample.slice(0, 8).join(", ")}${p.not_found > 8 ? "…" : ""}` : ""}.</div>
@@ -593,17 +562,47 @@ function LedgerReconcileBatch() {
               <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)"
                 className="p-2.5 border border-neutral-300 rounded-lg text-sm flex-1 min-w-[260px]" data-testid="reconcile-batch-reason" />
               <button onClick={apply} disabled={applying} className="k-btn kazo-bg-burgundy text-white flex items-center gap-2 disabled:opacity-50" data-testid="reconcile-batch-apply">
-                <Users className="w-4 h-4" /> {applying ? "Applying…" : `Reconcile ${fmtNum(p.to_change)} customer(s)`}
+                <Users className="w-4 h-4" /> {applying ? "Moving…" : `Move ${fmtNum(p.to_change)} customer(s) to genuine points`}
               </button>
             </div>
           ) : (
-            <div className="text-sm text-emerald-700">All matched customers already match the target — nothing to change.</div>
+            <div className="text-sm text-emerald-700">All matched customers already match their {label} points — nothing to change.</div>
           )}
         </div>
       )}
+
       {done && (
-        <div className="mt-4 p-4 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-900 text-sm" data-testid="reconcile-batch-done">
-          {done.message}
+        <div className="mt-4 space-y-3" data-testid="reconcile-batch-done">
+          <div className="p-4 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-900 text-sm">
+            {done.message}
+          </div>
+          {done.applied_rows && done.applied_rows.length > 0 && (
+            <div>
+              <div className="text-xs uppercase tracking-[0.15em] text-neutral-500 mb-1">Updated points (after the move)</div>
+              <div className="max-h-72 overflow-auto border border-neutral-200 rounded-lg" data-testid="reconcile-batch-done-table">
+                <table className="w-full text-xs">
+                  <thead className="bg-neutral-50 sticky top-0">
+                    <tr className="text-left text-neutral-500">
+                      <th className="px-3 py-2 font-medium">Mobile</th>
+                      <th className="px-3 py-2 font-medium">Name</th>
+                      <th className="px-3 py-2 font-medium text-right">Was</th>
+                      <th className="px-3 py-2 font-medium text-right">Current points now</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100">
+                    {done.applied_rows.map((r, i) => (
+                      <tr key={i}>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap">{r.mobile}</td>
+                        <td className="px-3 py-1.5 text-neutral-600 truncate max-w-[160px]" title={r.name}>{r.name || "—"}</td>
+                        <td className="px-3 py-1.5 text-right font-mono text-neutral-400">{fmtNum(r.previous)}</td>
+                        <td className="px-3 py-1.5 text-right font-mono font-semibold text-emerald-700">{fmtNum(r.new_balance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
