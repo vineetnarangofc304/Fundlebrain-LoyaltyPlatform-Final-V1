@@ -62,3 +62,10 @@ export function hasRole(user, ...roles) {
   if (!user) return false;
   return roles.includes(user.role);
 }
+
+// Store-scoped login roles get a locked-down experience: only Live Monitor + Customer 360,
+// their own store's bills only, and no point actions.
+export const STORE_LOGIN_ROLES = ["store_manager", "store_staff"];
+export function isStoreLogin(user) {
+  return !!user && STORE_LOGIN_ROLES.includes(user.role);
+}

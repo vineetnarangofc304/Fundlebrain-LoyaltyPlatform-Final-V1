@@ -120,9 +120,12 @@ async def live_transactions(
     is_return: Optional[bool] = None,
     user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
                                          "marketing_manager", "regional_manager",
-                                         "analytics_viewer", "readonly_executive")),
+                                         "analytics_viewer", "readonly_executive",
+                                         "store_manager", "store_staff")),
 ):
     """Paginated list of recent transactions for the cockpit table."""
+    if user.get("role") in ("store_manager", "store_staff"):
+        store_id = user.get("store_id") or "__none__"
     fil = await _build_live_filter(
         start_date=start_date, end_date=end_date, since=since, since_minutes=since_minutes,
         store_id=store_id, store_code=store_code, city=city, zone=zone, region=region,
@@ -322,9 +325,11 @@ async def live_stats(
     minutes: int = Query(60, ge=1, le=525600),  # up to 365 days (1 year)
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range start (overrides minutes)"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD — date range end (inclusive)"),
+    store_id: Optional[str] = None,
     user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
                                          "marketing_manager", "regional_manager",
-                                         "analytics_viewer", "readonly_executive")),
+                                         "analytics_viewer", "readonly_executive",
+                                         "store_manager", "store_staff")),
 ):
     """Top KPIs for the cockpit: bills, revenue, mobile-attach rate, lost opportunities."""
     if start_date or end_date:
@@ -337,6 +342,10 @@ async def live_stats(
     else:
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
         date_match = {"bill_date": {"$gte": cutoff}}
+    if user.get("role") in ("store_manager", "store_staff"):
+        store_id = user.get("store_id") or "__none__"
+    if store_id:
+        date_match["store_id"] = store_id
     pipe_total = [
         {"$match": dict(date_match)},
         {"$group": {
@@ -404,7 +413,7 @@ async def live_stats(
     # bills lacking a store were lumping into an "Unknown" card with negative revenue).
     # Revenue here = SALES only (returns excluded) so "Top stores by revenue" reads clean.
     pipe_store = [
-        {"$match": {**date_match, "store_id": {"$nin": [None, ""]}}},
+        {"$match": {**date_match, **({} if store_id else {"store_id": {"$nin": [None, ""]}})}},
         {"$group": {
             "_id": "$store_id",
             "store_name": {"$first": "$store_name"},

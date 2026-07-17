@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
-import { useAuth, hasRole } from "@/lib/auth";
+import { useAuth, hasRole, isStoreLogin } from "@/lib/auth";
 import {
   LayoutDashboard, TrendingUp, UserRound, Award, BarChart3, Store as StoreIcon, MessageCircle,
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
@@ -139,10 +139,32 @@ const SECTIONS = [
   },
 ];
 
+// Store logins see ONLY these two — Live Monitor (their store) + Customer 360 (read-only).
+const STORE_SECTIONS = [
+  {
+    label: "STORE",
+    items: [
+      { to: "/admin", end: true, icon: Radio, label: "Live Bill Monitor", testid: "nav-live-monitor" },
+      { to: "/admin/customers", icon: Users, label: "Customer 360", testid: "nav-customers" },
+    ],
+  },
+];
+
 export default function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const storeLogin = isStoreLogin(user);
+  const sections = storeLogin ? STORE_SECTIONS : SECTIONS;
+
+  // Store logins are hard-restricted to Live Monitor + Customer 360 — bounce any other route.
+  useEffect(() => {
+    if (!storeLogin) return;
+    const p = location.pathname;
+    const allowed = p === "/admin" || p === "/admin/live-monitor"
+      || p === "/admin/customers" || p.startsWith("/admin/customers/");
+    if (!allowed) navigate("/admin", { replace: true });
+  }, [storeLogin, location.pathname, navigate]);
 
   // Downloads Center: poll for newly-ready exports → toast + sidebar badge.
   const [downloadsBadge, setDownloadsBadge] = useState(0);
@@ -296,9 +318,8 @@ export default function AdminLayout() {
           </button>
         </div>
         <nav className="flex-1 py-3 overflow-y-auto">
-          {/* Fundle Brain hero entry — sits above every section so it stands
-              apart. Champagne-on-burgundy treatment matches the AI accent
-              colour used elsewhere in the app. */}
+          {/* Fundle Brain hero entry — hidden for store logins. */}
+          {!storeLogin && (
           <NavLink
             to="/admin/ai"
             data-testid="nav-ai"
@@ -329,6 +350,7 @@ export default function AdminLayout() {
               </div>
             </div>
           </NavLink>
+          )}
 
           {/* Master Brain hero — only for Master Admins. Red treatment signals
               that this surface can take LIVE actions on the database. */}
@@ -360,7 +382,7 @@ export default function AdminLayout() {
             </NavLink>
           )}
 
-          {SECTIONS.map((section) => {
+          {sections.map((section) => {
             if (section.adminOnly && !hasRole(user, "super_admin", "brand_admin")) return null;
             if (!section.items || section.items.length === 0) return null;
             const isCollapsed = !!collapsed[section.label];
@@ -411,7 +433,7 @@ export default function AdminLayout() {
       <main className="flex-1 overflow-x-hidden min-w-0">
         <Outlet />
       </main>
-      <FundleBrainFAB />
+      {!storeLogin && <FundleBrainFAB />}
     </div>
   );
 }

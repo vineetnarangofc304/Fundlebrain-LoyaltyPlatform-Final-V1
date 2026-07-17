@@ -6,6 +6,7 @@ import { fmtMoney2, fmtNum, fmtDate, fmtDateTime, tierClass } from "@/lib/format
 import AIInsightStrip from "./AIInsightStrip";
 import DrillDownModal from "./DrillDownModal";
 import { toast } from "sonner";
+import { useAuth, isStoreLogin } from "@/lib/auth";
 import {
   ArrowLeft, Plus, Minus, Gift, MessageSquare, Sparkles, Calendar, MapPin,
 } from "lucide-react";
@@ -31,6 +32,8 @@ const SEG_COLOR = {
 export default function CustomerDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const storeLogin = isStoreLogin(user);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [pointsModal, setPointsModal] = useState(null);
@@ -197,6 +200,8 @@ export default function CustomerDetail() {
 
         {/* Actions */}
         <div className="flex flex-wrap gap-2">
+          {!storeLogin && (
+          <>
           <button className="k-btn k-btn-outline k-btn-sm" onClick={() => setPointsModal("award")} data-testid="award-points-btn">
             <Plus className="w-3.5 h-3.5" /> Award points
           </button>
@@ -209,6 +214,8 @@ export default function CustomerDetail() {
           <button className="k-btn k-btn-outline k-btn-sm" onClick={() => navigate("/admin/tickets")}>
             <MessageSquare className="w-3.5 h-3.5" /> Raise ticket
           </button>
+          </>
+          )}
           <button
             className="k-btn k-btn-outline k-btn-sm"
             onClick={() => setDrill({

@@ -6,6 +6,7 @@ import { requestExport } from "@/lib/exportClient";
 import { PageHeader, SectionHeading } from "./_shared";
 import { fmtDateTimeISO, fmtMoney2 } from "@/lib/format";
 import { toast } from "sonner";
+import { useAuth, isStoreLogin } from "@/lib/auth";
 import {
   Activity, ShoppingBag, AlertTriangle, CheckCircle2, RefreshCw, Pause, Play,
   Phone, PhoneOff, MapPin, Receipt, Filter, X, TrendingDown, Coins, Award, Calculator, Download,
@@ -63,6 +64,8 @@ export default function LiveMonitorPage() {
   const [drillRow, setDrillRow] = useState(null);
   const [page, setPage] = useState(1);
   const lastFetchRef = useRef(null);
+  const { user } = useAuth();
+  const storeLock = isStoreLogin(user) ? (user?.store_id || "__none__") : null;
 
   const load = () => {
     const hasRange = filters.start_date || filters.end_date;
@@ -85,6 +88,7 @@ export default function LiveMonitorPage() {
       if (k === "start_date" || k === "end_date") return;
       if (v !== "" && v !== "all") params[k] = v;
     });
+    if (storeLock) { params.store_id = storeLock; statsParams.store_id = storeLock; }
     return Promise.all([
       api.get("/live-monitor/transactions", { params }),
       api.get("/live-monitor/stats", { params: statsParams }),
@@ -220,15 +224,19 @@ export default function LiveMonitorPage() {
             <button onClick={() => setPaused((p) => !p)} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-toggle-pause">
               {paused ? <><Play className="w-3.5 h-3.5" /> Resume</> : <><Pause className="w-3.5 h-3.5" /> Pause</>}
             </button>
+            {!storeLock && (
             <button onClick={recalcPoints} disabled={recalcing} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-recalc-points">
               <Calculator className="w-3.5 h-3.5" /> {recalcing ? "Recalculating…" : "Recalc points"}
             </button>
+            )}
             <button onClick={load} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-refresh">
               <RefreshCw className="w-3.5 h-3.5" /> Refresh now
             </button>
+            {!storeLock && (
             <button onClick={exportCsv} className="k-btn k-btn-outline k-btn-sm" data-testid="lm-export">
               <Download className="w-3.5 h-3.5" /> Export CSV
             </button>
+            )}
           </>
         }
       />
@@ -262,10 +270,12 @@ export default function LiveMonitorPage() {
               { value: "yes", label: "With mobile" },
               { value: "no", label: "Lost opp. only" },
             ]} testid="lm-fil-mobile" />
+            {!storeLock && (
             <Select label="Store" value={filters.store_id} onChange={(v) => setFilters({ ...filters, store_id: v })} options={[
               { value: "", label: "All stores" },
               ...storeOptions.map((s) => ({ value: s.id, label: s.name || s.code })),
             ]} testid="lm-fil-store" />
+            )}
             <Select label="Source" value={filters.source} onChange={(v) => setFilters({ ...filters, source: v })} options={[
               { value: "", label: "All" },
               { value: "pos_ewards", label: "POS (live)" },

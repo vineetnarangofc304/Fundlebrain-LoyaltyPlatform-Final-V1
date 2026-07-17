@@ -33,6 +33,16 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Store login lockdown (Jul 17, 2026) — store roles see only Live Monitor + Customer 360
+User: store logins must show ONLY Live Monitor (their store's bills, real-time) + Customer 360 (full, but point actions disabled); nothing else visible. Applied to BOTH `store_manager` and `store_staff` roles via `isStoreLogin(user)` helper in `lib/auth.jsx`.
+- **Nav/layout (`AdminLayout.jsx`):** store logins get a minimal `STORE_SECTIONS` sidebar (Live Bill Monitor `/admin`, Customer 360 `/admin/customers`); Fundle Brain hero, Master Brain hero, and the Fundle Brain FAB are hidden; a route-guard `useEffect` bounces any other `/admin/*` path back to `/admin`.
+- **Live Monitor (`LiveMonitorPage.jsx`):** store filter select, Recalc-points, and Export buttons hidden; `store_id` forced to the user's store in load/stats params.
+- **Customer 360 (`CustomerDetail.jsx`):** Award/Deduct points, Issue coupon, Raise ticket buttons hidden for store logins (read-only "View all transactions" kept). List + detail otherwise run fully.
+- **Backend enforcement (not just UI):** `live_monitor_routes` `/transactions` + `/stats` now allow `store_manager`/`store_staff` AND FORCE `store_id = user.store_id` (stats gained a `store_id` param + scoped pipelines; passing a different store_id is ignored). `customers_routes` `award-points`/`deduct-points` return 403 for store roles.
+- **Verified:** K00055 store login → sidebar shows only the 2 items, no FAB/heroes; `/admin/dashboards/rfm` redirects to `/admin`; transactions return only their store_id even when overriding store_id in the query; stats scoped; award-points→403; Customer 360 detail renders full (RFM, timeline, intelligence report) with point actions hidden. ⚠️ Redeploy required.
+
+
+
 ### Store Logins (Jul 16, 2026) — one login per store, seeded + downloadable
 User asked for store logins for all stores, stored in the backend to download. Built on the EXISTING email+bcrypt+JWT auth (routed through the auth playbook):
 - **Backend `routes/store_logins_routes.py` (super_admin only):** `POST /api/store-logins/seed` idempotently creates one `store_manager` user per active store — email `store.{code}@kazo.com`, scoped `store_id`, random 10-char password (unambiguous alphabet). `GET /api/store-logins` lists (no passwords). `GET /api/store-logins/download` returns CSV (Store Code, Name, City, Login Email, Password, Last Updated). `POST /api/store-logins/{store_id}/reset` rotates one. Passwords stored ENCRYPTED at rest in `store_credentials` (Fernet, key `STORE_CRED_KEY` in backend/.env) so plaintext is re-downloadable; the actual login still uses bcrypt `password_hash`. Seed does NOT rotate existing passwords (idempotent).

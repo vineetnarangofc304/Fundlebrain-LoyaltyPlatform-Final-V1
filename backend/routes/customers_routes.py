@@ -148,6 +148,8 @@ async def create_customer(payload: CustomerCreate, user: dict = Depends(get_curr
 
 @router.post("/{customer_id}/award-points")
 async def award_points(customer_id: str, points: int, note: Optional[str] = None, user: dict = Depends(get_current_user)):
+    if user.get("role") in ("store_manager", "store_staff"):
+        raise HTTPException(status_code=403, detail="Store logins cannot modify points.")
     cust = await customers_col.find_one({"id": customer_id}, {"_id": 0})
     if not cust:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -174,6 +176,8 @@ async def award_points(customer_id: str, points: int, note: Optional[str] = None
 
 @router.post("/{customer_id}/deduct-points")
 async def deduct_points(customer_id: str, points: int, note: Optional[str] = None, user: dict = Depends(get_current_user)):
+    if user.get("role") in ("store_manager", "store_staff"):
+        raise HTTPException(status_code=403, detail="Store logins cannot modify points.")
     cust = await customers_col.find_one({"id": customer_id}, {"_id": 0})
     if not cust:
         raise HTTPException(status_code=404, detail="Customer not found")
