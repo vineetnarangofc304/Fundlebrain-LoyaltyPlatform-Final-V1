@@ -40,6 +40,7 @@ User: store logins must show ONLY Live Monitor (their store's bills, real-time) 
 - **Customer 360 (`CustomerDetail.jsx`):** Award/Deduct points, Issue coupon, Raise ticket buttons hidden for store logins (read-only "View all transactions" kept). List + detail otherwise run fully.
 - **Backend enforcement (not just UI):** `live_monitor_routes` `/transactions` + `/stats` now allow `store_manager`/`store_staff` AND FORCE `store_id = user.store_id` (stats gained a `store_id` param + scoped pipelines; passing a different store_id is ignored). `customers_routes` `award-points`/`deduct-points` return 403 for store roles.
 - **Verified:** K00055 store login → sidebar shows only the 2 items, no FAB/heroes; `/admin/dashboards/rfm` redirects to `/admin`; transactions return only their store_id even when overriding store_id in the query; stats scoped; award-points→403; Customer 360 detail renders full (RFM, timeline, intelligence report) with point actions hidden. ⚠️ Redeploy required.
+- **Default date range for store logins (Jul 17, 2026):** Live Monitor already had From/To date inputs + a window dropdown (Today/Last 24h/7d/30d) but defaulted to "Today", so store logins saw 0 bills if none today. Now store logins default to a prefilled LAST-30-DAYS date range (`start_date=istDateIso(29)`, `end_date=istDateIso(0)` via lazy `useState` initializer reading the cached user); Clear also restores that range for store logins. Non-store users still default to Today. Verified: K00055 opens on 06/18→07/17 showing 17 bills + full KPIs, date pickers editable.
 
 
 

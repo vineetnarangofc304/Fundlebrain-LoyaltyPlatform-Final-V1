@@ -37,11 +37,12 @@ const rowKind = (r) =>
   : r.customer_status === "new" ? "new"
   : "repeat";
 
-// Today's calendar date in IST (YYYY-MM-DD) — drives the default "Today" window.
-const istTodayIso = () =>
+// IST calendar date (YYYY-MM-DD), optionally N days ago — drives the default window/range.
+const istDateIso = (daysAgo = 0) =>
   new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(new Date());
+  }).format(new Date(Date.now() - daysAgo * 86400000));
+const istTodayIso = () => istDateIso(0);
 
 export default function LiveMonitorPage() {
   const [rows, setRows] = useState([]);
@@ -49,16 +50,26 @@ export default function LiveMonitorPage() {
   const [stores, setStores] = useState([]);
   const [paused, setPaused] = useState(false);
   const [recalcing, setRecalcing] = useState(false);
-  const [filters, setFilters] = useState({
-    store_id: "",
-    region: "",
-    has_mobile: "all", // all | yes | no
-    payment_mode: "",
-    source: "",
-    min_amount: "",
-    max_amount: "",
-    start_date: "",
-    end_date: "",
+  const [filters, setFilters] = useState(() => {
+    const base = {
+      store_id: "",
+      region: "",
+      has_mobile: "all", // all | yes | no
+      payment_mode: "",
+      source: "",
+      min_amount: "",
+      max_amount: "",
+      start_date: "",
+      end_date: "",
+    };
+    // Store logins default to a last-30-days date range so they immediately see recent bills.
+    try {
+      if (isStoreLogin(JSON.parse(localStorage.getItem("kazo_user") || "{}"))) {
+        base.start_date = istDateIso(29);
+        base.end_date = istDateIso(0);
+      }
+    } catch { /* ignore */ }
+    return base;
   });
   const [statsWindow, setStatsWindow] = useState("today"); // default = Today (IST 00:00→23:59); the other relative windows remain in the dropdown
   const [drillRow, setDrillRow] = useState(null);
@@ -188,7 +199,7 @@ export default function LiveMonitorPage() {
   // Reset to first page only when the query (filters / window) changes — never on the 3s auto-refresh.
   useEffect(() => { setPage(1); }, [filters, statsWindow]);
 
-  const clearFilters = () => setFilters({ store_id: "", region: "", has_mobile: "all", payment_mode: "", source: "", min_amount: "", max_amount: "", start_date: "", end_date: "" });
+  const clearFilters = () => setFilters({ store_id: "", region: "", has_mobile: "all", payment_mode: "", source: "", min_amount: "", max_amount: "", start_date: storeLock ? istDateIso(29) : "", end_date: storeLock ? istDateIso(0) : "" });
   const activeFilterCount = useMemo(() =>
     Object.values(filters).filter((v) => v !== "" && v !== "all").length, [filters]);
   // De-duplicate the store dropdown by NAME — production store master was bulk-uploaded
