@@ -1231,6 +1231,39 @@ async def _load_customer_ledger(cust: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [r for r in rows if not r.get("voided")]
 
 
+async def _bulk_load_ledgers(customers: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Load the non-voided ledger rows for MANY customers in a FEW batched `$in` queries
+    (grouped back to each customer by last-10 mobile) instead of one query PER customer.
+    The per-customer loop was the source of the batch-reconciler APPLY-phase gateway timeout
+    on prod (N sequential ledger reads). Returns {last10_mobile -> [ledger rows, sorted]}."""
+    proj = {"_id": 0, "id": 1, "type": 1, "kind": 1, "points": 1, "reason": 1,
+            "reference_type": 1, "bill_number": 1, "created_at": 1, "voided": 1,
+            "customer_mobile": 1}
+    # every stored customer_mobile variant -> the owning customer's last-10 mobile
+    cand_to_key: Dict[Any, str] = {}
+    for c in customers:
+        key = _last10(c.get("mobile"))
+        if not key:
+            continue
+        strs, ints = _mobile_candidates(c.get("mobile"))
+        for v in strs + ints:
+            cand_to_key[v] = key
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    cands = list(cand_to_key.keys())
+    for i in range(0, len(cands), 1500):
+        chunk = cands[i:i + 1500]
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            async for r in points_ledger_col.find({"customer_mobile": {"$in": chunk}}, proj):
+                if r.get("voided"):
+                    continue
+                key = cand_to_key.get(r.get("customer_mobile"))
+                if key is not None:
+                    out.setdefault(key, []).append(r)
+    for key in out:
+        out[key].sort(key=lambda r: r.get("created_at") or "")
+    return out
+
+
 def _reconcile_candidates(cust: Dict[str, Any], rows: List[Dict[str, Any]],
                           window_hours: int) -> Dict[str, Any]:
     current = int(cust.get("points_balance") or 0)
@@ -1370,13 +1403,19 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
     if len(clean) > BULK_RECON_CAP:
         return {"error": f"{len(clean)} mobiles exceeds the {BULK_RECON_CAP} cap — split the list and run it in parts."}
     cust_map = await _bulk_find_customers(clean)
-    rows_out: List[Dict[str, Any]] = []
+    matched_custs: List[Dict[str, Any]] = []
     not_found: List[str] = []
     for m in clean:
         c = cust_map.get(m)
-        if not c:
+        if c:
+            matched_custs.append(c)
+        else:
             not_found.append(m)
-            continue
+    # Load EVERY matched customer's ledger in a few batched queries (not one-per-customer):
+    # the old per-customer loop is what pushed the apply phase past the prod gateway timeout.
+    ledger_map = {} if strategy == "fixed" else await _bulk_load_ledgers(matched_custs)
+    rows_out: List[Dict[str, Any]] = []
+    for c in matched_custs:
         # 'fixed' needs no ledger scan; other strategies recompute from the ledger.
         if strategy == "fixed":
             cand = {"current_balance": int(c.get("points_balance") or 0), "raw_ledger_sum": None,
@@ -1384,7 +1423,7 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
                     "ledger_rows": None, "mb_adjust_rows": None}
             base = fixed_value
         else:
-            led = await _load_customer_ledger(c)
+            led = ledger_map.get(_last10(c.get("mobile")), [])
             cand = _reconcile_candidates(c, led, window_hours)
             base = _pick_target(cand, strategy)
         cur = cand["current_balance"]
@@ -1419,37 +1458,65 @@ async def _tool_reconcile_ledger_bulk(mobiles: List[str] = None, strategy: str =
                 "message": f"Nothing to change — all {len(rows_out)} matched customers already match the '{strategy}' target."}
     audit_id = str(uuid.uuid4())
     email = user.get("email")
-    upd_ops: List[Any] = []
+
+    # ── IDEMPOTENT APPLY (fixes the double/triple application on gateway-timeout retries) ──
+    # Each customer is flipped wrong -> genuine via an ATOMIC claim: the conditional
+    # find_one_and_update only matches WHILE the balance is still NOT the target, so a
+    # concurrent second run (or a re-click after a 504) becomes a no-op for anyone already
+    # corrected — it can never re-apply. Only the exact call that MOVED a balance writes that
+    # customer's ONE compensating ledger row. Run in small concurrent chunks to stay fast.
+    async def _claim(r):
+        before = await customers_col.find_one_and_update(
+            {"id": r["cust_id"], "points_balance": {"$ne": r["target_balance"]}},
+            {"$set": {"points_balance": r["target_balance"]}},
+            projection={"_id": 0, "points_balance": 1})
+        return (r, before)
+
+    claimed: List[Any] = []
+    RECON_CLAIM_CHUNK = 50
+    for i in range(0, len(to_change), RECON_CLAIM_CHUNK):
+        batch = to_change[i:i + RECON_CLAIM_CHUNK]
+        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
+            results = await asyncio.gather(*[_claim(r) for r in batch])
+        for r, before in results:
+            if before is not None:  # this call actually moved the balance -> record it once
+                claimed.append((r, int(before.get("points_balance") or 0)))
+
+    if not claimed:
+        return {"ok": True, "applied": False, **plan,
+                "message": (f"Nothing changed — all {len(to_change)} targeted customer(s) were already at "
+                            f"their {('genuine' if strategy == 'genuine' else strategy)} points "
+                            f"(already reconciled by a previous run). {len(not_found)} not found.")}
+
     ledger_docs: List[Dict[str, Any]] = []
     changes: List[Dict[str, Any]] = []
-    for r in to_change:
-        upd_ops.append(UpdateOne({"id": r["cust_id"]}, {"$set": {"points_balance": r["target_balance"]}}))
+    applied_rows: List[Dict[str, Any]] = []
+    applied_delta = 0
+    for r, prev in claimed:
+        d = r["target_balance"] - prev
+        applied_delta += d
         ledger_docs.append({"id": str(uuid.uuid4()), "customer_mobile": r["mobile"],
-                            "customer_id": r["cust_id"], "points": r["delta"], "type": "adjust",
+                            "customer_id": r["cust_id"], "points": d, "type": "adjust",
                             "kind": "adjust", "reference_type": "master_brain",
-                            "reason": f"Batch ledger reconciliation: {r['current_balance']} -> {r['target_balance']} ({strategy}) — {reason}",
+                            "reason": f"Batch ledger reconciliation: {prev} -> {r['target_balance']} ({strategy}) — {reason}",
                             "created_at": _now_iso(), "created_by": email, "via": "master_brain",
-                            "expires_at": (expires_at if r["delta"] > 0 else None),
+                            "expires_at": (expires_at if d > 0 else None),
                             "fix_audit_id": audit_id})
         changes.append({"cust_id": r["cust_id"], "mobile": r["mobile"],
-                        "points_before": r["current_balance"], "points_after": r["target_balance"]})
-    for i in range(0, len(upd_ops), CREDIT_BATCH):
-        with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
-            await customers_col.bulk_write(upd_ops[i:i + CREDIT_BATCH], ordered=False)
+                        "points_before": prev, "points_after": r["target_balance"]})
+        applied_rows.append({"mobile": r["mobile"], "name": r["name"],
+                             "previous": prev, "new_balance": r["target_balance"]})
     for i in range(0, len(ledger_docs), CREDIT_BATCH):
         with pymongo.timeout(CREDIT_JOB_DB_DEADLINE):
             await points_ledger_col.insert_many(ledger_docs[i:i + CREDIT_BATCH], ordered=False)
     await _log_master(user, "reconcile_ledger_bulk", "customers", "bulk", reason,
-                      {"strategy": strategy, "matched": len(rows_out), "changed": len(to_change),
-                       "not_found": len(not_found), "total_delta": total_delta}, audit_id=audit_id)
+                      {"strategy": strategy, "matched": len(rows_out), "changed": len(claimed),
+                       "not_found": len(not_found), "total_delta": applied_delta}, audit_id=audit_id)
     await _record_snapshot(audit_id, "reconcile_ledger_bulk", changes)
-    applied_rows = [{"mobile": r["mobile"], "name": r["name"],
-                     "previous": r["current_balance"], "new_balance": r["target_balance"]}
-                    for r in to_change[:1000]]
-    return {"ok": True, "applied": True, "audit_id": audit_id, **plan, "changed": len(to_change),
-            "applied_rows": applied_rows,
-            "message": (f"Moved {len(to_change)} customer(s) to their {('genuine' if strategy == 'genuine' else strategy)} points "
-                        f"(net {'+' if total_delta >= 0 else ''}{total_delta} pts"
+    return {"ok": True, "applied": True, "audit_id": audit_id, **plan, "changed": len(claimed),
+            "applied_rows": applied_rows[:1000],
+            "message": (f"Moved {len(claimed)} customer(s) to their {('genuine' if strategy == 'genuine' else strategy)} points "
+                        f"(net {'+' if applied_delta >= 0 else ''}{applied_delta} pts"
                         + (f"; credited points expire {expires_at[:10]}" if expires_at else "")
                         + f"). {len(not_found)} not found. Audit {audit_id} — undoable.")}
 

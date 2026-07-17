@@ -33,6 +33,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Batch Ledger Reconciler — P0 timeout + double/triple application FIXED (Jul 17, 2026)
+User (prod): "It runs well but it times out and then when we run it again it does the action twice/thrice on some numbers… impossible to use." Root cause: (1) the *apply* phase re-loaded each customer's ledger with ONE DB query per mobile → N sequential reads blew past the ~60s prod gateway timeout → 504; (2) on a 504 the browser errored but the backend kept running, so re-clicking "apply" ran a 2nd/3rd request CONCURRENTLY, each reading the still-uncorrected balance and writing another `-delta` reversal row (non-idempotent). Fix in `master_brain_tools.py` `_tool_reconcile_ledger_bulk` (no UI/contract change):
+- **Timeout:** new `_bulk_load_ledgers(customers)` loads ALL matched customers' ledgers in a few batched `$in` queries (grouped back by last-10 mobile) instead of one-per-customer — used by both preview and apply.
+- **Idempotency:** apply now flips each customer via an ATOMIC claim `find_one_and_update({"id":cust_id, "points_balance":{"$ne":target}}, {"$set":{"points_balance":target}})` run in concurrent chunks of 50. Only the exact call that MOVES a balance (find_one_and_update returned the before-doc) writes that customer's ONE compensating ledger row; concurrent retries / re-clicks are no-ops for anyone already corrected. Ledger delta + snapshot use the true before value.
+- **Verified:** `tests/repro_reconcile_bulk_e2e.py` (genuine 875→500, undo→875) still passes; NEW `tests/repro_reconcile_bulk_idempotent.py` fires the apply 3× CONCURRENTLY → changed counts [3,0,0], all balances exactly 500 (no double-apply), exactly ONE compensating row per customer, sequential re-run is a clean no-op. ⚠️ Redeploy required for prod.
+
 ### Store login lockdown (Jul 17, 2026) — store roles see only Live Monitor + Customer 360
 User: store logins must show ONLY Live Monitor (their store's bills, real-time) + Customer 360 (full, but point actions disabled); nothing else visible. Applied to BOTH `store_manager` and `store_staff` roles via `isStoreLogin(user)` helper in `lib/auth.jsx`.
 - **Nav/layout (`AdminLayout.jsx`):** store logins get a minimal `STORE_SECTIONS` sidebar (Live Bill Monitor `/admin`, Customer 360 `/admin/customers`); Fundle Brain hero, Master Brain hero, and the Fundle Brain FAB are hidden; a route-guard `useEffect` bounces any other `/admin/*` path back to `/admin`.
