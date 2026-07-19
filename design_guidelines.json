@@ -1,105 +1,119 @@
 {
-  "theme_and_archetype": {
-    "public_site": {
-      "theme": "dark_and_light_hybrid",
-      "archetype": "Archetype 5: Jewel & Luxury",
-      "description": "Cinematic, high-contrast editorial look. Storytelling-first, large imagery, minimal navigation."
-    },
-    "admin_dashboard": {
-      "theme": "light_workspace_with_dark_sidebar",
-      "archetype": "Archetype 4: Swiss & High-Contrast (adapted for Enterprise)",
-      "description": "High information density, sharp rectangular cards, operational focus, data-heavy."
-    }
-  },
+  "theme": "dark",
   "typography": {
-    "headings": {
-      "font_family": "Cormorant Garamond",
-      "weights": ["300", "400", "600"],
-      "usage": "Editorial, elegant, Vogue-style headings for public site and dashboard section titles.",
-      "styles": "tracking-tight for large headings. DO NOT USE INTER."
+    "fonts": {
+      "headings": "Cormorant Garamond, serif",
+      "body": "Manrope, sans-serif"
     },
-    "body": {
-      "font_family": "Manrope",
-      "weights": ["400", "500", "700"],
-      "usage": "Clean, highly legible sans-serif for dashboard UI elements, tables, and dense data."
+    "scale": {
+      "h1": "text-5xl sm:text-6xl md:text-7xl font-light tracking-tighter",
+      "h2": "text-3xl sm:text-4xl font-light tracking-tight",
+      "body": "text-base md:text-lg leading-relaxed",
+      "captions": "text-lg md:text-xl font-medium tracking-wide",
+      "labels": "text-xs tracking-[0.2em] uppercase font-semibold"
     }
   },
   "colors": {
-    "brand": {
-      "black": "#0A0A0A",
-      "cream": "#F9F8F6",
-      "burgundy": "#571326",
-      "champagne": "#C7A76D"
+    "background": {
+      "base": "#0A0A0A",
+      "surface": "#0F172A",
+      "glass_overlay": "rgba(10, 10, 10, 0.6)"
     },
-    "dashboard": {
-      "sidebar_bg": "#0F172A",
-      "sidebar_fg": "#E2E8F0",
-      "sidebar_radius": "6px",
-      "workspace_bg": "#F9F8F6",
-      "workspace_fg": "#0A0A0A",
-      "card_bg": "#FFFFFF",
-      "card_border": "#E5E7EB"
+    "brand": {
+      "burgundy": "#571326",
+      "champagne": "#C7A76D",
+      "cream": "#F9F8F6",
+      "navy": "#0F172A",
+      "black": "#0A0A0A"
+    },
+    "text": {
+      "primary": "#F9F8F6",
+      "secondary": "#94A3B8",
+      "accent": "#C7A76D"
+    },
+    "chart_palette": ["#0F172A", "#571326", "#C7A76D", "#94A3B8"]
+  },
+  "visual_enhancers": {
+    "glassmorphism": {
+      "chat_surface": "bg-[#0F172A]/80 backdrop-blur-2xl backdrop-saturate-150 border border-white/10 shadow-2xl",
+      "player_controls": "bg-[#0A0A0A]/80 backdrop-blur-xl border border-white/10 rounded-full shadow-lg",
+      "captions": "bg-black/60 backdrop-blur-md rounded-lg"
+    },
+    "effects": {
+      "film_grain": "Implement CSS noise via repeating-radial-gradient or SVG filter, low opacity (5-10%), mix-blend-overlay. Adds analog film texture.",
+      "tool_glow": "shadow-[0_0_15px_rgba(199,167,109,0.3)] border border-[#C7A76D]/50"
     }
   },
-  "layout_and_spacing": {
-    "public_site": {
-      "grid_mode": "Mode A: The 'Tetris' Grid",
-      "spacing_scale": "Generous (p-12, p-24, gap-12)",
-      "container": "Max-width with significant breathing room and asymmetry."
-    },
-    "admin_dashboard": {
-      "grid_mode": "Mode B: The 'Control Room' Grid",
-      "spacing_scale": "Tight and dense (p-4, p-6, gap-4)",
-      "cards": "Sharp edges (rounded-none or max rounded-sm), 1px subtle borders, no soft shadows.",
-      "kpi_tiles": "Large numeric metrics, sparklines (via Recharts), up/down delta indicators."
-    }
+  "layouts": {
+    "page": "100vh h-screen w-full overflow-hidden relative flex items-center justify-center. Cinematic framing.",
+    "chat_container": "w-full max-w-4xl mx-auto p-6 md:p-8 flex flex-col gap-6 relative z-10",
+    "bento_charts": "grid grid-cols-1 md:grid-cols-3 gap-4 mt-4"
   },
   "components": {
-    "buttons": {
-      "public": "Solid black or burgundy, sharp corners, dramatic hover states (opacity or subtle scale).",
-      "admin": "Shadcn defaults modified for sharp edges (rounded-sm), high contrast."
+    "cover_screen": {
+      "description": "Initial state before playback.",
+      "elements": {
+        "background": "Dark cinematic overlay (bg-black/80) over the subtle fabric texture.",
+        "play_button": "Center stage. 120px circular glassmorphic button (backdrop-blur-xl bg-white/5 border border-white/20). Hover: scale up slightly, border brightens. Lucide Play icon.",
+        "title": "Cormorant Garamond, text-6xl+, text-[#F9F8F6], tracking-tighter.",
+        "controls_cluster": "Top right absolute. Share Link, Mute, Restart. Subtle text-[#94A3B8] hover:text-[#F9F8F6]."
+      }
     },
-    "sidebar": {
-      "background": "#0F172A",
-      "border_radius": "rounded-[6px]",
-      "branding": "Include 'Powered by Fundle' clearly at the bottom."
+    "player_chrome": {
+      "description": "Floating video controls overlay.",
+      "position": "absolute bottom-8 left-1/2 -translate-x-1/2 z-50",
+      "container": "Flex row, items-center gap-4 px-6 py-3 rounded-full bg-[#0A0A0A]/80 backdrop-blur-xl border border-white/10",
+      "timeline": "h-1 w-64 md:w-96 bg-[#0F172A] rounded-full overflow-hidden relative. Fill bar is bg-[#C7A76D]. Chapter markers are absolute w-[2px] h-full bg-black/50."
     },
-    "charts": {
-      "library": "recharts",
-      "palette": ["#0F172A", "#571326", "#C7A76D", "#94A3B8"]
-    }
-  },
-  "image_urls": {
-    "public_hero": {
-      "url": "https://static.prod-images.emergentagent.com/jobs/e79d70f1-3e69-4d31-89bd-3394bf0b0e8f/images/78c63bea378c62b7998687065d6e72a793a918832cab75549bf67f8c89f11216.png",
-      "description": "Cinematic editorial photograph of a premium Indian women's western wear fashion model."
+    "brain_chat": {
+      "description": "The centerpiece UI replicating the SaaS.",
+      "user_bubble": "bg-[#F9F8F6] text-[#0A0A0A] rounded-2xl rounded-tr-sm px-5 py-3 max-w-[80%] self-end font-medium text-base shadow-md",
+      "assistant_bubble": "text-[#F9F8F6] leading-relaxed self-start max-w-[90%] text-base",
+      "tool_pill": {
+        "running": "Inline flex items-center gap-2 rounded-full bg-[#0F172A] border border-[#C7A76D]/50 px-4 py-2 text-sm text-[#C7A76D] animate-pulse",
+        "completed": "Inline flex items-center gap-2 rounded-full bg-[#571326]/20 border border-[#571326] px-4 py-2 text-sm text-[#F9F8F6] transition-all duration-500"
+      },
+      "insight_callout": "mt-4 bg-[#C7A76D]/10 border-l-2 border-[#C7A76D] p-5 text-[#F9F8F6] text-sm md:text-base shadow-sm",
+      "kpi_cards": "bg-[#0F172A]/50 border border-white/5 rounded-xl p-5 flex flex-col justify-center items-start",
+      "preview_confirm": "Interactive UI block: 'Review Bulk Update' header, data table snippet, and 'Confirm' button (bg-[#C7A76D] text-black hover:bg-[#F9F8F6]). Transitions to 'Executed' status with green/champagne check."
     },
-    "luxury_texture": {
-      "url": "https://static.prod-images.emergentagent.com/jobs/e79d70f1-3e69-4d31-89bd-3394bf0b0e8f/images/a4dd983df23375d64a8141f5a63c1af5c10acb725b7ce0279647c84ec4772a05.png",
-      "description": "Close-up macro shot of premium fabric texture in champagne and black tones."
+    "captions": {
+      "position": "absolute bottom-24 w-full flex justify-center z-40 pointer-events-none",
+      "style": "bg-black/60 backdrop-blur-md px-6 py-2 rounded-lg text-[#F9F8F6] text-lg md:text-xl font-medium tracking-wide max-w-3xl text-center shadow-lg"
     },
-    "boutique_interior": {
-      "url": "https://images.pexels.com/photos/33327425/pexels-photo-33327425.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
-      "description": "Chic interior of a modern fashion retail store."
-    },
-    "editorial_model_2": {
-      "url": "https://images.pexels.com/photos/7778893/pexels-photo-7778893.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
-      "description": "Model posing in silver dress during a fashion photo shoot."
+    "closing_cta": {
+      "description": "Final scene after video finishes.",
+      "content": "Fade in 'Ready to power your loyalty program?'. Large 'Book a Demo' button (bg-[#F9F8F6] text-[#0A0A0A] rounded-full px-8 py-4 font-semibold hover:scale-105 transition-transform). 'Replay Reel' secondary button."
     }
   },
   "motion": {
-    "public_site": "Smooth scrolling (Lenis style), slow image pans, fade-up on scroll for text blocks.",
-    "admin_dashboard": "Minimal micro-interactions, instant feedback on clicks, no long transitions."
+    "typing": "Framer Motion stagger children (0.02s - 0.05s delay per character).",
+    "streaming": "Words appear sequentially (opacity 0 -> 1, y 5 -> 0) mimicking LLM generation.",
+    "tool_execution": "Enter: y=10, opacity=0. Transition to Complete: Width adjusts smoothly (layout animation), color shifts. Results reveal with stagger (0.2s delay).",
+    "act_transitions": "Cinematic crossfade. Fade chat out to black -> Fade in Act Title Card (Cormorant Garamond, center) -> Fade title out -> Fade in next Chat UI.",
+    "kpi_entrance": "Scale up slightly (0.95 -> 1) and fade in (opacity 0 -> 1) with spring physics."
   },
+  "accessibility": {
+    "contrast": "Ensure white text on #0F172A > 4.5:1. Champagne on Navy meets contrast requirements.",
+    "test_ids": "Required: data-testid='play-reel-button', data-testid='timeline-progress', data-testid='chat-ui-container', data-testid='tool-pill-status', data-testid='caption-text', data-testid='book-demo-cta'",
+    "aria": "Use aria-live='polite' on the chat streaming area so screen readers announce changes."
+  },
+  "image_urls": [
+    {
+      "url": "https://images.pexels.com/photos/30263578/pexels-photo-30263578.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Rich dark fabric background for the cinematic cover overlay.",
+      "category": "background"
+    }
+  ],
   "instructions_to_main_agent": [
-    "Install Google Fonts 'Cormorant Garamond' and 'Manrope' into the global stylesheet.",
-    "Use Lucide-React for all icons, matching stroke widths to font weights.",
-    "Ensure all interactive and informational elements contain a 'data-testid' attribute (e.g., data-testid='kpi-sales-total').",
-    "Build the dashboard layout with a dark sidebar (#0F172A, 6px corners) and a light workspace background.",
-    "KPI cards should feature Recharts sparklines and percentage delta arrows (green/red).",
-    "Include 'Powered by Fundle' tagline in the admin sidebar.",
-    "Do not use Shadcn card component globally if it forces a specific radius. Override global radii to be sharp (0px to 2px) in the admin workspace, except the sidebar which must be 6px.",
-    "For the public site, utilize the cinematic editorial images and deep burgundy / champagne accents against the cream/black base.",
-    "For routing setup, ensure distinct navigation paths: Public (/), Enterprise Admin (/admin), Store Ops (/store), CRM (/crm)."
-  ]
+    "Implement the /watch route as a dedicated cinematic 'demo reel' view, entirely separate from standard app layouts.",
+    "Do not use generic Shadcn cards for the main layout; the main view is a fullscreen cinematic canvas.",
+    "Simulate the voiceover/video timeline using a state machine or custom React hook (e.g., useSequence) that triggers UI changes based on simulated timestamps.",
+    "Framer Motion is critical here. Use <motion.div layout> for tool pills so they smoothly resize when transitioning from 'Running' to 'Completed'.",
+    "Use Recharts with transparent backgrounds and the exact chart_palette for data viz scenes.",
+    "Include 'Fundle Brain' (Act 1) and 'Master Brain' (Act 2) distinct sequences. Act 1 focuses on insights/charts. Act 2 focuses on workflow execution (preview -> confirm -> execute).",
+    "Ensure 'Manrope' is loaded for UI text and 'Cormorant Garamond' for cinematic headings.",
+    "Make sure the UI looks like a real SaaS product overlaid on a film presentation, bringing the Fundle Brain chat screen to life."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": "Do not make generic centered layouts. Use glassmorphism and the precise color palette. Implement micro-animations for all tool states. Never use generic placeholder images or emoji icons. This is a premium cinematic sales asset. Do not use Inter; stick strictly to Cormorant Garamond and Manrope. Apply data-testids to all interactive elements. Avoid 'AI slop' aesthetics. Make the demo feel authoritative and high-end."
 }
