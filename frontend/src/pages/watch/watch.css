@@ -1,0 +1,55 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+.watch-root {
+  font-family: 'Manrope', system-ui, sans-serif;
+  background: #060606;
+  color: #F9F8F6;
+  -webkit-font-smoothing: antialiased;
+}
+.watch-display { font-family: 'Cormorant Garamond', Georgia, serif; }
+
+/* Film grain overlay */
+.watch-grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+/* Vignette */
+.watch-vignette {
+  position: fixed; inset: 0; z-index: 1; pointer-events: none;
+  background: radial-gradient(120% 80% at 50% 42%, rgba(6,6,6,0) 40%, rgba(6,6,6,0.75) 100%);
+}
+
+.watch-caret { display:inline-block; width:0.5ch; margin-left:1px; color:#C7A76D; animation: watch-blink 1s step-end infinite; }
+@keyframes watch-blink { 50% { opacity: 0; } }
+
+/* Tool execution pill */
+.watch-pill {
+  display: inline-flex; align-items: center; gap: 0.55rem;
+  border-radius: 9999px; padding: 0.5rem 1rem; font-size: 0.82rem; font-weight: 600;
+  transition: background-color .5s ease, border-color .5s ease, color .5s ease;
+}
+.watch-pill.running { background:#0F172A; border:1px solid rgba(199,167,109,.5); color:#C7A76D;
+  box-shadow: 0 0 18px rgba(199,167,109,.22); }
+.watch-pill.done { background:rgba(87,19,38,.28); border:1px solid #571326; color:#F9F8F6; }
+.watch-pill-result { color:#C7A76D; font-weight:700; margin-left:.15rem; }
+
+/* Glass chat surface */
+.watch-chat {
+  background: linear-gradient(180deg, rgba(15,23,42,.82), rgba(10,10,10,.82));
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  border: 1px solid rgba(255,255,255,.08);
+  box-shadow: 0 40px 120px -30px rgba(0,0,0,.8), inset 0 1px 0 rgba(255,255,255,.04);
+}
+.watch-scroll { scrollbar-width: thin; scrollbar-color: rgba(199,167,109,.4) transparent; }
+.watch-scroll::-webkit-scrollbar { width:6px; }
+.watch-scroll::-webkit-scrollbar-thumb { background: rgba(199,167,109,.35); border-radius:9999px; }
+
+.watch-cta-btn { transition: transform .25s ease, background-color .25s ease, color .25s ease; }
+.watch-cta-btn:hover { transform: translateY(-2px) scale(1.02); }

@@ -108,6 +108,7 @@ import LRActiveCoupons from "@/pages/admin/legacy_reports/ActiveCoupons";
 import LROccasions from "@/pages/admin/legacy_reports/Occasions";
 import StoreOps from "@/pages/store/StoreOps";
 import DemoLanding from "@/pages/public/DemoLanding";
+import Watch from "@/pages/watch/Watch";
 
 function ProtectedRoute({ children, roles }) {
   const { user, loading } = useAuth();
@@ -161,6 +162,9 @@ function App() {
 
           {/* Public self-running product demo */}
           <Route path="/demo" element={<DemoLanding />} />
+
+          {/* Public cinematic demo reel (shareable) */}
+          <Route path="/watch" element={<Watch />} />
 
           {/* Admin */}
           <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>
