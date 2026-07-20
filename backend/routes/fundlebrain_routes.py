@@ -8,7 +8,7 @@ All aggregations run on demand; nothing is pre-computed. Endpoints:
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, Dict, List
 from collections import defaultdict
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 
 from database import (
     customers_col, transactions_col, stores_col, points_ledger_col, nps_col,
@@ -202,11 +202,12 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
     ).sort("bill_date", -1).limit(10).to_list(10)
 
     # ---- points ledger (last 25) ----
-    # Match by mobile OR customer_id: POS/legacy redeem rows were historically written
-    # with only customer_id, so a mobile-only query hid them from the profile even though
-    # the balance was correctly deducted. Matching both surfaces every ledger entry.
+    # Query ONLY the indexed `customer_mobile` (ix_pl_mobile). The previous `$or` with the
+    # UNINDEXED `customer_id` forced a full points_ledger collection scan (~10s → the "Customer
+    # 360 load time is too much" report). Legacy customer_id-only rows are stamped with a mobile
+    # by the ledger-mobile backfill, so mobile-only matching is both fast AND complete.
     ledger = await points_ledger_col.find(
-        {"$or": [{"customer_mobile": mobile}, {"customer_id": customer_id}]}, {"_id": 0}
+        {"customer_mobile": mobile}, {"_id": 0}
     ).sort("created_at", -1).limit(25).to_list(25)
 
     # ---- NPS history ----
@@ -1413,7 +1414,9 @@ async def campaign_roi(user: dict = Depends(get_current_user)):
         clicked = b.get("clicked", 0)
         converted = b.get("converted", 0)
         revenue = b.get("revenue_generated", 0.0)
-        cost = b.get("cost", 0.0)
+        # Campaign-level cost override (set via POST /campaign-roi/cost) takes precedence over
+        # the metrics-derived cost so the client can enter real spend and get a usable ROI.
+        cost = float(c["cost"]) if c.get("cost") is not None else b.get("cost", 0.0)
         roi = round(((revenue - cost) / cost) * 100, 1) if cost else None
         ctr = round((clicked / delivered) * 100, 2) if delivered else 0
         cvr = round((converted / clicked) * 100, 2) if clicked else 0
@@ -1488,6 +1491,26 @@ async def campaign_roi(user: dict = Depends(get_current_user)):
         "leaderboard": leaderboard,
         "by_channel": channel_summary,
     }
+
+
+@router.post("/campaign-roi/cost")
+async def set_campaign_cost(payload: dict = Body(...), user: dict = Depends(get_current_user)):
+    """Set a campaign's spend so its ROI can be computed. Admin-only (store-scoped users blocked)."""
+    if user.get("store_id"):
+        raise HTTPException(403, "Not permitted")
+    cid = payload.get("campaign_id")
+    if not cid:
+        raise HTTPException(400, "campaign_id required")
+    try:
+        cost = round(float(payload.get("cost")), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "cost must be a number")
+    if cost < 0:
+        raise HTTPException(400, "cost must be >= 0")
+    res = await campaigns_col.update_one({"id": cid}, {"$set": {"cost": cost}})
+    if not res.matched_count:
+        raise HTTPException(404, "Campaign not found")
+    return {"ok": True, "campaign_id": cid, "cost": cost}
 
 
 # ============================================================

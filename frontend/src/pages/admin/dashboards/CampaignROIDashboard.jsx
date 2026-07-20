@@ -7,12 +7,39 @@ import { fmtINR, fmtNum, fmtPct } from "@/lib/format";
 import AIInsightStrip from "../AIInsightStrip";
 import DrillDownModal from "../DrillDownModal";
 import { RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   Cell, PieChart, Pie, Legend,
 } from "recharts";
 
 const FUNNEL_COLOR = ["#1E3A8A", "#0E7C7B", "#B45309", "#571326", "#047857"];
+
+function CostCell({ campaign, onSave }) {
+  const [val, setVal] = useState(campaign.cost ?? "");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setVal(campaign.cost ?? ""); }, [campaign.cost]);
+  const commit = async () => {
+    const num = Number(val);
+    if (val === "" || Number.isNaN(num) || num < 0) { setVal(campaign.cost ?? ""); return; }
+    if (num === (campaign.cost ?? null)) return;
+    setSaving(true);
+    try { await onSave(campaign.id, num); } finally { setSaving(false); }
+  };
+  return (
+    <input
+      type="number" min="0" step="1" value={val}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      disabled={saving}
+      placeholder="—"
+      className="w-24 text-right font-mono text-sm bg-transparent border border-neutral-200 rounded px-2 py-1 focus:border-[#571326] focus:outline-none disabled:opacity-50"
+      data-testid={`cr-cost-input-${campaign.id}`}
+    />
+  );
+}
 
 export default function CampaignROIDashboard() {
   const navigate = useNavigate();
@@ -30,6 +57,16 @@ export default function CampaignROIDashboard() {
   };
   const reload = () => { setError(null); load().catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load")); };
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
+
+  const saveCost = async (campaign_id, cost) => {
+    try {
+      await api.post("/dashboard/campaign-roi/cost", { campaign_id, cost });
+      toast.success("Campaign cost saved — ROI recalculated.");
+      await load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to save cost");
+    }
+  };
 
   if (loading && !data) return <div className="p-10 text-neutral-500">Loading campaign ROI…</div>;
   if (error && !data) return <DashboardError error={error} onRetry={reload} title="Campaign ROI" />;
@@ -138,7 +175,7 @@ export default function CampaignROIDashboard() {
                   <th className="text-right">Sent</th><th className="text-right">Clicked</th>
                   <th className="text-right">Converted</th>
                   <th className="text-right">CTR</th><th className="text-right">CVR</th>
-                  <th className="text-right">Revenue</th><th className="text-right">ROI</th>
+                  <th className="text-right">Revenue</th><th className="text-right">Cost</th><th className="text-right">ROI</th>
                 </tr>
               </thead>
               <tbody>
@@ -153,6 +190,9 @@ export default function CampaignROIDashboard() {
                     <td className="text-right font-mono text-xs">{fmtPct(c.ctr_pct)}</td>
                     <td className="text-right font-mono text-xs">{fmtPct(c.cvr_pct)}</td>
                     <td className="text-right font-mono">{fmtINR(c.revenue)}</td>
+                    <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                      <CostCell campaign={c} onSave={saveCost} />
+                    </td>
                     <td className="text-right font-mono">
                       {c.roi_pct == null ? <span className="text-neutral-400">—</span> : (
                         <span className={c.roi_pct >= 0 ? "text-emerald-700" : "text-rose-700"}>{fmtPct(c.roi_pct)}</span>

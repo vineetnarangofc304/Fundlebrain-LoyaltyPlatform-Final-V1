@@ -33,6 +33,23 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Kazo punch-list — verified/fixed/built (Jul 20, 2026)
+Worked the client's Google-Doc punch list. Verified each item against the LIVE preview DB (not assumptions):
+- **#12 Customer 360 load time [FIXED]** — `customer-360/{id}` took **10.9s** because its points_ledger query used `$or` with the UNINDEXED `customer_id` (full 1.5M-row collscan). Changed to query the indexed `customer_mobile` only (like the by-mobile endpoint) → **0.92s** (~12x). `fundlebrain_routes.py`.
+- **#8 Sales MTD [BUILT]** — new `GET /api/bops-reports/sales-mtd` + page `SalesMTD.jsx` (route `/admin/reports/sales-mtd`, nav "Sales — MTD"). Customer base by recency segment (Active/No-Mapping/Win-Back-Lost/At-Risk) with Customer Count, Total (lifetime) Revenue, and New-customers-this-month; single fast pass over `customers_col` (2.6s / 800k). Month picker + store filter + CSV export. Verified: Active 2,04,558 / ₹70Cr etc.
+- **#10 Weekly/Monthly/Yearly KPI [DONE]** — added `year` granularity to `_bucket_expr` + validation in `kpi_matrix_routes.py`, and a "Yearly" option in `WeeklyKPIReport.jsx`. Verified: 2021/2025/2026 buckets.
+- **#6 Campaign ROI [BUILT]** — added campaign-level cost override + `POST /api/dashboard/campaign-roi/cost` (admin-only, store-scoped users blocked) and an editable Cost cell in `CampaignROIDashboard.jsx`. Verified E2E: entering ₹12,345 saves, toasts, and recomputes ROI/Cost KPI live.
+
+Verified WORKING in preview (production shows issues only because it hasn't been redeployed / backfilled) — no code change needed:
+- **#4 Shopper dormant/lapsed** — returns rows in preview.
+- **#5 Store KPI new/existing** — computes (new=3, existing=0 on small data); prod needs the new/existing backfill run.
+- **#7 Store-wise customer count** — 64 stores with recency buckets.
+- **#9 New vs Repeat daywise** — computes new/existing per day; prod needs the backfill.
+- **#1, #3** — already done earlier.
+
+BLOCKED on client input:
+- **#2 Jasola external database** — need the actual Jasola data source (external DB connection details OR an export file) + the exact mapping ("registered account = Jasola external", store code into first-visited-store once converted). Cannot integrate an unknown external DB without this.
+
 ### Cinematic demo reel at public /watch (Jul 19, 2026) — shareable Fundle Brain + Master Brain "product film"
 User wanted a shareable "video" showcasing Fundle Brain (the analyst/insights) and Master Brain (the executor) with real-looking queries, results + insights, and error/auto-adjust handling — on a separate link to send to customers. Built a self-running, cinematic, in-browser demo reel (not an exportable mp4 — user screen-records or shares the link). Choices: scripted/simulated content (no live mutations/LLM cost), public route, OpenAI TTS voiceover.
 - **Route:** new PUBLIC `/watch` (no login), standalone fullscreen — outside PublicLayout/Admin. Added to `App.js`.

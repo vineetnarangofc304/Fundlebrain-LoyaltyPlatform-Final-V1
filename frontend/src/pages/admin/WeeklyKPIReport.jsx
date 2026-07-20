@@ -131,7 +131,7 @@ export default function WeeklyKPIReport() {
             <div><label className={lblCls}>End date</label><input type="date" value={params.end_date} onChange={(e) => set("end_date", e.target.value)} className={selCls} data-testid="wkpi-end" /></div>
             <div><label className={lblCls}>Group by</label>
               <select value={params.granularity} onChange={(e) => set("granularity", e.target.value)} className={selCls} data-testid="wkpi-granularity">
-                <option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option>
+                <option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="year">Yearly</option>
               </select></div>
             <div><label className={lblCls}>Zone</label>
               <select value={params.zone} onChange={(e) => set("zone", e.target.value)} className={selCls} data-testid="wkpi-zone">

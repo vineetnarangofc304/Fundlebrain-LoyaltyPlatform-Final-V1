@@ -116,6 +116,7 @@ const SECTIONS = [
       { to: "/admin/reports/weekly-kpi", icon: TrendingUp, label: "Weekly KPI", testid: "nav-weekly-kpi" },
       { to: "/admin/reports/new-vs-repeat-daywise", icon: TrendingUp, label: "New vs Repeat (Daywise)", testid: "nav-new-vs-repeat" },
       { to: "/admin/reports/customer-count-by-store", icon: StoreIcon, label: "Customer Count by Store", testid: "nav-customer-count" },
+      { to: "/admin/reports/sales-mtd", icon: TrendingUp, label: "Sales — MTD", testid: "nav-sales-mtd" },
       { to: "/admin/reports/crm-customers", icon: UserRound, label: "CRM Customer Report", testid: "nav-crm-report" },
       { to: "/admin/reports/kpi-trends", icon: TrendingUp, label: "KPI Trends", testid: "nav-kpi-trends" },
       { to: "/admin/reports", icon: FileBarChart, label: "Reports & Exports", testid: "nav-reports" },

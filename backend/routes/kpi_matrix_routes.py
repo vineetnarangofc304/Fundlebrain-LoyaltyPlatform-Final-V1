@@ -251,6 +251,8 @@ def _bucket_expr(granularity: str):
         return {"$substrCP": ["$bill_date", 0, 10]}
     if granularity == "month":
         return {"$substrCP": ["$bill_date", 0, 7]}
+    if granularity == "year":
+        return {"$substrCP": ["$bill_date", 0, 4]}
     return {"$dateToString": {"format": "%G-W%V",
             "date": {"$dateFromString": {"dateString": "$bill_date", "onError": None, "onNull": None}}}}
 
@@ -369,7 +371,7 @@ async def weekly_kpi(
     sort_by: str = "period", sort_dir: str = "asc",
     user=Depends(get_current_user),
 ):
-    if granularity not in ("day", "week", "month"):
+    if granularity not in ("day", "week", "month", "year"):
         granularity = "week"
     match = _store_match(start_date, end_date, zone, city, store_class, store_id)
     rows = await _weekly_kpi(match, granularity)
@@ -388,7 +390,7 @@ async def weekly_kpi_export(
     sort_by: str = "period", sort_dir: str = "asc",
     user=Depends(get_current_user),
 ):
-    if granularity not in ("day", "week", "month"):
+    if granularity not in ("day", "week", "month", "year"):
         granularity = "week"
     match = _store_match(start_date, end_date, zone, city, store_class, store_id)
     with pymongo.timeout(180):

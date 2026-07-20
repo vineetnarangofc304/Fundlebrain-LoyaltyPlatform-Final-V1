@@ -266,3 +266,107 @@ async def customer_count_by_store_export(
     fname = f"customer_count_by_store_{datetime.now(IST).strftime('%Y%m%d')}.csv"
     return StreamingResponse(gen(), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Sales MTD — customer base split by recency segment with lifetime revenue and the
+# count of customers acquired month-to-date (first purchase this month). Derived in a
+# single pass over customers_col (lifetime_spend / last_visit_at / first_purchase_at),
+# so it is fast even at full scale.
+# ══════════════════════════════════════════════════════════════════════════════
+SMTD_COLUMNS: List[Tuple[str, str]] = [
+    ("segment", "Segment"),
+    ("count", "Customer Count"),
+    ("revenue", "Total Revenue"),
+    ("new_count", "New Customer Count (MTD)"),
+]
+
+_SMTD_SEG = {
+    "active": "Active (0-6 M)",
+    "no_mapping": "No Mapping (No Mob Num)",
+    "win_back_lost": "Win Back- Lost (6-12M)",
+    "at_risk": "Win-Back- At-Risk (12 & Abv M)",
+}
+
+
+def _month_window(month: Optional[str]) -> Tuple[str, str, str]:
+    """Return (label 'YYYY-MM', month_start iso-prefix, next_month_start iso-prefix)."""
+    ist_now = datetime.now(IST)
+    y, m = ist_now.year, ist_now.month
+    if month:
+        try:
+            parts = month.split("-")
+            y, m = int(parts[0]), int(parts[1])
+        except Exception:
+            pass
+    start = f"{y:04d}-{m:02d}-01"
+    ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+    nxt = f"{ny:04d}-{nm:02d}-01"
+    return f"{y:04d}-{m:02d}", start, nxt
+
+
+async def _sales_mtd(as_of: datetime, month_start: str, next_month: str,
+                     store_id: Optional[str]) -> List[Dict[str, Any]]:
+    cut6 = (as_of - timedelta(days=RECENCY_6M_DAYS)).isoformat()
+    cut12 = (as_of - timedelta(days=RECENCY_12M_DAYS)).isoformat()
+    lv = {"$ifNull": ["$last_visit_at", ""]}
+    fp = {"$ifNull": ["$first_purchase_at", ""]}
+    spend = {"$ifNull": ["$lifetime_spend", 0]}
+    isnew = {"$and": [{"$ne": [fp, ""]}, {"$gte": [fp, month_start]}, {"$lt": [fp, next_month]}]}
+    seg = {
+        "active": {"$and": [_HAS_MOBILE, {"$gte": [lv, cut6]}]},
+        "no_mapping": {"$not": [_HAS_MOBILE]},
+        "win_back_lost": {"$and": [_HAS_MOBILE, {"$lt": [lv, cut6]}, {"$gte": [lv, cut12]}]},
+        "at_risk": {"$and": [_HAS_MOBILE, {"$lt": [lv, cut12]}]},
+    }
+    match: Dict[str, Any] = {}
+    if store_id:
+        match["home_store_id"] = store_id
+    grp: Dict[str, Any] = {"_id": None}
+    for key, cond in seg.items():
+        grp[f"{key}_c"] = {"$sum": {"$cond": [cond, 1, 0]}}
+        grp[f"{key}_r"] = {"$sum": {"$cond": [cond, spend, 0]}}
+        grp[f"{key}_n"] = {"$sum": {"$cond": [{"$and": [cond, isnew]}, 1, 0]}}
+    pipe = [{"$match": match}, {"$group": grp}]
+    raw = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(1)
+    g = raw[0] if raw else {}
+    rows: List[Dict[str, Any]] = []
+    for key in ("active", "no_mapping", "win_back_lost", "at_risk"):
+        rows.append({
+            "segment": _SMTD_SEG[key],
+            "key": key,
+            "count": int(g.get(f"{key}_c", 0) or 0),
+            "revenue": round(float(g.get(f"{key}_r", 0) or 0), 2),
+            "new_count": int(g.get(f"{key}_n", 0) or 0),
+        })
+    return rows
+
+
+def _smtd_totals(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "count": sum(int(r.get("count", 0) or 0) for r in rows),
+        "revenue": round(sum(float(r.get("revenue", 0) or 0) for r in rows), 2),
+        "new_count": sum(int(r.get("new_count", 0) or 0) for r in rows),
+    }
+
+
+@router.get("/sales-mtd")
+async def sales_mtd(
+    as_of: Optional[str] = None,
+    month: Optional[str] = None,
+    store_id: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc)
+    if as_of:
+        try:
+            now = datetime.fromisoformat(as_of).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    label, m_start, m_next = _month_window(month)
+    with pymongo.timeout(90):
+        rows = await _sales_mtd(now, m_start, m_next, store_id)
+    return {"rows": rows, "count": len(rows), "totals": _smtd_totals(rows),
+            "month": label, "as_of": now.date().isoformat(),
+            "columns": [{"key": k, "label": l} for k, l in SMTD_COLUMNS]}
