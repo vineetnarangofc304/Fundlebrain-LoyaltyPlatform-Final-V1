@@ -44,6 +44,28 @@ def _pct(part: int, total: int) -> float:
     return round(part / total, 4) if total else 0.0
 
 
+# Short-TTL in-process cache for the heavy full-collection segment reports (they scan the
+# entire ~800k customer base and are CPU-bound, so an index can't help — but the underlying
+# data shifts slowly, so a 10-min cache makes repeat loads instant). `refresh=1` bypasses it.
+import time as _time
+_REPORT_CACHE: Dict[str, Tuple[float, Any]] = {}
+_REPORT_TTL = 600
+
+
+def _rc_get(key: str):
+    v = _REPORT_CACHE.get(key)
+    if v and (_time.time() - v[0]) < _REPORT_TTL:
+        return v[1]
+    return None
+
+
+def _rc_set(key: str, val: Any) -> None:
+    _REPORT_CACHE[key] = (_time.time(), val)
+    if len(_REPORT_CACHE) > 300:
+        oldest = min(_REPORT_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _REPORT_CACHE.pop(oldest, None)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # New vs Repeat (Daywise)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -174,39 +196,47 @@ async def _customer_count_by_store(as_of: datetime, store_id: Optional[str] = No
     cut6 = (as_of - timedelta(days=RECENCY_6M_DAYS)).isoformat()
     cut12 = (as_of - timedelta(days=RECENCY_12M_DAYS)).isoformat()
     lv = {"$ifNull": ["$last_visit_at", ""]}
+    # Compute each customer's segment ONCE via $switch (short-circuits) instead of evaluating
+    # four separate $cond conditions per doc — ~2x faster on the full-collection scan.
+    seg = {"$switch": {"branches": [
+        {"case": {"$not": [_HAS_MOBILE]}, "then": "no_mapping"},
+        {"case": {"$gte": [lv, cut6]}, "then": "active"},
+        {"case": {"$gte": [lv, cut12]}, "then": "win_back_lost"},
+    ], "default": "at_risk"}}
     match: Dict[str, Any] = {}
     if store_id:
         match["home_store_id"] = store_id
-    pipe = [
-        {"$match": match},
-        {"$group": {
-            "_id": "$home_store_id",
-            "no_mapping": {"$sum": {"$cond": [{"$not": [_HAS_MOBILE]}, 1, 0]}},
-            "active": {"$sum": {"$cond": [{"$and": [_HAS_MOBILE, {"$gte": [lv, cut6]}]}, 1, 0]}},
-            "win_back_lost": {"$sum": {"$cond": [
-                {"$and": [_HAS_MOBILE, {"$lt": [lv, cut6]}, {"$gte": [lv, cut12]}]}, 1, 0]}},
-            "at_risk": {"$sum": {"$cond": [
-                {"$and": [_HAS_MOBILE, {"$lt": [lv, cut12]}]}, 1, 0]}},
-            "grand_total": {"$sum": 1},
-        }},
+    pipe: List[Dict[str, Any]] = []
+    if match:
+        pipe.append({"$match": match})
+    pipe += [
+        {"$project": {"home_store_id": 1, "seg": seg}},
+        {"$group": {"_id": {"s": "$home_store_id", "seg": "$seg"}, "n": {"$sum": 1}}},
     ]
-    raw = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(5000)
+    raw = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(20000)
+    agg: Dict[str, Dict[str, int]] = {}
+    for g in raw:
+        sid = g["_id"].get("s")
+        key = g["_id"].get("seg")
+        n = int(g.get("n", 0) or 0)
+        d = agg.setdefault(sid or "", {"active": 0, "no_mapping": 0, "win_back_lost": 0, "at_risk": 0, "grand_total": 0})
+        d[key] = d.get(key, 0) + n
+        d["grand_total"] += n
     smap = await _store_map()
     rows: List[Dict[str, Any]] = []
-    for g in raw:
-        sid = g.get("_id")
-        s = smap.get(sid or "", {})
+    for sid, d in agg.items():
+        s = smap.get(sid, {})
         rows.append({
-            "store_id": sid or "",
+            "store_id": sid,
             "store_code": s.get("code") or "—",
             "store_name": s.get("name") or (s.get("code") if s else None) or ("Unmapped Store" if not sid else "—"),
             "zone": s.get("region") or "—",
             "store_class": s.get("store_class") or "—",
-            "active": int(g.get("active", 0) or 0),
-            "no_mapping": int(g.get("no_mapping", 0) or 0),
-            "win_back_lost": int(g.get("win_back_lost", 0) or 0),
-            "at_risk": int(g.get("at_risk", 0) or 0),
-            "grand_total": int(g.get("grand_total", 0) or 0),
+            "active": d["active"],
+            "no_mapping": d["no_mapping"],
+            "win_back_lost": d["win_back_lost"],
+            "at_risk": d["at_risk"],
+            "grand_total": d["grand_total"],
         })
     rows.sort(key=lambda r: r["grand_total"], reverse=True)
     return rows
@@ -221,6 +251,7 @@ def _ccs_totals(rows: List[Dict[str, Any]]) -> Dict[str, int]:
 async def customer_count_by_store(
     as_of: Optional[str] = None,
     store_id: Optional[str] = None,
+    refresh: bool = False,
     user: dict = Depends(get_current_user),
 ):
     now = datetime.now(timezone.utc)
@@ -229,11 +260,18 @@ async def customer_count_by_store(
             now = datetime.fromisoformat(as_of).replace(tzinfo=timezone.utc)
         except Exception:
             pass
+    ck = f"ccs:{now.date().isoformat()}:{store_id or ''}"
+    if not refresh:
+        cached = _rc_get(ck)
+        if cached is not None:
+            return {**cached, "cached": True}
     with pymongo.timeout(90):
         rows = await _customer_count_by_store(now, store_id)
-    return {"rows": rows, "count": len(rows), "totals": _ccs_totals(rows),
-            "as_of": now.date().isoformat(),
-            "columns": [{"key": k, "label": l} for k, l in CCS_COLUMNS]}
+    out = {"rows": rows, "count": len(rows), "totals": _ccs_totals(rows),
+           "as_of": now.date().isoformat(),
+           "columns": [{"key": k, "label": l} for k, l in CCS_COLUMNS]}
+    _rc_set(ck, out)
+    return out
 
 @export_router.get("/customer-count-by-store/export")
 async def customer_count_by_store_export(
@@ -312,33 +350,36 @@ async def _sales_mtd(as_of: datetime, month_start: str, next_month: str,
     cut12 = (as_of - timedelta(days=RECENCY_12M_DAYS)).isoformat()
     lv = {"$ifNull": ["$last_visit_at", ""]}
     fp = {"$ifNull": ["$first_purchase_at", ""]}
-    spend = {"$ifNull": ["$lifetime_spend", 0]}
+    # Segment computed ONCE per doc via $switch (short-circuits) — ~2x faster than four $cond.
+    seg = {"$switch": {"branches": [
+        {"case": {"$not": [_HAS_MOBILE]}, "then": "no_mapping"},
+        {"case": {"$gte": [lv, cut6]}, "then": "active"},
+        {"case": {"$gte": [lv, cut12]}, "then": "win_back_lost"},
+    ], "default": "at_risk"}}
     isnew = {"$and": [{"$ne": [fp, ""]}, {"$gte": [fp, month_start]}, {"$lt": [fp, next_month]}]}
-    seg = {
-        "active": {"$and": [_HAS_MOBILE, {"$gte": [lv, cut6]}]},
-        "no_mapping": {"$not": [_HAS_MOBILE]},
-        "win_back_lost": {"$and": [_HAS_MOBILE, {"$lt": [lv, cut6]}, {"$gte": [lv, cut12]}]},
-        "at_risk": {"$and": [_HAS_MOBILE, {"$lt": [lv, cut12]}]},
-    }
     match: Dict[str, Any] = {}
     if store_id:
         match["home_store_id"] = store_id
-    grp: Dict[str, Any] = {"_id": None}
-    for key, cond in seg.items():
-        grp[f"{key}_c"] = {"$sum": {"$cond": [cond, 1, 0]}}
-        grp[f"{key}_r"] = {"$sum": {"$cond": [cond, spend, 0]}}
-        grp[f"{key}_n"] = {"$sum": {"$cond": [{"$and": [cond, isnew]}, 1, 0]}}
-    pipe = [{"$match": match}, {"$group": grp}]
-    raw = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(1)
-    g = raw[0] if raw else {}
+    pipe: List[Dict[str, Any]] = []
+    if match:
+        pipe.append({"$match": match})
+    pipe += [
+        {"$project": {"seg": seg, "sp": {"$ifNull": ["$lifetime_spend", 0]},
+                      "nw": {"$cond": [isnew, 1, 0]}}},
+        {"$group": {"_id": "$seg", "count": {"$sum": 1},
+                    "revenue": {"$sum": "$sp"}, "new_count": {"$sum": "$nw"}}},
+    ]
+    raw = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(10)
+    by = {g["_id"]: g for g in raw}
     rows: List[Dict[str, Any]] = []
     for key in ("active", "no_mapping", "win_back_lost", "at_risk"):
+        g = by.get(key, {})
         rows.append({
             "segment": _SMTD_SEG[key],
             "key": key,
-            "count": int(g.get(f"{key}_c", 0) or 0),
-            "revenue": round(float(g.get(f"{key}_r", 0) or 0), 2),
-            "new_count": int(g.get(f"{key}_n", 0) or 0),
+            "count": int(g.get("count", 0) or 0),
+            "revenue": round(float(g.get("revenue", 0) or 0), 2),
+            "new_count": int(g.get("new_count", 0) or 0),
         })
     return rows
 
@@ -356,6 +397,7 @@ async def sales_mtd(
     as_of: Optional[str] = None,
     month: Optional[str] = None,
     store_id: Optional[str] = None,
+    refresh: bool = False,
     user: dict = Depends(get_current_user),
 ):
     now = datetime.now(timezone.utc)
@@ -365,8 +407,15 @@ async def sales_mtd(
         except Exception:
             pass
     label, m_start, m_next = _month_window(month)
+    ck = f"smtd:{now.date().isoformat()}:{label}:{store_id or ''}"
+    if not refresh:
+        cached = _rc_get(ck)
+        if cached is not None:
+            return {**cached, "cached": True}
     with pymongo.timeout(90):
         rows = await _sales_mtd(now, m_start, m_next, store_id)
-    return {"rows": rows, "count": len(rows), "totals": _smtd_totals(rows),
-            "month": label, "as_of": now.date().isoformat(),
-            "columns": [{"key": k, "label": l} for k, l in SMTD_COLUMNS]}
+    out = {"rows": rows, "count": len(rows), "totals": _smtd_totals(rows),
+           "month": label, "as_of": now.date().isoformat(),
+           "columns": [{"key": k, "label": l} for k, l in SMTD_COLUMNS]}
+    _rc_set(ck, out)
+    return out

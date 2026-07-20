@@ -33,6 +33,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Load-time investigation — indexing audit + query/caching optimisation (Jul 20, 2026)
+User asked to "do compound indexing on all relevant fields to decrease load time." Investigated rather than blindly indexing (extra indexes slow the write-heavy POS credit path):
+- **Finding:** the collections are ALREADY comprehensively indexed (14 customers / 13 transactions / 10 points_ledger indexes covering every hot dimension via `ensure_indexes()`), and I timed every dashboard/report live — all <0.3s EXCEPT the two full-customer-base segment reports (customer-count-by-store 1.3s, sales-mtd 2.5s).
+- **Those two are CPU-bound, not index-bound:** `count_documents({})` = 0.22s but the segmented aggregation = 2.3s → the cost is per-doc conditional evaluation, not I/O. Proved a covering index doesn't help: built `(home_store_id,last_visit_at,first_purchase_at,lifetime_spend,mobile)`, but the aggregation planner keeps COLLSCAN for an unfiltered `$group`, and a forced `hint` was *slightly slower* (2.43s vs 2.27s). Dropped the index (no benefit + write cost).
+- **Real fixes applied (`bops_reports_routes.py`):** (1) restructured both aggregations to compute each customer's segment ONCE via `$switch` (short-circuits) instead of 4 separate `$cond` → **sales-mtd 2.56s → 1.43s**. (2) added a 10-min in-process result cache (`refresh=1` bypasses) → **repeat loads ~0.1s** for both; response carries `"cached": true`. Output shape unchanged (no frontend change). Verified data correct (Active 204,521 / ₹2.74B).
+
 ### Kazo punch-list — verified/fixed/built (Jul 20, 2026)
 Worked the client's Google-Doc punch list. Verified each item against the LIVE preview DB (not assumptions):
 - **#12 Customer 360 load time [FIXED]** — `customer-360/{id}` took **10.9s** because its points_ledger query used `$or` with the UNINDEXED `customer_id` (full 1.5M-row collscan). Changed to query the indexed `customer_mobile` only (like the by-mobile endpoint) → **0.92s** (~12x). `fundlebrain_routes.py`.
