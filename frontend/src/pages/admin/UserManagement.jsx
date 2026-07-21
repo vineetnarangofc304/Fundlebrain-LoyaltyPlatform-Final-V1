@@ -14,8 +14,9 @@ const ROLES = [
 export default function UserManagement() {
   const { user: me } = useAuth();
   const [users, setUsers] = useState([]);
+  const [stores, setStores] = useState([]);
   const [show, setShow] = useState(false);
-  const [form, setForm] = useState({ email: "", name: "", password: "", role: "store_manager", phone: "", region: "", is_master_admin: false });
+  const [form, setForm] = useState({ email: "", name: "", password: "", role: "store_manager", phone: "", region: "", store_id: "", is_master_admin: false });
   const [pwModal, setPwModal] = useState(null);
   const [newPw, setNewPw] = useState("");
 
@@ -23,14 +24,23 @@ export default function UserManagement() {
     const r = await api.get("/users");
     setUsers(r.data);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    api.get("/stores").then((r) => setStores(r.data || [])).catch(() => {});
+  }, []);
 
   const create = async () => {
     try {
-      await api.post("/users", form);
+      if (["store_manager", "store_staff"].includes(form.role) && !form.store_id) {
+        toast.error("Please select a store for this store role");
+        return;
+      }
+      const payload = { ...form };
+      if (!payload.store_id) delete payload.store_id;
+      await api.post("/users", payload);
       toast.success(`User ${form.email} created`);
       setShow(false);
-      setForm({ email: "", name: "", password: "", role: "store_manager", phone: "", region: "", is_master_admin: false });
+      setForm({ email: "", name: "", password: "", role: "store_manager", phone: "", region: "", store_id: "", is_master_admin: false });
       load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed");
@@ -136,6 +146,14 @@ export default function UserManagement() {
               <select className="k-input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} data-testid="new-user-role">
                 {availableRoles.map((r) => <option key={r} value={r}>{r.replace(/_/g, " ")}</option>)}
               </select>
+              {["store_manager", "store_staff"].includes(form.role) && (
+                <select className="k-input" value={form.store_id} onChange={(e) => setForm({ ...form, store_id: e.target.value })} data-testid="new-user-store">
+                  <option value="">Select store (required for store roles)…</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id}>{s.code ? `${s.code} · ` : ""}{s.name}{s.city ? ` — ${s.city}` : ""}</option>
+                  ))}
+                </select>
+              )}
               <input className="k-input" placeholder="Region (optional)" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })} />
               {me?.role === "super_admin" && (
                 <label className="flex items-center gap-2 text-sm cursor-pointer select-none" data-testid="new-user-master">

@@ -8,7 +8,7 @@ import DrillDownModal from "./DrillDownModal";
 import { toast } from "sonner";
 import { useAuth, isStoreLogin } from "@/lib/auth";
 import {
-  ArrowLeft, Plus, Minus, Gift, MessageSquare, Sparkles, Calendar, MapPin,
+  ArrowLeft, Plus, Minus, Gift, MessageSquare, Sparkles, Calendar, MapPin, Loader2,
 } from "lucide-react";
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
@@ -36,6 +36,8 @@ export default function CustomerDetail() {
   const storeLogin = isStoreLogin(user);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [analytics, setAnalytics] = useState(null);
+  const [loadingAnalytics, setLoadingAnalytics] = useState(true);
   const [pointsModal, setPointsModal] = useState(null);
   const [pointsAmt, setPointsAmt] = useState(0);
   const [note, setNote] = useState("");
@@ -63,7 +65,21 @@ export default function CustomerDetail() {
       setLoading(false);
     }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+  // Heavy analytics (monthly spend, affinity, NPS) are loaded lazily via a second
+  // request so the core profile paints instantly.
+  const loadAnalytics = async () => {
+    setLoadingAnalytics(true);
+    setAnalytics(null);
+    try {
+      const r = await api.get(`/dashboard/customer-360/${id}/analytics`);
+      setAnalytics(r.data);
+    } catch {
+      setAnalytics({ monthly_spend: [], store_affinity: [], category_affinity: [], nps_history: [] });
+    } finally {
+      setLoadingAnalytics(false);
+    }
+  };
+  useEffect(() => { load(); loadAnalytics(); /* eslint-disable-next-line */ }, [id]);
 
   const doPoints = async () => {
     try {
@@ -87,13 +103,18 @@ export default function CustomerDetail() {
   const rfm = data.rfm;
   const segColor = SEG_COLOR[rfm.segment] || "#571326";
 
+  const monthlySpend = analytics?.monthly_spend || [];
+  const categoryAffinity = analytics?.category_affinity || [];
+  const storeAffinity = analytics?.store_affinity || [];
+  const npsHistory = analytics?.nps_history || [];
+
   const aiPayload = {
     customer: { id: c.id, name: c.name, tier: c.tier, city: c.city },
     rfm,
     lifetime: lt,
-    monthly_spend_last_12: data.monthly_spend.slice(-12),
-    top_categories: data.category_affinity.slice(0, 5),
-    top_stores: data.store_affinity.slice(0, 3),
+    monthly_spend_last_12: monthlySpend.slice(-12),
+    top_categories: categoryAffinity.slice(0, 5),
+    top_stores: storeAffinity.slice(0, 3),
   };
 
   return (
@@ -127,6 +148,7 @@ export default function CustomerDetail() {
         <AIInsightStrip
           dashboardKey={`customer_360_${id}`}
           payload={aiPayload}
+          autoLoad={!!analytics}
           title="Customer Intelligence Report"
         />
 
@@ -251,8 +273,9 @@ export default function CustomerDetail() {
             title="Monthly spend & visits"
             accent="burgundy"
           />
+          {loadingAnalytics ? <SectionLoading height={280} label="Loading revenue timeline…" /> : (
           <ResponsiveContainer width="100%" height={280}>
-            <AreaChart data={data.monthly_spend}>
+            <AreaChart data={monthlySpend}>
               <defs>
                 <linearGradient id="gradSpend" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="#571326" stopOpacity={0.4} />
@@ -268,33 +291,37 @@ export default function CustomerDetail() {
               <Bar yAxisId="r" dataKey="visits" fill="#1E3A8A" opacity={0.7} name="Visits" />
             </AreaChart>
           </ResponsiveContainer>
+          )}
         </div>
 
         {/* Affinity */}
         <div className="grid lg:grid-cols-2 gap-4">
           <div className="bg-white border border-black/10 p-5" data-testid="cust-category-affinity">
             <SectionHeading eyebrow="CATEGORY AFFINITY" title="What she buys" accent="indigo" />
+            {loadingAnalytics ? <SectionLoading height={260} /> : (
             <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={data.category_affinity} layout="vertical" margin={{ left: 30 }}>
+              <BarChart data={categoryAffinity} layout="vertical" margin={{ left: 30 }}>
                 <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />
                 <XAxis type="number" stroke="#64748b" fontSize={11} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`} />
                 <YAxis dataKey="category" type="category" stroke="#64748b" fontSize={11} width={90} />
                 <Tooltip formatter={(v) => fmtMoney2(v)} />
                 <Bar dataKey="spend" fill="#1E3A8A">
-                  {data.category_affinity.map((_, i) => (
+                  {categoryAffinity.map((_, i) => (
                     <Cell key={i} fill={`hsl(${214 + i * 18}, 60%, ${35 + i * 4}%)`} />
                   ))}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
+            )}
           </div>
 
           <div className="bg-white border border-black/10 p-5" data-testid="cust-store-affinity">
             <SectionHeading eyebrow="STORE AFFINITY" title="Where she shops" accent="teal" />
+            {loadingAnalytics ? <SectionLoading height={240} /> : (
             <table className="data-table">
               <thead><tr><th>Store</th><th>City</th><th className="text-right">Visits</th><th className="text-right">Spend</th></tr></thead>
               <tbody>
-                {data.store_affinity.map((s) => (
+                {storeAffinity.map((s) => (
                   <tr key={s.store_id}>
                     <td>{s.name}</td>
                     <td>{s.city}</td>
@@ -302,11 +329,12 @@ export default function CustomerDetail() {
                     <td className="text-right font-mono">{fmtMoney2(s.spend)}</td>
                   </tr>
                 ))}
-                {data.store_affinity.length === 0 && (
+                {storeAffinity.length === 0 && (
                   <tr><td colSpan={4} className="text-center py-6 text-neutral-500">No store activity</td></tr>
                 )}
               </tbody>
             </table>
+            )}
           </div>
         </div>
 
@@ -363,9 +391,10 @@ export default function CustomerDetail() {
 
           <div className="bg-white border border-black/10 p-5">
             <SectionHeading eyebrow="VOICE OF CUSTOMER" title="NPS history" accent="rose" />
+            {loadingAnalytics ? <SectionLoading height={200} label="Loading NPS…" /> : (
             <div className="space-y-2 max-h-[400px] overflow-y-auto">
-              {data.nps_history.length === 0 && <div className="text-sm text-neutral-500">No NPS responses yet</div>}
-              {data.nps_history.map((n) => (
+              {npsHistory.length === 0 && <div className="text-sm text-neutral-500">No NPS responses yet</div>}
+              {npsHistory.map((n) => (
                 <div key={n.id} className="border-b border-black/5 py-2 flex justify-between">
                   <div>
                     <div className="font-medium text-sm">
@@ -380,6 +409,7 @@ export default function CustomerDetail() {
                 </div>
               ))}
             </div>
+            )}
           </div>
         </div>
       </div>
@@ -405,6 +435,20 @@ export default function CustomerDetail() {
     </div>
   );
 }
+
+function SectionLoading({ height = 240, label = "Loading analytics…" }) {
+  return (
+    <div
+      className="flex flex-col items-center justify-center gap-2 text-neutral-400"
+      style={{ height }}
+      data-testid="analytics-loading"
+    >
+      <Loader2 className="w-5 h-5 animate-spin" />
+      <span className="text-xs uppercase tracking-widest">{label}</span>
+    </div>
+  );
+}
+
 
 function RFMTile({ label, letter, score, value, color }) {
   return (

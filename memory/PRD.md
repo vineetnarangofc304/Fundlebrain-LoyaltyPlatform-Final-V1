@@ -33,6 +33,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Customer 360 lazy-load frontend + User Management store dropdown (Jul 21, 2026)
+Completed the two carried-over items from the previous fork:
+- **[P0] Customer 360 lazy-load frontend integration** — the backend `GET /api/dashboard/customer-360/{id}` had been split to return core profile instantly and defer heavy analytics to `GET /api/dashboard/customer-360/{id}/analytics`, but `CustomerDetail.jsx` still read the (now-empty) analytics fields from the base call → Monthly Spend chart, Category & Store Affinity, and NPS History rendered blank. Fixed: added `analytics`/`loadingAnalytics` state + a second fetch fired alongside the base load; those 4 sections now show a `SectionLoading` spinner until the deferred call resolves, then render populated. The AI Intelligence Report is gated (`autoLoad={!!analytics}`) so it fires ONCE with the complete payload (single AI call, no wasted generation). Verified e2e: base 0.97s + analytics 0.19s; charts/affinity/NPS populate; AI report references store affinity.
+- **[P1] User Management store dropdown** — the "Add User" form never let admins assign a `store_id`, so manually-onboarded store_staff/store_manager hit empty dashboards. Added a Store `<select>` (populated from `/api/stores`) that appears only for `store_manager`/`store_staff` roles, with a client guard requiring a store for those roles; empty `store_id` is stripped for non-store roles. Backend `UserCreate` already accepted `store_id`. Verified: create store_staff via API persists `store_id`; modal shows/hides the dropdown by role.
+
+
 ### Load-time investigation — indexing audit + query/caching optimisation (Jul 20, 2026)
 User asked to "do compound indexing on all relevant fields to decrease load time." Investigated rather than blindly indexing (extra indexes slow the write-heavy POS credit path):
 - **Finding:** the collections are ALREADY comprehensively indexed (14 customers / 13 transactions / 10 points_ledger indexes covering every hot dimension via `ensure_indexes()`), and I timed every dashboard/report live — all <0.3s EXCEPT the two full-customer-base segment reports (customer-count-by-store 1.3s, sales-mtd 2.5s).
