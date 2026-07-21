@@ -469,6 +469,11 @@ async def ensure_indexes():
         (customers_col, [("ingest_job_id", 1)], {"name": "ix_cust_ingest_job"}),
         # points ledger — economics / expiry
         (points_ledger_col, [("customer_mobile", 1)], {"name": "ix_pl_mobile"}),
+        # (customer_mobile, created_at desc) — the Customer-360 detail view reads a
+        # customer's last 30 ledger rows via find({customer_mobile}).sort(created_at,-1).
+        # With only the mobile index, a heavy customer's rows were pulled then SORTED in
+        # memory (slow). This compound serves the sorted-limit as an index-only walk (~1ms).
+        (points_ledger_col, [("customer_mobile", 1), ("created_at", -1)], {"name": "ix_pl_mobile_created"}),
         (points_ledger_col, [("type", 1), ("expires_at", 1)], {"name": "ix_pl_type_expiry"}),
         # (type, reference_type) — Master Brain double-redemption repair scan filters on
         # type=redeem + reference_type=transaction; without this it COLLSCANs the full ledger.
@@ -724,6 +729,17 @@ async def startup():
         asyncio.create_task(rollup_loop())
     except Exception as e:
         logger.warning(f"Could not schedule analytics rollup loop: {e}")
+
+    # Warm the RFM population breakpoints once at startup (then refreshed every
+    # 30 min by the scheduler). Persisted to a shared Mongo doc so the Customer-360
+    # detail view NEVER blocks on the ~1.5-3s whole-base quintile scan — it just
+    # reads the tiny persisted doc. Without this, a cold/expired per-pod cache made
+    # the "View" drilldown "take ages".
+    try:
+        from routes.fundlebrain_routes import refresh_rfm_breakpoints
+        asyncio.create_task(refresh_rfm_breakpoints())
+    except Exception as e:
+        logger.warning(f"Could not warm RFM breakpoints: {e}")
 
 
 @app.on_event("shutdown")

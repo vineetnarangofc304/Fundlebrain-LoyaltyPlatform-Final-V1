@@ -10,6 +10,7 @@ from typing import Optional, Any, Dict, List
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 import asyncio
+import time
 
 from database import (
     customers_col, transactions_col, stores_col, points_ledger_col, nps_col,
@@ -494,10 +495,23 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
     }
 
 
-@dash_cache("rfm-bp")
-async def _rfm_breakpoints() -> Dict[str, List[float]]:
+# RFM population quintile breakpoints.
+# These are a WHOLE-BASE aggregation (index-backed skip queries over ~800k
+# customers, ~1.5-3s). They were previously computed ON the Customer-360 request
+# path behind a per-pod 5-min cache, so every cold/expired pod BLOCKED the detail
+# view for seconds ("View takes ages"). They change only slowly (with ingest / POS
+# traffic), so they are now computed OUT OF BAND (startup + scheduler) and PERSISTED
+# in a shared Mongo doc. The request path only ever reads that tiny doc → instant,
+# and shared across ALL pods (unlike the old in-process cache).
+_RFM_BP_MEM: Dict[str, Any] = {"value": None, "ts": 0.0}
+_RFM_BP_MEM_TTL = 300          # process-local L1 freshness (s)
+_RFM_BP_DOC_ID = "rfm_breakpoints"
+
+
+async def _compute_rfm_breakpoints() -> Dict[str, List[float]]:
     """Quintile breakpoints for R/F/M across the whole base — computed with
-    index-backed skip queries (exact at any scale, no full-collection pull)."""
+    index-backed skip queries (exact at any scale, no full-collection pull).
+    EXPENSIVE (~1.5-3s at 800k) — only ever called off the request path."""
     import asyncio as _aio
     now = datetime.now(timezone.utc)
     total = await customers_col.estimated_document_count()
@@ -518,6 +532,45 @@ async def _rfm_breakpoints() -> Dict[str, List[float]]:
         except Exception:
             rec.append(9999)
     return {"recency": rec, "frequency": freq, "monetary": mon}
+
+
+async def refresh_rfm_breakpoints() -> Dict[str, List[float]]:
+    """Recompute + persist the RFM breakpoints (startup + scheduler). Persists to a
+    shared Mongo doc so every pod's request path can read it instantly."""
+    bp = await _compute_rfm_breakpoints()
+    try:
+        from database import db
+        await db["dashboard_kv"].update_one(
+            {"_id": _RFM_BP_DOC_ID},
+            {"$set": {"value": bp, "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+    _RFM_BP_MEM["value"] = bp
+    _RFM_BP_MEM["ts"] = time.monotonic()
+    return bp
+
+
+async def _rfm_breakpoints() -> Dict[str, List[float]]:
+    """FAST request-path reader — never runs the population scan inline once the
+    shared doc is populated. L1 process cache → L2 shared Mongo doc → compute-once
+    fallback (only before the very first scheduled refresh)."""
+    v = _RFM_BP_MEM["value"]
+    if v is not None and (time.monotonic() - _RFM_BP_MEM["ts"]) < _RFM_BP_MEM_TTL:
+        return v
+    try:
+        from database import db
+        doc = await db["dashboard_kv"].find_one({"_id": _RFM_BP_DOC_ID}, {"_id": 0, "value": 1})
+        if doc and doc.get("value"):
+            _RFM_BP_MEM["value"] = doc["value"]
+            _RFM_BP_MEM["ts"] = time.monotonic()
+            return doc["value"]
+    except Exception:
+        pass
+    # Cold fallback: compute once + persist (happens at most once, before the
+    # scheduler/startup warm has ever run on this deployment).
+    return await refresh_rfm_breakpoints()
 
 
 # ============================================================

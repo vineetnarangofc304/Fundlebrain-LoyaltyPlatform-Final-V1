@@ -97,9 +97,21 @@ def start_scheduler():
                    coalesce=True,
                    misfire_grace_time=3600)
 
+    # RFM population breakpoints — recomputed every 30 min OFF the request path so
+    # the Customer-360 detail view never blocks on the ~1.5-3s whole-base quintile
+    # scan. Persisted to a shared Mongo doc (dashboard_kv) read instantly by every pod.
+    from routes.fundlebrain_routes import refresh_rfm_breakpoints
+    sched.add_job(refresh_rfm_breakpoints,
+                   IntervalTrigger(minutes=30),
+                   id="rfm_breakpoints_refresh",
+                   replace_existing=True,
+                   max_instances=1,
+                   coalesce=True,
+                   misfire_grace_time=600)
+
     sched.start()
     _scheduler = sched
-    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST")
+    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST | RFM breakpoints refresh every 30m")
     return sched
 
 
