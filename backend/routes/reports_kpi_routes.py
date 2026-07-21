@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone, timedelta
@@ -29,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from auth import get_current_user
 from database import customers_col, transactions_col
 from routes._db_timeout import db_deadline
+from routes._dash_cache import cache_get, cache_get_stale, cache_set
 
 logger = logging.getLogger("kazo-fundle.kpi_reports")
 
@@ -537,24 +540,12 @@ async def kpi_trend_export(
 
 
 # ── CRM summary (charts: tier / recency / top cities / liability) ─────────────
-@router.get("/crm-summary")
-async def crm_summary(
-    q: Optional[str] = None,
-    city: Optional[str] = None,
-    state: Optional[str] = None,
-    tier: Optional[str] = None,
-    card_validity: Optional[str] = None,
-    recency: Optional[str] = None,
-    min_visits: Optional[int] = None,
-    max_visits: Optional[int] = None,
-    min_points: Optional[int] = None,
-    max_points: Optional[int] = None,
-    min_billing: Optional[float] = None,
-    user=Depends(get_current_user),
-):
-    flt = _crm_filter(q, city, state, tier, card_validity, recency,
-                      min_visits, max_visits, min_points, max_points, min_billing)
-    pipe = [
+_REC_LABELS = {0: "Active (0-6M)", 183: "Dormant (6-12M)", 366: "Lapsed (12M+)", "unknown": "Unknown"}
+_crm_refreshing: set = set()
+
+
+def _crm_summary_pipe(flt: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
         {"$match": flt},
         {"$facet": {
             "by_tier": [
@@ -583,16 +574,17 @@ async def crm_summary(
             ],
         }},
     ]
-    res = (await customers_col.aggregate(pipe, allowDiskUse=True).to_list(1)) or [{}]
-    res = res[0] if res else {}
-    rec_labels = {0: "Active (0-6M)", 183: "Dormant (6-12M)", 366: "Lapsed (12M+)", "unknown": "Unknown"}
+
+
+def _crm_summary_shape(res: Dict[str, Any]) -> Dict[str, Any]:
     totals = (res.get("totals") or [{}])
     totals = totals[0] if totals else {}
     return {
+        "partial": False,
         "by_tier": [{"tier": (g["_id"] or "unknown"), "count": g["count"],
                      "points": round(g.get("points", 0) or 0, 2), "spend": round(g.get("spend", 0) or 0, 2)}
                     for g in (res.get("by_tier") or [])],
-        "by_recency": [{"bucket": rec_labels.get(g["_id"], str(g["_id"])), "count": g["count"]}
+        "by_recency": [{"bucket": _REC_LABELS.get(g["_id"], str(g["_id"])), "count": g["count"]}
                        for g in (res.get("by_recency") or [])],
         "top_cities": [{"city": g["_id"], "count": g["count"]} for g in (res.get("top_cities") or [])],
         "totals": {
@@ -603,6 +595,72 @@ async def crm_summary(
             "visits": int(totals.get("visits", 0) or 0),
         },
     }
+
+
+async def _crm_summary_compute(key: str, flt: Dict[str, Any]) -> None:
+    """Run the heavy facet with a hard time budget (below the 120s proxy ceiling) and cache it.
+    Runs in the background so a cold request never blocks — see crm_summary()."""
+    try:
+        with pymongo.timeout(90):
+            res = (await customers_col.aggregate(_crm_summary_pipe(flt), allowDiskUse=True).to_list(1)) or [{}]
+        cache_set(key, _crm_summary_shape(res[0] if res else {}))
+    except Exception:  # noqa: BLE001 — leave any prior cached value in place; endpoint returns partial
+        logging.getLogger("kazo-fundle.crm").warning("crm-summary compute failed/timed out for %s", key)
+    finally:
+        _crm_refreshing.discard(key)
+
+
+def _crm_kick(key: str, flt: Dict[str, Any]) -> None:
+    if key not in _crm_refreshing:
+        _crm_refreshing.add(key)
+        asyncio.create_task(_crm_summary_compute(key, flt))
+
+
+_CRM_SUMMARY_PARTIAL = {
+    "partial": True, "by_tier": [], "by_recency": [], "top_cities": [],
+    "totals": {"customers": None, "points": None, "redeemed": None, "spend": None, "visits": None},
+    "message": ("Summary KPIs are being computed for this filter — the customer list below is ready now. "
+                "Reopen in a few seconds for the KPIs, or narrow the filters (state / tier / recency) to speed it up."),
+}
+
+
+@router.get("/crm-summary")
+async def crm_summary(
+    q: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    tier: Optional[str] = None,
+    card_validity: Optional[str] = None,
+    recency: Optional[str] = None,
+    min_visits: Optional[int] = None,
+    max_visits: Optional[int] = None,
+    min_points: Optional[int] = None,
+    max_points: Optional[int] = None,
+    min_billing: Optional[float] = None,
+    refresh: bool = False,
+    user=Depends(get_current_user),
+):
+    flt = _crm_filter(q, city, state, tier, card_validity, recency,
+                      min_visits, max_visits, min_points, max_points, min_billing)
+    key = "crm-summary|" + json.dumps({
+        "q": q, "city": city, "state": state, "tier": tier, "card_validity": card_validity,
+        "recency": recency, "min_visits": min_visits, "max_visits": max_visits,
+        "min_points": min_points, "max_points": max_points, "min_billing": min_billing,
+    }, sort_keys=True, default=str)
+
+    if not refresh:
+        fresh = cache_get(key)
+        if fresh is not None:
+            return fresh
+        stale = cache_get_stale(key)
+        if stale is not None:
+            _crm_kick(key, flt)   # stale-while-revalidate in background
+            return stale
+
+    # Cold (or forced refresh): compute in the background and return partial KPIs instantly —
+    # NEVER hang to the 120s proxy timeout. The next open (once compute lands) serves real data.
+    _crm_kick(key, flt)
+    return dict(_CRM_SUMMARY_PARTIAL)
 
 
 # ── Filter options for the report dropdowns ───────────────────────────────────

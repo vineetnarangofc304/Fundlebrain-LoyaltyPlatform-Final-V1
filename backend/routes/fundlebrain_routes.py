@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, Dict, List
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
+import asyncio
 
 from database import (
     customers_col, transactions_col, stores_col, points_ledger_col, nps_col,
@@ -126,55 +127,12 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
     # bulk-loaded history) and SLOW (full collection scan → timeout → blank page).
     mobile = customer.get("mobile") or "__no_mobile__"
 
-    # ---- monthly spend (last 24 months, live aggregate) ----
-    pipe = [
-        {"$match": {"customer_mobile": mobile}},
-        {"$group": {
-            "_id": {"$substr": ["$bill_date", 0, 7]},
-            "spend": {"$sum": "$net_amount"},
-            "visits": {"$sum": 1},
-            "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
-            "discount": {"$sum": "$discount_amount"},
-        }},
-        {"$sort": {"_id": 1}},
-    ]
-    monthly_rows = await transactions_col.aggregate(pipe).to_list(60)
-    monthly = [{
-        "month": r["_id"],
-        "spend": round(r["spend"], 2),
-        "visits": r["visits"],
-        "items": r["items"],
-        "aov": round(r["spend"] / r["visits"], 2) if r["visits"] else 0,
-        "discount": round(r["discount"], 2),
-    } for r in monthly_rows]
+    # Heavy analytics (monthly spend, store & category affinity, NPS) are DEFERRED to
+    # GET /customer-360/{id}/analytics so the first view paints instantly.
+    monthly = []
 
-    # ---- store affinity (top stores by visit count) ----
-    store_pipe = [
-        {"$match": {"customer_mobile": mobile}},
-        {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": "$net_amount"}}},
-        {"$sort": {"visits": -1}}, {"$limit": 5},
-    ]
-    s_rows = await transactions_col.aggregate(store_pipe).to_list(10)
-    s_ids = [r["_id"] for r in s_rows]
-    stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": s_ids}}, {"_id": 0})}
-    store_affinity = [{
-        "store_id": r["_id"],
-        "name": stores.get(r["_id"], {}).get("name", "Unknown"),
-        "city": stores.get(r["_id"], {}).get("city", "—"),
-        "visits": r["visits"],
-        "spend": round(r["spend"], 2),
-    } for r in s_rows]
-
-    # ---- category affinity ----
-    cat_pipe = [
-        {"$match": {"customer_mobile": mobile}},
-        {"$unwind": "$items"},
-        {"$group": {"_id": "$items.category", "qty": {"$sum": "$items.quantity"},
-                    "spend": {"$sum": "$items.total"}}},
-        {"$sort": {"spend": -1}}, {"$limit": 8},
-    ]
-    cat_rows = await transactions_col.aggregate(cat_pipe).to_list(20)
-    categories = [{"category": r["_id"], "qty": r["qty"], "spend": round(r["spend"], 2)} for r in cat_rows]
+    store_affinity = []
+    categories = []
 
     # ---- RFM scores (live, single-customer evaluation against full population) ----
     # recency in days since last_visit
@@ -210,10 +168,7 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
         {"customer_mobile": mobile}, {"_id": 0}
     ).sort("created_at", -1).limit(25).to_list(25)
 
-    # ---- NPS history ----
-    nps = await nps_col.find(
-        {"customer_id": customer_id}, {"_id": 0}
-    ).sort("created_at", -1).limit(10).to_list(10)
+    nps = []
 
     # ---- lifetime stats (live recompute, NOT cached counters) ----
     lifetime_pipe = [
@@ -280,6 +235,55 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
         "points_ledger": ledger,
         "nps_history": nps,
     }
+
+
+@router.get("/customer-360/{customer_id}/analytics")
+async def customer_360_analytics(customer_id: str, user: dict = Depends(get_current_user)):
+    """Heavy analytics for the Customer 360 page (monthly spend, store & category affinity,
+    NPS). Loaded lazily AFTER the core view paints so the first render is instant. All four
+    aggregations run concurrently."""
+    customer = await customers_col.find_one({"id": customer_id}, {"_id": 0, "mobile": 1})
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+    mobile = customer.get("mobile") or "__no_mobile__"
+    monthly_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$group": {"_id": {"$substr": ["$bill_date", 0, 7]},
+                    "spend": {"$sum": "$net_amount"}, "visits": {"$sum": 1},
+                    "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+                    "discount": {"$sum": "$discount_amount"}}},
+        {"$sort": {"_id": 1}},
+    ]
+    store_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": "$net_amount"}}},
+        {"$sort": {"visits": -1}}, {"$limit": 5},
+    ]
+    cat_pipe = [
+        {"$match": {"customer_mobile": mobile}},
+        {"$unwind": "$items"},
+        {"$group": {"_id": "$items.category", "qty": {"$sum": "$items.quantity"},
+                    "spend": {"$sum": "$items.total"}}},
+        {"$sort": {"spend": -1}}, {"$limit": 8},
+    ]
+    monthly_rows, s_rows, cat_rows, nps = await asyncio.gather(
+        transactions_col.aggregate(monthly_pipe).to_list(60),
+        transactions_col.aggregate(store_pipe).to_list(10),
+        transactions_col.aggregate(cat_pipe).to_list(20),
+        nps_col.find({"customer_id": customer_id}, {"_id": 0}).sort("created_at", -1).limit(10).to_list(10),
+    )
+    monthly = [{"month": r["_id"], "spend": round(r["spend"], 2), "visits": r["visits"],
+                "items": r["items"], "aov": round(r["spend"] / r["visits"], 2) if r["visits"] else 0,
+                "discount": round(r["discount"], 2)} for r in monthly_rows]
+    s_ids = [r["_id"] for r in s_rows]
+    stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": s_ids}}, {"_id": 0})}
+    store_affinity = [{"store_id": r["_id"], "name": stores.get(r["_id"], {}).get("name", "Unknown"),
+                       "city": stores.get(r["_id"], {}).get("city", "—"), "visits": r["visits"],
+                       "spend": round(r["spend"], 2)} for r in s_rows]
+    categories = [{"category": r["_id"], "qty": r["qty"], "spend": round(r["spend"], 2)} for r in cat_rows]
+    return {"monthly_spend": monthly, "store_affinity": store_affinity,
+            "category_affinity": categories, "nps_history": nps}
+
 
 
 # ============================================================
@@ -490,6 +494,7 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
     }
 
 
+@dash_cache("rfm-bp")
 async def _rfm_breakpoints() -> Dict[str, List[float]]:
     """Quintile breakpoints for R/F/M across the whole base — computed with
     index-backed skip queries (exact at any scale, no full-collection pull)."""
