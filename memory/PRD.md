@@ -33,6 +33,13 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### AI insights are now CLICK-TO-GENERATE everywhere (Jul 21, 2026)
+User: AI insights must only generate when clicked — never auto-run — "wherever we have implemented AI insights."
+- All 8 AI panels (Command Center, RFM & Churn, Store, Cohorts, Points Economics, Executive Summary, Campaign ROI, Customer 360) share ONE component `AIInsightStrip.jsx`, so a single change covers all.
+- **Change:** removed the auto-load `useEffect` (was firing `/dashboard/insight` on mount/payload change). The panel now renders an idle state with a short description + a **"Generate AI insight"** button (`data-testid=ai-insight-generate-{key}`); the LLM call runs ONLY on click. Added: (1) a `useEffect` that CLEARS any prior insight when `dashboardKey`/payload changes (filter flip, different customer) so a stale narrative is never shown; (2) the header "Regenerate" button only appears after a report exists; (3) an error state with a "Try again" button. Removed the now-unused `autoLoad` prop (and its `autoLoad={!!analytics}` usage in `CustomerDetail.jsx`).
+- **Result:** pages paint 100% instantly and AI credits are spent only on demand. Verified e2e on Customer 360: idle shows the Generate button (no auto-report); clicking it renders the full report (headline/summary/drivers/recommendations) + Regenerate. ⚠️ Redeploy required for production.
+
+
 ### Customer 360 "View takes ages" — P0 latency root-caused & fixed (Jul 21, 2026)
 User: searching a mobile is a little slow, but clicking **View** (single-customer drilldown) "takes ages" — make it instant.
 - **Reproduced at scale (preview has 800k customers + 1.5M ledger rows — production scale for those two collections).** Timed the by-id endpoint (`customer_360_v2`) piece by piece: **cold call 0.855s, warm call 0.002s**. The ENTIRE cost was `_rfm_breakpoints()` — a whole-base R/F/M quintile computation done with index-backed `skip()` queries over 800k customers (~1.5–3s; the 0.8-quantile `skip(640000)` walks 640k index entries). It ran ON the request path behind a **per-pod, in-process, 5-min** cache. On production (multiple pods, autoscaling, 1-hr stale window, concurrent report load), detail views constantly hit a cold/expired cache and **blocked for seconds → "ages"**. Everything else on the page (customer doc, lifetime, recent txns, ledger, deferred analytics) is ~2ms.

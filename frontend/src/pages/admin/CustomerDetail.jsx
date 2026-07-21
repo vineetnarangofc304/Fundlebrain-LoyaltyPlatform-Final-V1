@@ -148,7 +148,6 @@ export default function CustomerDetail() {
         <AIInsightStrip
           dashboardKey={`customer_360_${id}`}
           payload={aiPayload}
-          autoLoad={!!analytics}
           title="Customer Intelligence Report"
         />
 

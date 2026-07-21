@@ -14,7 +14,6 @@ import { Sparkles, RefreshCw, TrendingUp, Target } from "lucide-react";
 export default function AIInsightStrip({
   dashboardKey,
   payload,
-  autoLoad = true,
   title = "AI Intelligence Report",
 }) {
   const [report, setReport] = useState(null);
@@ -41,12 +40,17 @@ export default function AIInsightStrip({
     }
   };
 
-  // Stable trigger
+  // AI insights are CLICK-TO-GENERATE only — they NEVER auto-run (no surprise AI
+  // spend, and the page paints instantly). When the underlying data/payload changes
+  // (e.g. a filter flip or a different customer), clear any prior insight so a stale
+  // narrative is never shown for different data; the user re-generates on demand.
   const payloadKey = payload ? JSON.stringify(payload) : null;
   useEffect(() => {
-    if (autoLoad && payloadKey) load(false);
+    setReport(null);
+    setMeta(null);
+    setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dashboardKey, payloadKey, autoLoad]);
+  }, [dashboardKey, payloadKey]);
 
   return (
     <div
@@ -71,16 +75,18 @@ export default function AIInsightStrip({
               {meta.cached ? "cached" : "fresh"} · {new Date(meta.generated_at).toLocaleTimeString("en-IN")}
             </span>
           )}
-          <button
-            onClick={() => load(true)}
-            className="text-neutral-600 hover:text-black flex items-center gap-1.5 text-xs"
-            data-testid={`ai-insight-refresh-${dashboardKey}`}
-            disabled={loading}
-            title="Regenerate insight (force)"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-            Regenerate
-          </button>
+          {report && (
+            <button
+              onClick={() => load(true)}
+              className="text-neutral-600 hover:text-black flex items-center gap-1.5 text-xs"
+              data-testid={`ai-insight-refresh-${dashboardKey}`}
+              disabled={loading}
+              title="Regenerate insight (force)"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+              Regenerate
+            </button>
+          )}
         </div>
       </div>
 
@@ -91,8 +97,15 @@ export default function AIInsightStrip({
           </div>
         )}
         {error && (
-          <div className="text-sm text-red-600" data-testid={`ai-insight-error-${dashboardKey}`}>
-            {error}
+          <div className="flex items-center justify-between gap-3" data-testid={`ai-insight-error-${dashboardKey}`}>
+            <span className="text-sm text-red-600">{error}</span>
+            <button
+              onClick={() => load(false)}
+              className="k-btn k-btn-outline k-btn-sm shrink-0"
+              data-testid={`ai-insight-retry-${dashboardKey}`}
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Try again
+            </button>
           </div>
         )}
         {!loading && !error && report && (
@@ -165,7 +178,23 @@ export default function AIInsightStrip({
           </div>
         )}
         {!loading && !error && !report && (
-          <div className="text-sm text-neutral-400">No intelligence yet.</div>
+          <div
+            className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+            data-testid={`ai-insight-idle-${dashboardKey}`}
+          >
+            <p className="text-sm text-neutral-500 leading-relaxed">
+              Fundle Brain can analyse this view's live data on demand — headline, summary,
+              key drivers and recommended actions.
+            </p>
+            <button
+              onClick={() => load(false)}
+              disabled={!payload}
+              className="k-btn kazo-bg-burgundy text-white k-btn-sm shrink-0 disabled:opacity-50"
+              data-testid={`ai-insight-generate-${dashboardKey}`}
+            >
+              <Sparkles className="w-3.5 h-3.5" /> Generate AI insight
+            </button>
+          </div>
         )}
       </div>
     </div>
