@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from database import transactions_col, customers_col, stores_col
 from auth import require_roles
+from routes._money import PAID_EXPR, paid_amount
 
 router = APIRouter(prefix="/live-monitor", tags=["live-monitor"])
 
@@ -295,7 +296,7 @@ async def live_export(
                     "bill_type": "Return" if r.get("is_return") else "Regular",
                     "net_before_tax": round(nbt, 2), "tax": round(tax, 2),
                     "discount": round(float(r.get("discount_amount") or 0), 2),
-                    "total_paid": round((float(r.get("bill_with_tax")) if r.get("bill_with_tax") not in (None, "") else nbt + tax), 2),
+                    "total_paid": paid_amount(r),
                     "points_earned": r.get("points_earned", 0),
                     "points_redeemed": r.get("points_redeemed", 0),
                     "payment_mode": r.get("payment_mode") or "", "source": r.get("source") or "",
@@ -351,10 +352,10 @@ async def live_stats(
         {"$group": {
             "_id": None,
             "bills": {"$sum": 1},
-            # Total Purchase = GROSS SALES (gross_amount = MRP/billed value), returns
-            # EXCLUDED (they're surfaced in the separate Returns KPI) so Total Purchase
-            # stays a clean superset of Loyalty Purchase.
-            "revenue": {"$sum": {"$cond": ["$is_return", 0, "$gross_amount"]}},
+            # Total Purchase = the customer's TOTAL PAID (post-discount, incl. GST —
+            # the canonical amount_paid), returns EXCLUDED (surfaced in the Returns KPI).
+            # Matches the per-bill "Total Paid" and every other report.
+            "revenue": {"$sum": {"$cond": ["$is_return", 0, PAID_EXPR]}},
             "bills_with_mobile": {
                 "$sum": {"$cond": [
                     {"$and": [{"$ne": ["$customer_mobile", None]},
@@ -367,7 +368,7 @@ async def live_stats(
                     {"$and": [{"$not": ["$is_return"]},
                                 {"$ne": ["$customer_mobile", None]},
                                 {"$ne": ["$customer_mobile", ""]}]},
-                    "$gross_amount", 0,
+                    PAID_EXPR, 0,
                 ]}
             },
             # Loyalty Purchase = gross purchase value of (non-return) bills on which
@@ -376,7 +377,7 @@ async def live_stats(
                 "$sum": {"$cond": [
                     {"$and": [{"$not": ["$is_return"]},
                                 {"$gt": ["$points_earned", 0]}]},
-                    "$gross_amount", 0,
+                    PAID_EXPR, 0,
                 ]}
             },
             "points_earned": {"$sum": "$points_earned"},
@@ -418,7 +419,7 @@ async def live_stats(
             "_id": "$store_id",
             "store_name": {"$first": "$store_name"},
             "bills": {"$sum": 1},
-            "revenue": {"$sum": {"$cond": ["$is_return", 0, "$net_amount"]}},
+            "revenue": {"$sum": {"$cond": ["$is_return", 0, PAID_EXPR]}},
             "returns": {"$sum": {"$cond": ["$is_return", 1, 0]}},
             "bills_with_mobile": {
                 "$sum": {"$cond": [

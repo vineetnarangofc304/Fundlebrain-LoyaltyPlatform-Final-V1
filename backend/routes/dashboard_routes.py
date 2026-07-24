@@ -11,6 +11,7 @@ from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
 from routes._dash_cache import dash_cache
+from routes._money import PAID_EXPR
 import logging
 
 logger = logging.getLogger("kazo-fundle")
@@ -153,7 +154,7 @@ async def kpis(
         {"$group": {
             "_id": None,
             "gross_sales": {"$sum": "$gross_amount"},
-            "net_sales": {"$sum": "$net_amount"},
+            "net_sales": {"$sum": PAID_EXPR},
             "discount": {"$sum": "$discount_amount"},
             "txn_count": {"$sum": 1},
             # UPT = Units Per Transaction. Sum each line item's `quantity` (or
@@ -182,7 +183,7 @@ async def kpis(
     ]
     prev_pipeline = [
         {"$match": prev_filter},
-        {"$group": {"_id": None, "net_sales": {"$sum": "$net_amount"}, "txn_count": {"$sum": 1}}}
+        {"$group": {"_id": None, "net_sales": {"$sum": PAID_EXPR}, "txn_count": {"$sum": 1}}}
     ]
 
     # Loyalty metrics — points ledger is timestamped on the BILL, not the ingest time
@@ -336,7 +337,7 @@ async def sales_trend(
         {"$match": loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})},
         {"$group": {
             "_id": {"d": date_key, "m": "$customer_mobile"},
-            "net": {"$sum": "$net_amount"},
+            "net": {"$sum": PAID_EXPR},
             "txns": {"$sum": 1},
         }},
         {"$group": {
@@ -367,7 +368,7 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
         # two-stage: exact distinct visitors per store without $addToSet memory blow-up
         {"$group": {
             "_id": {"s": "$store_id", "m": "$customer_mobile"},
-            "net": {"$sum": "$net_amount"},
+            "net": {"$sum": PAID_EXPR},
             "txns": {"$sum": 1},
         }},
         {"$group": {
@@ -607,7 +608,7 @@ async def command_center(
         {"$facet": {
             "sales": [{"$group": {
                 "_id": None,
-                "net": {"$sum": "$net_amount"},
+                "net": {"$sum": PAID_EXPR},
                 "gross": {"$sum": "$gross_amount"},
                 "discount": {"$sum": "$discount_amount"},
                 "txns": {"$sum": 1},
@@ -622,7 +623,7 @@ async def command_center(
                             "unique": {"$sum": 1}}},
             ],
             "spark": [
-                {"$group": {"_id": spark_key, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+                {"$group": {"_id": spark_key, "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
                 {"$sort": {"_id": 1}},
                 {"$limit": 2000},
             ],
@@ -630,7 +631,7 @@ async def command_center(
     ]
     prev_sales_pipe = [
         {"$match": _txn_match("bill_date", prev_start.isoformat(), lt=start.isoformat())},
-        {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+        {"$group": {"_id": None, "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
     ]
 
     # Customers: total + liability + acquisition cohorts in ONE facet scan
@@ -800,7 +801,7 @@ async def city_performance(period: str = "30d", user: dict = Depends(get_current
     pipeline = [
         {"$match": loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})},
         {"$group": {"_id": {"s": "$store_id", "c": "$city"},
-                    "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+                    "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
     ]
     rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(2000)
     store_ids = list({r["_id"].get("s") for r in rows if r["_id"].get("s")})

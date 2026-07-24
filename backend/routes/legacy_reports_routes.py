@@ -171,7 +171,7 @@ async def transaction_data_report(
 
     if export == "csv":
         cols = ["bill_date", "bill_number", "customer_mobile", "store_id", "net_amount",
-                "gross_amount", "points_earned", "points_redeemed"]
+                "amount_paid", "gross_amount", "points_earned", "points_redeemed"]
         return _to_csv(rows, cols)
     return {"total": total, "rows": rows, "offset": offset, "limit": limit}
 

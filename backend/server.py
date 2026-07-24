@@ -541,6 +541,36 @@ async def ensure_indexes():
 
 
 
+async def _backfill_amount_paid(batch: int = 20000):
+    """Fill the canonical `amount_paid` on every transaction missing it, in batches,
+    on the deadline-free client. Idempotent — safe to run on every boot; it stops as
+    soon as no un-backfilled bills remain. Lets ALL reports agree on the Total Paid
+    figure even for historic bills loaded before the field existed."""
+    from database import transactions_col
+    from routes._money import PAID_COMPUTE
+    total = 0
+    try:
+        while True:
+            ids = await transactions_col.find(
+                {"amount_paid": {"$exists": False}}, {"_id": 1}
+            ).limit(batch).to_list(batch)
+            if not ids:
+                break
+            id_list = [d["_id"] for d in ids]
+            with pymongo.timeout(120):
+                await transactions_col.update_many(
+                    {"_id": {"$in": id_list}},
+                    [{"$set": {"amount_paid": PAID_COMPUTE}}],
+                )
+            total += len(id_list)
+            await asyncio.sleep(0.2)  # yield to the request loop between batches
+        if total:
+            logger.info(f"amount_paid backfill complete — {total} bills updated")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"amount_paid backfill stopped early ({total} done): {e}")
+
+
+
 @app.on_event("startup")
 async def startup():
     from database import users_col, stores_col, loyalty_config_col
@@ -740,6 +770,15 @@ async def startup():
         asyncio.create_task(refresh_rfm_breakpoints())
     except Exception as e:
         logger.warning(f"Could not warm RFM breakpoints: {e}")
+
+    # Backfill the canonical `amount_paid` (customer's TOTAL PAID, incl. GST) onto every
+    # transaction that doesn't have it yet, so ALL reports/exports/dashboards agree on the
+    # same figure even for historic bills. Batched + deadline-free so it can't stall a
+    # request or hit the 30s CSOT; idempotent (only fills missing docs).
+    try:
+        asyncio.create_task(_backfill_amount_paid())
+    except Exception as e:
+        logger.warning(f"Could not start amount_paid backfill: {e}")
 
 
 @app.on_event("shutdown")

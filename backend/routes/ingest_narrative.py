@@ -24,6 +24,7 @@ from typing import Any, Dict
 from database import (
     customers_col, transactions_col, stores_col, db,
 )
+from routes._money import PAID_EXPR
 
 logger = logging.getLogger("kazo-fundle.ingest_narrative")
 
@@ -43,7 +44,7 @@ async def _snapshot() -> Dict[str, Any]:
     # Net sales + points liability (loyalty only)
     sums = await transactions_col.aggregate([
         {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
-        {"$group": {"_id": None, "net": {"$sum": "$net_amount"},
+        {"$group": {"_id": None, "net": {"$sum": PAID_EXPR},
                      "earned": {"$sum": "$points_earned"},
                      "redeemed": {"$sum": "$points_redeemed"}}},
     ]).to_list(1)

@@ -35,6 +35,7 @@ from database import (
 from auth import get_current_user, require_roles, MANAGEMENT_ROLES
 
 from routes._db_timeout import db_deadline
+from routes._money import paid_amount
 
 router = APIRouter(prefix="/historic-data", tags=["historic-data"], dependencies=[Depends(db_deadline)])
 logger = logging.getLogger("kazo-fundle.historic")
@@ -312,6 +313,7 @@ def _map_transaction_row(r: Dict[str, str], store_cache: Dict[str, Dict[str, Any
         "net_amount": total or net,
         "net_amount_before_tax": net,
         "tax_amount": tax,
+        "amount_paid": paid_amount({"net_amount_before_tax": net, "net_amount": total or net, "tax_amount": tax}),
         "discount_amount": discount,
         "gross_amount": bill_amount or ((net or 0) + (tax or 0)),
         "bill_amount": bill_amount or None,

@@ -21,6 +21,7 @@ from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
 from routes._dash_cache import dash_cache
+from routes._money import PAID_EXPR
 
 router = APIRouter(prefix="/dashboard", tags=["fundlebrain"], dependencies=[Depends(db_deadline)])
 
@@ -176,18 +177,14 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
         {"$match": {"customer_mobile": mobile}},
         {"$group": {
             "_id": None,
-            "spend": {"$sum": "$net_amount"},
+            "spend": {"$sum": PAID_EXPR},
             "gross": {"$sum": "$gross_amount"},
             "discount": {"$sum": "$discount_amount"},
             "visits": {"$sum": 1},
             "sale_visits": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 0, 1]}},
             "returns": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 1, 0]}},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
-            "paid": {"$sum": {"$cond": [
-                {"$ne": [{"$ifNull": ["$net_amount_before_tax", None]}, None]},
-                {"$add": ["$net_amount_before_tax", {"$ifNull": ["$tax_amount", 0]}]},
-                {"$ifNull": ["$net_amount", 0]},
-            ]}},
+            "paid": {"$sum": PAID_EXPR},
             "first": {"$min": "$bill_date"},
             "last": {"$max": "$bill_date"},
         }},
@@ -250,14 +247,14 @@ async def customer_360_analytics(customer_id: str, user: dict = Depends(get_curr
     monthly_pipe = [
         {"$match": {"customer_mobile": mobile}},
         {"$group": {"_id": {"$substr": ["$bill_date", 0, 7]},
-                    "spend": {"$sum": "$net_amount"}, "visits": {"$sum": 1},
+                    "spend": {"$sum": PAID_EXPR}, "visits": {"$sum": 1},
                     "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
                     "discount": {"$sum": "$discount_amount"}}},
         {"$sort": {"_id": 1}},
     ]
     store_pipe = [
         {"$match": {"customer_mobile": mobile}},
-        {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": "$net_amount"}}},
+        {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": PAID_EXPR}}},
         {"$sort": {"visits": -1}}, {"$limit": 5},
     ]
     cat_pipe = [
@@ -302,7 +299,7 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
         {"$match": {"customer_mobile": mobile}},
         {"$group": {
             "_id": {"$substr": ["$bill_date", 0, 7]},
-            "spend": {"$sum": "$net_amount"}, "visits": {"$sum": 1},
+            "spend": {"$sum": PAID_EXPR}, "visits": {"$sum": 1},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
             "discount": {"$sum": "$discount_amount"},
         }},
@@ -321,7 +318,7 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
     # Store affinity
     store_pipe = [
         {"$match": {"customer_mobile": mobile}},
-        {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": "$net_amount"}}},
+        {"$group": {"_id": "$store_id", "visits": {"$sum": 1}, "spend": {"$sum": PAID_EXPR}}},
         {"$sort": {"visits": -1}}, {"$limit": 8},
     ]
     s_rows = await transactions_col.aggregate(store_pipe).to_list(10)
@@ -396,16 +393,12 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
         {"$match": {"customer_mobile": mobile}},
         {"$group": {
             "_id": None,
-            "spend": {"$sum": "$net_amount"},
+            "spend": {"$sum": PAID_EXPR},
             "gross": {"$sum": "$gross_amount"},
             "discount": {"$sum": "$discount_amount"},
             "visits": {"$sum": 1},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
-            "paid": {"$sum": {"$cond": [
-                {"$ne": [{"$ifNull": ["$net_amount_before_tax", None]}, None]},
-                {"$add": ["$net_amount_before_tax", {"$ifNull": ["$tax_amount", 0]}]},
-                {"$ifNull": ["$net_amount", 0]},
-            ]}},
+            "paid": {"$sum": PAID_EXPR},
             "first": {"$min": "$bill_date"},
             "last": {"$max": "$bill_date"},
             "first_store": {"$first": "$store_id"},
@@ -602,7 +595,7 @@ async def store_performance_v2(
     pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
         {"$group": {"_id": {"s": "$store_id", "m": "$customer_mobile"},
-                    "net": {"$sum": "$net_amount"},
+                    "net": {"$sum": PAID_EXPR},
                     "gross": {"$sum": "$gross_amount"},
                     "discount": {"$sum": "$discount_amount"},
                     "txns": {"$sum": 1},
@@ -617,7 +610,7 @@ async def store_performance_v2(
     # Previous-period comparison
     prev_pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": prev_start, "$lt": start}, **scope_match})},
-        {"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+        {"$group": {"_id": "$store_id", "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
     ]
 
     # ---- Hour × day heatmap (single scan; by_day derived from it) ----
@@ -628,10 +621,10 @@ async def store_performance_v2(
     }}
     heat_pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
-        {"$project": {"dt": _bill_dt, "net_amount": 1}},
+        {"$project": {"dt": _bill_dt, "amount_paid": PAID_EXPR}},
         {"$match": {"dt": {"$ne": None}}},
         {"$group": {"_id": {"d": {"$dayOfWeek": "$dt"}, "h": {"$hour": "$dt"}},
-                    "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+                    "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
     ]
 
     rows, prev_rows, heat_rows = await _aio.gather(
@@ -1319,7 +1312,7 @@ async def points_economics(
         {"$group": {"_id": "$store_id",
                      "points_earned": {"$sum": "$points_earned"},
                      "bills": {"$sum": 1},
-                     "net_amount": {"$sum": "$net_amount"}}},
+                     "net_amount": {"$sum": PAID_EXPR}}},
         {"$sort": {"points_earned": -1}},
         {"$limit": 10},
     ]
@@ -1330,7 +1323,7 @@ async def points_economics(
         {"$group": {"_id": "$store_id",
                      "points_redeemed": {"$sum": "$points_redeemed"},
                      "bills": {"$sum": 1},
-                     "net_amount": {"$sum": "$net_amount"}}},
+                     "net_amount": {"$sum": PAID_EXPR}}},
         {"$sort": {"points_redeemed": -1}},
         {"$limit": 10},
     ]
@@ -1717,18 +1710,18 @@ async def executive_summary(period_days: int = 30, user: dict = Depends(get_curr
     txn_facet_pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$facet": {
-            "sales": [{"$group": {"_id": None, "net": {"$sum": "$net_amount"},
+            "sales": [{"$group": {"_id": None, "net": {"$sum": PAID_EXPR},
                                   "txns": {"$sum": 1}, "units": {"$sum": units_expr}}}],
             "active": [{"$group": {"_id": "$customer_mobile"}}, {"$count": "n"}],
-            "top_stores": [{"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"}}},
+            "top_stores": [{"$group": {"_id": "$store_id", "net": {"$sum": PAID_EXPR}}},
                            {"$sort": {"net": -1}}, {"$limit": 5}],
             "store_city": [{"$group": {"_id": {"s": "$store_id", "c": "$city"},
-                                       "net": {"$sum": "$net_amount"}}}],
+                                       "net": {"$sum": PAID_EXPR}}}],
         }},
     ]
     prev_pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": prev_start, "$lt": start}})},
-        {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+        {"$group": {"_id": None, "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
     ]
     cust_pipe = [
         {"$match": {"mobile": {"$nin": [None, ""]}}},

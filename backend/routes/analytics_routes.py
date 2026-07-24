@@ -11,6 +11,7 @@ from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
 from routes._dash_cache import dash_cache
 from routes._rollups import read_rollup, write_rollup, long_col
+from routes._money import PAID_EXPR
 
 logger = logging.getLogger("kazo-fundle.analytics")
 
@@ -72,20 +73,20 @@ async def _compute_sales(col, start, end_iso, max_time_ms=None):
         {"$match": loyalty_match({"bill_date": bill_filter})},
         {"$facet": {
             "hourly": [
-                {"$project": {"dt": _bill_dt, "net_amount": 1}},
+                {"$project": {"dt": _bill_dt, "amount_paid": PAID_EXPR}},
                 {"$match": {"dt": {"$ne": None}}},
-                {"$group": {"_id": {"$hour": "$dt"}, "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
+                {"$group": {"_id": {"$hour": "$dt"}, "net": {"$sum": "$amount_paid"}, "count": {"$sum": 1}}},
                 {"$sort": {"_id": 1}},
             ],
             "weekday": [
-                {"$project": {"dt": _bill_dt, "net_amount": 1}},
+                {"$project": {"dt": _bill_dt, "amount_paid": PAID_EXPR}},
                 {"$match": {"dt": {"$ne": None}}},
-                {"$group": {"_id": {"$dayOfWeek": "$dt"}, "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
+                {"$group": {"_id": {"$dayOfWeek": "$dt"}, "net": {"$sum": "$amount_paid"}, "count": {"$sum": 1}}},
                 {"$sort": {"_id": 1}},
             ],
             "payment": [
                 {"$group": {"_id": {"$ifNull": ["$payment_mode", "Unknown"]},
-                            "net": {"$sum": "$net_amount"}, "count": {"$sum": 1}}},
+                            "net": {"$sum": PAID_EXPR}, "count": {"$sum": 1}}},
                 {"$sort": {"net": -1}},
             ],
             "discount": [
@@ -95,9 +96,9 @@ async def _compute_sales(col, start, end_iso, max_time_ms=None):
                         {"case": {"$lte": ["$discount_amount", 500]}, "then": "<=₹500"},
                         {"case": {"$lte": ["$discount_amount", 1500]}, "then": "<=₹1500"},
                     ], "default": ">₹1500"}},
-                    "net_amount": 1,
+                    "amount_paid": PAID_EXPR,
                 }},
-                {"$group": {"_id": "$bucket", "count": {"$sum": 1}, "net": {"$sum": "$net_amount"}}},
+                {"$group": {"_id": "$bucket", "count": {"$sum": 1}, "net": {"$sum": "$amount_paid"}}},
             ],
         }},
     ]
@@ -512,7 +513,7 @@ async def _compute_store(txn_col, cust_col, stores_c, start, end_iso, max_time_m
         {"$match": loyalty_match({"bill_date": bill_rng})},
         {"$group": {
             "_id": {"s": "$store_id", "m": "$customer_mobile"},
-            "net": {"$sum": "$net_amount"},
+            "net": {"$sum": PAID_EXPR},
             "txns": {"$sum": 1},
             "discount": {"$sum": "$discount_amount"},
         }},

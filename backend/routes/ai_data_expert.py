@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 import pymongo
 
 from database import db, customers_col, transactions_col, stores_col
+from routes._money import PAID_EXPR
 
 logger = logging.getLogger("kazo-fundle.ai_data_expert")
 
@@ -122,7 +123,7 @@ async def build_data_context() -> str:
         try:
             sums = await transactions_col.aggregate([
                 {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
-                {"$group": {"_id": None, "net": {"$sum": "$net_amount"}, "bills": {"$sum": 1}}},
+                {"$group": {"_id": None, "net": {"$sum": PAID_EXPR}, "bills": {"$sum": 1}}},
             ], maxTimeMS=30000, allowDiskUse=True).to_list(1)
             if sums:
                 net = sums[0].get("net") or 0
@@ -135,7 +136,7 @@ async def build_data_context() -> str:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
             top_stores = await transactions_col.aggregate([
                 {"$match": {"bill_date": {"$gte": cutoff}, "customer_mobile": {"$nin": [None, ""]}}},
-                {"$group": {"_id": "$store_name", "net": {"$sum": "$net_amount"}}},
+                {"$group": {"_id": "$store_name", "net": {"$sum": PAID_EXPR}}},
                 {"$sort": {"net": -1}}, {"$limit": 5},
             ], maxTimeMS=20000).to_list(5)
             rows = [r for r in top_stores if r.get("_id")]

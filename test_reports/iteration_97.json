@@ -1,0 +1,26 @@
+{
+  "summary": "Verified canonical amount_paid (Total Paid) refactor across ALL requested KPI/report/dashboard endpoints. 25/26 tests pass, 1 skipped by design (see notes). No 500s or aggregation errors. Cross-endpoint consistency confirmed vs direct Mongo amount_paid sums. Backfill is 100% complete. CSV export contains 'Total Paid' column and matches paid_amount() per bill. New POS bill via posAddPoint stamps amount_paid = bill_with_tax (verified: 500 pre-tax + 90 GST → amount_paid = 590).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration97_amount_paid_canonical_test.py",
+    "/app/test_reports/pytest/iteration97.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routes/_money.py canonical definition is clean, well-documented and mirrored between Python (paid_amount) and Mongo (PAID_EXPR / PAID_COMPUTE) — good.",
+    "PAID_EXPR uses {$ifNull: [$amount_paid, PAID_COMPUTE]}: safely tolerates pre-backfill docs, still preferred to enforce the denormalized field for aggregation performance. Backfill measured 100% complete on preview DB.",
+    "Live Monitor /stats correctly uses PAID_EXPR for both aggregate revenue and per-store (by_store_top10) revenue (line 422 of live_monitor_routes.py). Test skipped absolute per-store DB comparison because the endpoint is time-windowed (minutes param) — comparing to unfiltered DB sum would falsely differ. Code inspection confirms canonical usage.",
+    "CSV header order still includes both 'Net Before Tax' (kept) and 'Total Paid' — non-blocking, but consider labelling 'Net Before Tax' as diagnostic-only since Total Paid is now the sacrosanct figure. Not required by task.",
+    "posAddPoint stores amount_paid = bill_with_tax (line 1680/1837). Return bills stamp amount_paid = return_net (line 2213) — this is a NEGATIVE-signed paid value for returns and is correctly excluded from live-monitor revenue via $cond on is_return. OK.",
+    "master_brain_tools.py (unrelated) still >3000 lines — recurring code-size flag from iter 96."
+  ],
+  "updated_files": ["/app/backend/tests/iteration97_amount_paid_canonical_test.py"],
+  "success_rate": {"backend": "100% (25/25 executed; 1 skipped by design)", "frontend": "N/A (backend-only per request)"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (login POST /api/auth/login → Bearer). POS: x-api-key ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI, merchant KAZO_FUNDLE, store code auto-picked from stores.pos_merchant_id.",
+  "seed_data_creation": "Single ephemeral POS bill (bill_number prefix TEST_AP_<uuid>, mobile 9XXXXXXXXX, TESTAP customer) auto-deleted at end of test. No lingering seed data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Regression suite: /app/backend/tests/iteration97_amount_paid_canonical_test.py — run with `cd /app/backend && PYTHONPATH=/app/backend pytest tests/iteration97_amount_paid_canonical_test.py -v`. Covers (a) endpoint smoke for all repointed KPI/analytics/reports endpoints, (b) backfill 100% coverage on transactions.amount_paid, (c) store-kpi overall_sales vs DB $sum PAID_EXPR consistency, (d) CSV 'Total Paid' column + per-row equality with paid_amount(), (e) posAddPoint stamps amount_paid on new insert. Uses SYNC pymongo (not motor) — do not switch to `from database import transactions_col` (that's motor async). The one skipped test (live_monitor_stats_revenue_consistency) is deliberate: endpoint is time-windowed so absolute comparison to unfiltered DB sum is not meaningful; PAID_EXPR usage is confirmed by code inspection.",
+  "rca of the issue": "N/A — this iteration is verification of a completed refactor, not a bug hunt. All acceptance criteria (200s, cross-endpoint consistency, backfill completeness, CSV Total Paid, POS stamping) are satisfied."
+}

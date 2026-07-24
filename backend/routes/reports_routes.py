@@ -10,6 +10,7 @@ from database import transactions_col, audit_logs_col, customers_col, stores_col
 from auth import get_current_user
 
 from routes._db_timeout import db_deadline
+from routes._money import PAID_EXPR
 
 router = APIRouter(prefix="/reports", tags=["reports"], dependencies=[Depends(db_deadline)])
 digest_reports_col = db["digest_reports"]
@@ -90,10 +91,10 @@ async def export_transactions(period_days: int = 30, store_id: Optional[str] = N
     items = await transactions_col.find(fil, {"_id": 0}).sort("bill_date", -1).limit(50000).to_list(50000)
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["bill_number", "bill_date", "customer_mobile", "store_id", "gross_amount", "discount_amount", "net_amount", "points_earned", "payment_mode", "coupon_code"])
+    writer.writerow(["bill_number", "bill_date", "customer_mobile", "store_id", "gross_amount", "discount_amount", "net_amount", "amount_paid", "points_earned", "payment_mode", "coupon_code"])
     for t in items:
         writer.writerow([t.get("bill_number"), t.get("bill_date"), t.get("customer_mobile"), t.get("store_id"),
-                         t.get("gross_amount"), t.get("discount_amount"), t.get("net_amount"),
+                         t.get("gross_amount"), t.get("discount_amount"), t.get("net_amount"), t.get("amount_paid"),
                          t.get("points_earned"), t.get("payment_mode"), t.get("coupon_code")])
     return Response(content=output.getvalue(), media_type="text/csv", headers={
         "Content-Disposition": f"attachment; filename=transactions_{period_days}d.csv"
@@ -147,11 +148,11 @@ async def run_custom_report(body: dict, user: dict = Depends(get_current_user)):
         if "count" in metrics:
             group_stage["count"] = {"$sum": 1}
         if "sum_net" in metrics:
-            group_stage["sum_net"] = {"$sum": "$net_amount"}
+            group_stage["sum_net"] = {"$sum": PAID_EXPR}
         if "sum_gross" in metrics:
             group_stage["sum_gross"] = {"$sum": "$gross_amount"}
         if "avg_net" in metrics:
-            group_stage["avg_net"] = {"$avg": "$net_amount"}
+            group_stage["avg_net"] = {"$avg": PAID_EXPR}
         if "unique_customers" in metrics:
             group_stage["unique_customers"] = {"$addToSet": "$customer_id"}
         pipe = [{"$match": match}, {"$group": group_stage}, {"$sort": {"sum_net": -1} if "sum_net" in metrics else {"count": -1}}, {"$limit": 500}]

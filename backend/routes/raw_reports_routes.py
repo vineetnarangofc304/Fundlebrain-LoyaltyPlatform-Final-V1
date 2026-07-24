@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from auth import get_current_user
 from database import customers_col, transactions_col, stores_col, db
 from routes._loyalty import LOYALTY_TX_MATCH
+from routes._money import PAID_EXPR
 
 logger = logging.getLogger("kazo-fundle.raw_reports")
 
@@ -232,7 +233,7 @@ async def customer_data(f: ReportFilter, user: dict = Depends(get_current_user))
             # Stage 1: per-(group, mobile) per-bill snapshot
             {"$group": {
                 "_id": {"key": field, "mobile": "$customer_mobile", "bill": "$bill_number"},
-                "net": {"$sum": "$net_amount"},
+                "net": {"$sum": PAID_EXPR},
                 "earn": {"$sum": "$points_earned"},
             }},
             # Stage 2: per-(group, mobile): bills count + spend + earn
@@ -312,7 +313,7 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
         # Stage 1: build per-(group,mobile) per-bill snapshot
         {"$group": {
             "_id": {"key": field, "mobile": "$customer_mobile", "bill": "$bill_number"},
-            "net":      {"$sum": "$net_amount"},
+            "net":      {"$sum": PAID_EXPR},
             "gross":    {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
             "discount": {"$sum": {"$ifNull": ["$discount_amount", 0]}},
             "earn":     {"$sum": "$points_earned"},
@@ -410,7 +411,7 @@ async def repeat_purchases(f: ReportFilter, user: dict = Depends(get_current_use
         {"$group": {
             "_id": {"mobile": "$customer_mobile", "key": field,
                     "bill": {"$ifNull": ["$bill_number", "$id"]}},
-            "net": {"$max": {"$ifNull": ["$net_amount", 0]}},
+            "net": {"$max": PAID_EXPR},
             "date": {"$min": "$bill_date"},
         }},
         # 2) per (key, mobile): totals + first bill + current-window sums
@@ -602,7 +603,7 @@ async def customers_by_visit(f: ReportFilter, user: dict = Depends(get_current_u
         {"$match": _base_match(f)},
         {"$group": {
             "_id": {"mobile": "$customer_mobile", "bill": "$bill_number"},
-            "net": {"$sum": "$net_amount"},
+            "net": {"$sum": PAID_EXPR},
         }},
         {"$group": {
             "_id": "$_id.mobile",

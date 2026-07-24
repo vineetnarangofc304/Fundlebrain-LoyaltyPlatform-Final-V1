@@ -33,6 +33,17 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### Canonical "Total Paid" revenue unified across ALL reports/exports/dashboards (Jul 24, 2026)
+User: Live Monitor's per-bill **Total Paid** (what the customer paid, incl. GST) is the sacrosanct figure; the export's "Net Before Tax" (col M = `net_amount`, pre-tax/fallback) is wrong and reports (Store KPI etc.) use that wrong `net_amount`. Make ONE figure everywhere. Confirmed A/A/A/A: Total Paid = post-discount **incl. tax**; apply everywhere; switch even the gross/MRP cards to Total Paid; denormalize + backfill; **do NOT change points logic** (though user noted points are earned on total paid — see open item).
+- **New canonical field `amount_paid`** (`routes/_money.py`): `paid_amount(doc)` (Python, for writes) + `PAID_EXPR` (Mongo, prefers denormalized field else recomputes) + `PAID_COMPUTE` (backfill). Definition: `bill_with_tax` else `(net_amount_before_tax if>0 else net_amount) + (tax_amount or tax_gst)`.
+- **Write paths** now stamp `amount_paid` on every bill: `posAddPoint` (main + lost/walk-in + return inserts) and the historic ingest mapper.
+- **Backfill** (`server.py::_backfill_amount_paid`): batched (20k), deadline-free, idempotent background task on startup — fills `amount_paid` on all existing bills so historic data reports correctly. (Preview: 68/68 done; prod backfills ~1.5M on next boot.)
+- **Repointed to `PAID_EXPR` (net_amount → paid) in:** reports_kpi (Store KPI, Trend), kpi_matrix (Store-wise + Weekly + the customer `total_purchase` accumulator), live_monitor (stats revenue/loyalty/per-store + export "Total Paid" via helper), dashboard_routes (Command Center), fundlebrain (Customer 360 spend/paid, store-perf, points-econ, AI data tools), analytics_routes (sales/store dashboards — incl. fixing narrowing `$project` stages), cohort_library (ATV), raw_reports (Transaction/Customer/Repeat/By-Visit), reports_routes (custom builder + export incl. new `amount_paid` col), legacy export (+`amount_paid` col), ingest_narrative, ai_tools, ai_data_expert.
+- **Intentionally LEFT on `net_amount`:** `recon_routes` (reconciles vs raw CSV source — must match), `historic_routes` ingest **verification** snapshot (3025), the fraud/anomaly informational totals (ai_extended_tools, legacy fraud), and the **customer `lifetime_spend` accumulator** (historic recompute lines 1155/2855) — see OPEN ITEM.
+- **Verified:** all repointed endpoints return 200 (no aggregation errors); Store KPI `overall_sales` for K00055 = **32445.0** == direct `sum(amount_paid)` = **32445.0** (consistency proven); backfill field == recompute. ⚠️ **Redeploy required** (triggers the prod backfill).
+- **OPEN ITEMS to confirm with user:** (1) **Points earning basis** — code currently earns on the PRE-TAX base; user said points are on total paid → needs explicit sign-off before changing (affects live balances). (2) **`lifetime_spend` accumulator** (drives RFM monetary, cohort spend-bands, TIER assignment, CRM "Total Billing") is still pre-tax; aligning it to Total Paid will shift customers' tiers/segments — deferred pending user decision + customer-master backfill.
+
+
 ### AI insights are now CLICK-TO-GENERATE everywhere (Jul 21, 2026)
 User: AI insights must only generate when clicked — never auto-run — "wherever we have implemented AI insights."
 - All 8 AI panels (Command Center, RFM & Churn, Store, Cohorts, Points Economics, Executive Summary, Campaign ROI, Customer 360) share ONE component `AIInsightStrip.jsx`, so a single change covers all.

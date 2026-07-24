@@ -19,6 +19,7 @@ from auth import get_current_user
 from database import customers_col, transactions_col
 from routes._loyalty import LOYALTY_TX_MATCH
 from routes._dash_cache import cache_get, cache_set
+from routes._money import PAID_EXPR
 
 
 router = APIRouter(prefix="/segments/cohort-library", tags=["segments"])
@@ -48,7 +49,7 @@ async def build_context() -> Dict[str, Any]:
     sums = await transactions_col.aggregate([
         {"$match": LOYALTY_TX_MATCH},
         {"$group": {"_id": None,
-                    "net": {"$sum": "$net_amount"},
+                    "net": {"$sum": PAID_EXPR},
                     "bills": {"$sum": 1}}},
     ], maxTimeMS=30000, allowDiskUse=True).to_list(1)
     if sums:

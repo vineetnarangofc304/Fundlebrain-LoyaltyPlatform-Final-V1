@@ -11,8 +11,8 @@
   so the CRM Customer Report can show/sort/filter/graph them.
 
 Reuses the shared aggregation helpers from reports_kpi_routes (date/store match,
-return/new/existing/mapped conditions).  All money = net_amount (post-discount,
-incl. GST), matching the rest of the KPI reports.
+return/new/existing/mapped conditions).  All money = the customer's TOTAL PAID
+(post-discount, incl. GST — canonical `amount_paid`), matching every other report.
 """
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ from routes.reports_kpi_routes import (
     _store_match, _date_match, _fill_store_identity, _shift_year, _esc,
     _NE_RETURN, _IS_RETURN, _IS_NEW, _IS_EXISTING, _HAS_MOBILE, IST,
 )
+from routes._money import PAID_EXPR
 
 logger = logging.getLogger("kazo-fundle.kpi_matrix")
 
@@ -77,30 +78,30 @@ def _store_matrix_group() -> Dict[str, Any]:
         "store_class": {"$first": "$store_class"},
         "zone": {"$first": "$zone"},
         "city": {"$first": "$city"},
-        "overall_sales": {"$sum": "$net_amount"},
+        "overall_sales": {"$sum": PAID_EXPR},
         "total_discount": {"$sum": "$discount_amount"},
         "fresh_bills": _sumif(_FRESH, 1),
-        "fresh_value": _sumif(_FRESH, "$net_amount"),
+        "fresh_value": _sumif(_FRESH, PAID_EXPR),
         "fresh_discount": _sumif(_FRESH, "$discount_amount"),
         "return_bills": _sumif(_RET, 1),
-        "return_value": _sumif(_RET, "$net_amount"),
+        "return_value": _sumif(_RET, PAID_EXPR),
         "return_discount": _sumif(_RET, "$discount_amount"),
         "new_fresh_txn": _sumif(_and(_FRESH, _IS_NEW), 1),
         "new_return_txn": _sumif(_and(_RET, _IS_NEW), 1),
-        "new_fresh_value": _sumif(_and(_FRESH, _IS_NEW), "$net_amount"),
-        "new_return_value": _sumif(_and(_RET, _IS_NEW), "$net_amount"),
+        "new_fresh_value": _sumif(_and(_FRESH, _IS_NEW), PAID_EXPR),
+        "new_return_value": _sumif(_and(_RET, _IS_NEW), PAID_EXPR),
         "repeat_fresh_txn": _sumif(_and(_FRESH, _IS_EXISTING), 1),
         "repeat_return_txn": _sumif(_and(_RET, _IS_EXISTING), 1),
-        "repeat_fresh_value": _sumif(_and(_FRESH, _IS_EXISTING), "$net_amount"),
-        "repeat_return_value": _sumif(_and(_RET, _IS_EXISTING), "$net_amount"),
+        "repeat_fresh_value": _sumif(_and(_FRESH, _IS_EXISTING), PAID_EXPR),
+        "repeat_return_value": _sumif(_and(_RET, _IS_EXISTING), PAID_EXPR),
         "mapped_fresh_txn": _sumif(_and(_FRESH, _HAS_MOBILE), 1),
         "mapped_return_txn": _sumif(_and(_RET, _HAS_MOBILE), 1),
-        "mapped_fresh_value": _sumif(_and(_FRESH, _HAS_MOBILE), "$net_amount"),
-        "mapped_return_value": _sumif(_and(_RET, _HAS_MOBILE), "$net_amount"),
+        "mapped_fresh_value": _sumif(_and(_FRESH, _HAS_MOBILE), PAID_EXPR),
+        "mapped_return_value": _sumif(_and(_RET, _HAS_MOBILE), PAID_EXPR),
         "unmapped_fresh_txn": _sumif(_and(_FRESH, _not_mapped()), 1),
         "unmapped_return_txn": _sumif(_and(_RET, _not_mapped()), 1),
-        "unmapped_fresh_value": _sumif(_and(_FRESH, _not_mapped()), "$net_amount"),
-        "unmapped_return_value": _sumif(_and(_RET, _not_mapped()), "$net_amount"),
+        "unmapped_fresh_value": _sumif(_and(_FRESH, _not_mapped()), PAID_EXPR),
+        "unmapped_return_value": _sumif(_and(_RET, _not_mapped()), PAID_EXPR),
         "customers": {"$addToSet": {"$cond": [_and(_FRESH, _HAS_MOBILE), "$customer_mobile", "$$REMOVE"]}},
         "new_customers": {"$addToSet": {"$cond": [_and(_FRESH, _IS_NEW, _HAS_MOBILE), "$customer_mobile", "$$REMOVE"]}},
         "existing_customers": {"$addToSet": {"$cond": [_and(_FRESH, _IS_EXISTING, _HAS_MOBILE), "$customer_mobile", "$$REMOVE"]}},
@@ -259,12 +260,12 @@ def _bucket_expr(granularity: str):
 
 async def _weekly_kpi(match: Dict[str, Any], granularity: str) -> List[Dict[str, Any]]:
     bucket = _bucket_expr(granularity)
-    big = {"$gt": ["$net_amount", 10000]}
+    big = {"$gt": [PAID_EXPR, 10000]}
     main = [
         {"$match": match},
         {"$group": {
             "_id": bucket,
-            "overall_sales": {"$sum": "$net_amount"},
+            "overall_sales": {"$sum": PAID_EXPR},
             "total_discount": {"$sum": "$discount_amount"},
             "total_orders": _sumif(_FRESH, 1),
             "return_bills": _sumif(_RET, 1),
@@ -272,13 +273,13 @@ async def _weekly_kpi(match: Dict[str, Any], granularity: str) -> List[Dict[str,
             "unmapped_orders": _sumif(_and(_FRESH, _not_mapped()), 1),
             "new_order": _sumif(_and(_FRESH, _IS_NEW), 1),
             "repeat_orders": _sumif(_and(_FRESH, _IS_EXISTING), 1),
-            "fresh_value": _sumif(_FRESH, "$net_amount"),
-            "mapped_sales": _sumif(_HAS_MOBILE, "$net_amount"),
-            "unmapped_sales": _sumif(_not_mapped(), "$net_amount"),
-            "new_value": _sumif(_and(_FRESH, _IS_NEW), "$net_amount"),
-            "repeat_value": _sumif(_and(_FRESH, _IS_EXISTING), "$net_amount"),
-            "mapped_value": _sumif(_and(_FRESH, _HAS_MOBILE), "$net_amount"),
-            "big_value": _sumif(_and(_FRESH, big), "$net_amount"),
+            "fresh_value": _sumif(_FRESH, PAID_EXPR),
+            "mapped_sales": _sumif(_HAS_MOBILE, PAID_EXPR),
+            "unmapped_sales": _sumif(_not_mapped(), PAID_EXPR),
+            "new_value": _sumif(_and(_FRESH, _IS_NEW), PAID_EXPR),
+            "repeat_value": _sumif(_and(_FRESH, _IS_EXISTING), PAID_EXPR),
+            "mapped_value": _sumif(_and(_FRESH, _HAS_MOBILE), PAID_EXPR),
+            "big_value": _sumif(_and(_FRESH, big), PAID_EXPR),
             "big_bills": _sumif(_and(_FRESH, big), 1),
             "stores": {"$addToSet": "$store_id"},
         }},
@@ -440,7 +441,7 @@ async def _compute_visit_accounts(mobile_filter: Optional[str]) -> Tuple[int, in
             "last_store_id": {"$last": "$store_id"},
             "last_store_name": {"$last": "$store_name"},
             "last_store_code": {"$last": "$store_code"},
-            "total_purchase": {"$sum": "$net_amount"},
+            "total_purchase": {"$sum": PAID_EXPR},
         }},
     ]
     groups = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(None)

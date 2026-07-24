@@ -12,6 +12,7 @@ from database import (
     loyalty_config_col,
 )
 from routes._loyalty import LOYALTY_TX_MATCH, loyalty_match
+from routes._money import PAID_EXPR
 
 import time as _time
 
@@ -215,7 +216,7 @@ async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
     total_cust = await customers_col.count_documents({"mobile": {"$nin": [None, ""]}})
     sales = await transactions_col.aggregate([
         {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$group": {"_id": None, "net": {"$sum": "$net_amount"},
+        {"$group": {"_id": None, "net": {"$sum": PAID_EXPR},
                     "txns": {"$sum": 1}, "gross": {"$sum": "$gross_amount"}}},
     ]).to_list(1)
     pts = await customers_col.aggregate([
@@ -266,7 +267,7 @@ async def _tool_store_performance(days: int = 30, limit: int = 30, sort: str = "
     sort_field = {"net_desc": ("net", -1), "net_asc": ("net", 1), "txns_desc": ("txns", -1)}[sort]
     pipe = [
         {"$match": loyalty_match({"bill_date": {"$gte": start}})},
-        {"$group": {"_id": "$store_id", "net": {"$sum": "$net_amount"},
+        {"$group": {"_id": "$store_id", "net": {"$sum": PAID_EXPR},
                     "txns": {"$sum": 1}, "customers": {"$addToSet": "$customer_mobile"}}},
         {"$sort": {sort_field[0]: sort_field[1]}},
         {"$limit": min(limit, 50)},
@@ -293,7 +294,7 @@ async def _tool_city_performance(days: int = 30, limit: int = 25) -> Dict[str, A
         {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$lookup": {"from": "stores", "localField": "store_id", "foreignField": "id", "as": "s"}},
         {"$unwind": "$s"},
-        {"$group": {"_id": "$s.city", "net": {"$sum": "$net_amount"}, "txns": {"$sum": 1}}},
+        {"$group": {"_id": "$s.city", "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
         {"$sort": {"net": -1}}, {"$limit": min(limit, 30)},
     ]
     rows = await transactions_col.aggregate(pipe).to_list(30)

@@ -10,7 +10,8 @@
 * KPI Trend            — sales / bills / customers / discount bucketed by
                          day / week / month for the trend charts. (Weekly_KPI)
 
-All money is net revenue (net_amount, post-discount). Two routers: the main one runs
+All money is the customer's TOTAL PAID (post-discount, incl. GST — the canonical
+`amount_paid` / Live-Monitor "Total Paid"). Two routers: the main one runs
 under db_deadline (45s); exports get their own deadline-free streaming router.
 """
 from __future__ import annotations
@@ -32,6 +33,7 @@ from auth import get_current_user
 from database import customers_col, transactions_col
 from routes._db_timeout import db_deadline
 from routes._dash_cache import cache_get, cache_get_stale, cache_set
+from routes._money import PAID_EXPR
 
 logger = logging.getLogger("kazo-fundle.kpi_reports")
 
@@ -94,18 +96,18 @@ def _store_group_stage() -> Dict[str, Any]:
             "store_class": {"$first": "$store_class"},
             "zone": {"$first": "$zone"},
             "city": {"$first": "$city"},
-            "overall_sales": {"$sum": "$net_amount"},
+            "overall_sales": {"$sum": PAID_EXPR},
             "total_discount": {"$sum": "$discount_amount"},
             "net_before_tax": {"$sum": "$net_amount_before_tax"},
             "total_tax": {"$sum": "$tax_amount"},
             "fresh_bills": fresh_sum(1),
-            "fresh_value": fresh_sum("$net_amount"),
+            "fresh_value": fresh_sum(PAID_EXPR),
             "return_bills": {"$sum": {"$cond": [_IS_RETURN, 1, 0]}},
-            "return_value": {"$sum": {"$cond": [_IS_RETURN, "$net_amount", 0]}},
+            "return_value": {"$sum": {"$cond": [_IS_RETURN, PAID_EXPR, 0]}},
             "new_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_NEW]}, 1, 0]}},
-            "new_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_NEW]}, "$net_amount", 0]}},
+            "new_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_NEW]}, PAID_EXPR, 0]}},
             "repeat_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING]}, 1, 0]}},
-            "repeat_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING]}, "$net_amount", 0]}},
+            "repeat_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING]}, PAID_EXPR, 0]}},
             "mapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _HAS_MOBILE]}, 1, 0]}},
             "unmapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, {"$not": [_HAS_MOBILE]}]}, 1, 0]}},
             "customers": addset({"$and": [_NE_RETURN, _HAS_MOBILE]}),
@@ -468,7 +470,7 @@ async def _compute_trend(start_date, end_date, granularity, zone, city, store_cl
         {"$match": match},
         {"$group": {
             "_id": bucket,
-            "sales": {"$sum": "$net_amount"},
+            "sales": {"$sum": PAID_EXPR},
             "discount": {"$sum": "$discount_amount"},
             "bills": {"$sum": {"$cond": [_NE_RETURN, 1, 0]}},
             "returns": {"$sum": {"$cond": [_IS_RETURN, 1, 0]}},
