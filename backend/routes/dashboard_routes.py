@@ -348,7 +348,7 @@ async def sales_trend(
         }},
         {"$sort": {"_id": 1}},
     ]
-    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(2000)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=25000).to_list(2000)
     return [
         {"date": r["_id"], "net": round(r["net"], 2), "txns": r["txns"], "customers": r["customers"]}
         for r in rows
@@ -380,7 +380,7 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
         {"$sort": {"net": -1}},
         {"$limit": 20},
     ]
-    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(50)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=25000).to_list(50)
     store_ids = [r["_id"] for r in rows]
     stores = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}}, {"_id": 0})}
 
@@ -389,7 +389,7 @@ async def store_perf(period: str = "30d", user: dict = Depends(get_current_user)
         {"$match": {"home_store_id": {"$in": store_ids}, "mobile": {"$nin": [None, ""]}}},
         {"$group": {"_id": "$home_store_id", "count": {"$sum": 1}}},
     ]
-    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe, allowDiskUse=True)}
+    home_counts = {r["_id"]: r["count"] async for r in customers_col.aggregate(home_pipe, allowDiskUse=True, maxTimeMS=25000)}
 
     out = []
     for r in rows:
@@ -420,7 +420,7 @@ async def category_mix(period: str = "30d", user: dict = Depends(get_current_use
         {"$group": {"_id": cat_key, "revenue": {"$sum": "$items.total"}, "qty": {"$sum": "$items.quantity"}}},
         {"$sort": {"revenue": -1}},
     ]
-    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(50)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=25000).to_list(50)
     return [{"category": r["_id"], "revenue": round(r["revenue"], 2), "quantity": r["qty"]} for r in rows]
 
 
@@ -431,7 +431,7 @@ async def tier_distribution(user: dict = Depends(get_current_user)):
         {"$group": {"_id": "$tier", "count": {"$sum": 1}, "spend": {"$sum": "$lifetime_spend"}}},
         {"$sort": {"spend": -1}},
     ]
-    rows = await customers_col.aggregate(pipeline, allowDiskUse=True).to_list(20)
+    rows = await customers_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=25000).to_list(20)
     return [{"tier": r["_id"], "count": r["count"], "lifetime_spend": round(r["spend"], 2)} for r in rows]
 
 
@@ -454,7 +454,7 @@ async def top_skus(period: str = "30d", limit: int = 10, user: dict = Depends(ge
         {"$sort": {"revenue": -1}},
         {"$limit": limit},
     ]
-    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(limit)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=25000).to_list(limit)
     return [
         {"sku": r["_id"]["sku"], "name": r["_id"]["name"], "category": r["_id"]["category"],
          "revenue": round(r["revenue"], 2), "quantity": r["qty"]}
@@ -803,7 +803,7 @@ async def city_performance(period: str = "30d", user: dict = Depends(get_current
         {"$group": {"_id": {"s": "$store_id", "c": "$city"},
                     "net": {"$sum": PAID_EXPR}, "txns": {"$sum": 1}}},
     ]
-    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True).to_list(2000)
+    rows = await transactions_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=25000).to_list(2000)
     store_ids = list({r["_id"].get("s") for r in rows if r["_id"].get("s")})
     s_map = {s["id"]: s async for s in stores_col.find({"id": {"$in": store_ids}},
                                                        {"_id": 0, "id": 1, "city": 1})}

@@ -156,7 +156,7 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _run_store_kpi(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     pipe = [{"$match": match}, _store_group_stage()]
-    raw = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(2000)
+    raw = await transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(2000)
     rows = [_finalize_store_row(g) for g in raw]
     await _fill_store_identity(rows)
     return rows
@@ -481,7 +481,7 @@ async def _compute_trend(start_date, end_date, granularity, zone, city, store_cl
         {"$sort": {"_id": 1}},
         {"$limit": 500},
     ]
-    raw = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(500)
+    raw = await transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(500)
     return [{
         "period": g.get("_id") or "—",
         "sales": round(g.get("sales", 0) or 0, 2),
@@ -604,7 +604,7 @@ async def _crm_summary_compute(key: str, flt: Dict[str, Any]) -> None:
     Runs in the background so a cold request never blocks — see crm_summary()."""
     try:
         with pymongo.timeout(90):
-            res = (await customers_col.aggregate(_crm_summary_pipe(flt), allowDiskUse=True).to_list(1)) or [{}]
+            res = (await customers_col.aggregate(_crm_summary_pipe(flt), allowDiskUse=True, maxTimeMS=25000).to_list(1)) or [{}]
         cache_set(key, _crm_summary_shape(res[0] if res else {}))
     except Exception:  # noqa: BLE001 — leave any prior cached value in place; endpoint returns partial
         logging.getLogger("kazo-fundle.crm").warning("crm-summary compute failed/timed out for %s", key)

@@ -1158,7 +1158,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = N
                         }},
                     ]
                     cust_ops = []
-                    async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
+                    async for r in transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000):
                         spend_val = round(float(r.get("spend") or 0), 2)
                         cust_ops.append(UpdateOne(
                             {"mobile": r["_id"]},
@@ -1443,7 +1443,7 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
     # Stream the aggregate (allowDiskUse so a huge $group/$addToSet spills to disk
     # instead of hitting the 100MB in-memory limit) and flush in batches so we never
     # hold all groups in memory AND keep the heartbeat alive on multi-lakh files.
-    cursor = transactions_col.aggregate(agg_pipe, allowDiskUse=True)
+    cursor = transactions_col.aggregate(agg_pipe, allowDiskUse=True, maxTimeMS=25000)
     ops: List[Any] = []
     home_ops: List[Any] = []
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -2632,7 +2632,7 @@ async def backfill_loyalty_model(
             "txn_count": {"$sum": 1},
         }},
     ]
-    rows = await transactions_col.aggregate(agg_pipe, allowDiskUse=True).to_list(len(all_mobiles) + 1000)
+    rows = await transactions_col.aggregate(agg_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(len(all_mobiles) + 1000)
     report["mobiles_aggregated"] = len(rows)
 
     # Bulk upsert customer docs
@@ -2858,7 +2858,7 @@ async def _run_recompute(job_id: str, cutoff: str) -> None:
             }},
         ]
         ops: List[Any] = []
-        async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
+        async for r in transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000):
             spend = round(float(r.get("spend") or 0), 2)
             earn = round(float(r.get("earn") or 0), 2)
             redeem = round(float(r.get("redeem") or 0), 2)
@@ -2932,7 +2932,7 @@ async def dedupe_mobiles(user: dict = Depends(require_roles("super_admin", "bran
         {"$sort": {"count": -1}},
         {"$limit": 500},
     ]
-    rows = await customers_col.aggregate(pipe).to_list(500)
+    rows = await customers_col.aggregate(pipe, maxTimeMS=25000).to_list(500)
     return {"duplicate_mobiles": len(rows),
              "rows": [{"mobile": r["_id"], "count": r["count"], "docs": r["ids"]}
                        for r in rows]}
@@ -3034,7 +3034,7 @@ async def reconcile(
     ledger_pipe = [
         {"$group": {"_id": "$type", "total": {"$sum": "$points"}}}
     ]
-    led_rows = await points_ledger_col.aggregate(ledger_pipe).to_list(10)
+    led_rows = await points_ledger_col.aggregate(ledger_pipe, maxTimeMS=25000).to_list(10)
     ledger_totals = {r["_id"]: int(r["total"]) for r in led_rows}
 
     sums = {

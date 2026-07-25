@@ -17,6 +17,27 @@ _db_name = os.environ["DB_NAME"]
 client = AsyncIOMotorClient(_mongo_url, maxPoolSize=100, minPoolSize=10)
 db = client[_db_name]
 
+# ── Dedicated POS / loyalty critical-path pool ─────────────────────────────────
+# The eWards till (posCustomerCheck / posAddPoint / posRedeem / OTP / coupon) is
+# revenue-critical and must NEVER be starved of connections by heavy admin
+# analytics. Heavy report aggregations that scan the 1.5M-row transactions/ledger
+# collections can hold sockets on the shared `client` pool for tens of seconds;
+# when the till then tries to bill, it waits for a free socket, blows the 30s POS
+# CSOT and surfaces "Loyalty is not Active: Internal error" on the POS.
+# Give the POS its OWN client (same Atlas DB, separate sockets) so analytics load
+# on `client` can never block a live bill. Same isolation pattern already used for
+# api_logs writes (_log_client) and background rollups (_long_client).
+_pos_client = AsyncIOMotorClient(_mongo_url, maxPoolSize=30, minPoolSize=5)
+pos_db = _pos_client[_db_name]
+
+pos_customers_col = pos_db["customers"]
+pos_transactions_col = pos_db["transactions"]
+pos_points_ledger_col = pos_db["points_ledger"]
+pos_stores_col = pos_db["stores"]
+pos_loyalty_config_col = pos_db["loyalty_config"]
+pos_coupons_col = pos_db["coupons"]
+pos_coupon_redemptions_col = pos_db["coupon_redemptions"]
+
 
 def get_db():
     return db

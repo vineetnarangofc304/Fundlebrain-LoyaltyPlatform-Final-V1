@@ -47,12 +47,19 @@ from database import (
     customers_col, transactions_col, stores_col, coupon_redemptions_col,
     nps_col, tickets_col, message_log_col, db,
 )
+from routes._rollups import long_col
 
 router = APIRouter(prefix="/segments", tags=["segments"])
 
 # Override the aggressive production Mongo client `timeoutMS` for full-audience exports —
 # without it, large-collection getMores fail with "operation exceeded time limit".
 EXPORT_DB_DEADLINE_SECONDS = 1800
+
+# Full-audience exports can stream for a long time. Run them on the bounded
+# long-running pool (maxPoolSize=4, CSOT disabled) so a big export never ties up
+# the main request pool that admin dashboards share. POS is already isolated on
+# its own pool (see database.py), so exports can't touch the till either way.
+export_customers_col = long_col("customers")
 
 segments_col = db["segments"]
 
@@ -377,7 +384,7 @@ async def _resolve_transaction_filter_to_mobiles(field: str, op: str, value: Any
             {"$group": {"_id": "$customer_mobile", "skus": {"$addToSet": "$items.sku"}}},
             {"$project": {"n": {"$size": "$skus"}}},
         ]
-        results = await transactions_col.aggregate(pipe).to_list(200000)
+        results = await transactions_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
         mobiles = []
         for r in results:
             n = r["n"]
@@ -399,7 +406,7 @@ async def _resolve_transaction_filter_to_mobiles(field: str, op: str, value: Any
                 "weekend_count": {"$sum": {"$cond": [{"$or": [{"$eq": ["$dow", 1]}, {"$eq": ["$dow", 7]}]}, 1, 0]}},
             }},
         ]
-        rows = await transactions_col.aggregate(pipe).to_list(200000)
+        rows = await transactions_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
         targets = value if isinstance(value, list) else [value]
         out = []
         for r in rows:
@@ -438,7 +445,7 @@ async def _resolve_transaction_filter_to_mobiles(field: str, op: str, value: Any
             {"$sort": {"n": -1}},
             {"$group": {"_id": "$_id.mob", "bucket": {"$first": "$_id.bucket"}}},
         ]
-        rows = await transactions_col.aggregate(pipe).to_list(200000)
+        rows = await transactions_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
         targets = value if isinstance(value, list) else [value]
         if op == "in":
             return [r["_id"] for r in rows if r["bucket"] in targets]
@@ -453,7 +460,7 @@ async def _resolve_transaction_filter_to_mobiles(field: str, op: str, value: Any
             {"$sort": {"created_at": -1}},
             {"$group": {"_id": "$to", "status": {"$first": "$status"}}},
         ]
-        rows = await message_log_col.aggregate(pipe).to_list(200000)
+        rows = await message_log_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
         # Map message log status → engagement label
         def to_label(s: str) -> str:
             s = (s or "").lower()
@@ -519,7 +526,7 @@ async def _resolve_transaction_filter_to_mobiles(field: str, op: str, value: Any
                         "status": {"$in": ["open", "in_progress", "escalated"]}}},
             {"$group": {"_id": "$customer_mobile", "n": {"$sum": 1}}},
         ]
-        rows = await tickets_col.aggregate(pipe).to_list(200000)
+        rows = await tickets_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
         return [r["_id"] for r in rows if _matches_numeric(r["n"], op, value)]
 
     if field == "nps_band":
@@ -530,7 +537,7 @@ async def _resolve_transaction_filter_to_mobiles(field: str, op: str, value: Any
             {"$sort": {"created_at": -1}},
             {"$group": {"_id": "$customer_mobile", "score": {"$first": "$score"}}},
         ]
-        rows = await nps_col.aggregate(pipe).to_list(200000)
+        rows = await nps_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
         def band(s: int) -> str:
             if s is None:
                 return "no_response"
@@ -550,7 +557,7 @@ async def _resolve_transaction_filter_to_mobiles(field: str, op: str, value: Any
             {"$sort": {"created_at": -1}},
             {"$group": {"_id": "$customer_mobile", "score": {"$first": "$score"}}},
         ]
-        rows = await nps_col.aggregate(pipe).to_list(200000)
+        rows = await nps_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
         return [r["_id"] for r in rows if _matches_numeric(r["score"], op, value)]
 
     return []
@@ -584,7 +591,7 @@ async def _resolve_windowed_count_to_mobiles(op: str, value: Any, window: Option
                     "bill_date": {"$gte": start, "$lte": end}}},
         {"$group": {"_id": "$customer_mobile", "n": {"$sum": 1}}},
     ]
-    rows = await transactions_col.aggregate(pipe).to_list(200000)
+    rows = await transactions_col.aggregate(pipe, maxTimeMS=25000).to_list(200000)
     return [r["_id"] for r in rows if _matches_numeric(r["n"], op, value)]
 
 
@@ -1010,7 +1017,7 @@ async def get_facets(body: FacetsIn, user: dict = Depends(get_current_user)):
         if q:
             pipe.append({"$match": {"_id": {"$regex": re.escape(q), "$options": "i"}}})
         pipe.append({"$limit": limit * 2})
-        rows = await transactions_col.aggregate(pipe).to_list(limit * 2)
+        rows = await transactions_col.aggregate(pipe, maxTimeMS=25000).to_list(limit * 2)
         vals = sorted([r["_id"] for r in rows if r["_id"]])[:limit]
         return {"values": [{"value": v, "label": str(v)} for v in vals]}
 
@@ -1155,10 +1162,11 @@ async def audience_export(body: AudienceExportIn, user: dict = Depends(get_curre
     max_rows = max(1, min(int(body.max_rows or 200000), 500000))
 
     # Count can be very heavy on a large collection with an $expr filter; make it
-    # best-effort so a slow count never fails the export itself.
+    # best-effort so a slow count never fails the export itself. Runs on the bounded
+    # long-pool so it can't tie up the main request pool.
     try:
         with pymongo.timeout(60):
-            total_matched = await customers_col.count_documents(match)
+            total_matched = await export_customers_col.count_documents(match)
     except Exception:
         total_matched = -1
     seg_name = (body.segment_name or "audience").strip() or "audience"
@@ -1166,7 +1174,7 @@ async def audience_export(body: AudienceExportIn, user: dict = Depends(get_curre
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     cursor = (
-        customers_col.find(match, EXPORT_PROJECTION)
+        export_customers_col.find(match, EXPORT_PROJECTION)
         .sort(sort_by, sort_dir)
         .limit(max_rows)
     )

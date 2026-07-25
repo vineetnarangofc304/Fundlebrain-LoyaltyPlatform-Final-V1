@@ -96,7 +96,7 @@ async def _new_vs_repeat_daywise(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         {"$sort": {"_id": 1}},
         {"$limit": 1200},
     ]
-    raw = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(1200)
+    raw = await transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(1200)
     rows: List[Dict[str, Any]] = []
     for g in raw:
         d = g.get("_id")
@@ -213,7 +213,7 @@ async def _customer_count_by_store(as_of: datetime, store_id: Optional[str] = No
         {"$project": {"home_store_id": 1, "seg": seg}},
         {"$group": {"_id": {"s": "$home_store_id", "seg": "$seg"}, "n": {"$sum": 1}}},
     ]
-    raw = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(20000)
+    raw = await customers_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(20000)
     agg: Dict[str, Dict[str, int]] = {}
     for g in raw:
         sid = g["_id"].get("s")
@@ -369,7 +369,7 @@ async def _sales_mtd(as_of: datetime, month_start: str, next_month: str,
         {"$group": {"_id": "$seg", "count": {"$sum": 1},
                     "revenue": {"$sum": "$sp"}, "new_count": {"$sum": "$nw"}}},
     ]
-    raw = await customers_col.aggregate(pipe, allowDiskUse=True).to_list(10)
+    raw = await customers_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(10)
     by = {g["_id"]: g for g in raw}
     rows: List[Dict[str, Any]] = []
     for key in ("active", "no_mapping", "win_back_lost", "at_risk"):

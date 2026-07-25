@@ -156,7 +156,7 @@ def _finalize_matrix_row(g: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _run_store_matrix(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     pipe = [{"$match": match}, _store_matrix_group()]
-    raw = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(3000)
+    raw = await transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(3000)
     rows = [_finalize_matrix_row(g) for g in raw]
     await _fill_store_identity(rows)
     for r in rows:
@@ -285,7 +285,7 @@ async def _weekly_kpi(match: Dict[str, Any], granularity: str) -> List[Dict[str,
         }},
         {"$sort": {"_id": 1}}, {"$limit": 800},
     ]
-    raw = await transactions_col.aggregate(main, allowDiskUse=True).to_list(800)
+    raw = await transactions_col.aggregate(main, allowDiskUse=True, maxTimeMS=25000).to_list(800)
 
     # per-bucket distinct customer counts (memory-safe: group by mobile first)
     cmatch = dict(match); cmatch["is_return"] = {"$ne": True}
@@ -298,7 +298,7 @@ async def _weekly_kpi(match: Dict[str, Any], granularity: str) -> List[Dict[str,
         {"$group": {"_id": "$_id.b", "overall": {"$sum": 1},
                     "new": {"$sum": "$isnew"}, "existing": {"$sum": "$isex"}}},
     ]
-    craw = await transactions_col.aggregate(cust, allowDiskUse=True).to_list(800)
+    craw = await transactions_col.aggregate(cust, allowDiskUse=True, maxTimeMS=25000).to_list(800)
     cmap = {c["_id"]: c for c in craw}
 
     out = []
@@ -444,7 +444,7 @@ async def _compute_visit_accounts(mobile_filter: Optional[str]) -> Tuple[int, in
             "total_purchase": {"$sum": PAID_EXPR},
         }},
     ]
-    groups = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(None)
+    groups = await transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(None)
     if not groups:
         return 0, 0
     # resolve store code/name from the stores master where the bill lacked them
@@ -530,7 +530,7 @@ async def _compute_new_or_existing(mobile_filter: Optional[str]) -> Tuple[int, i
     ]
     first_ids: List[str] = []
     with pymongo.timeout(1800):
-        async for g in transactions_col.aggregate(pipe, allowDiskUse=True):
+        async for g in transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000):
             fid = g.get("first_id")
             if fid:
                 first_ids.append(fid)
@@ -559,7 +559,7 @@ async def new_or_existing_audit(user=Depends(get_current_user)):
         {"$group": {"_id": {"$toLower": {"$ifNull": ["$new_or_existing", ""]}}, "count": {"$sum": 1}}},
     ]
     with pymongo.timeout(300):
-        rows = await transactions_col.aggregate(pipe, allowDiskUse=True).to_list(50)
+        rows = await transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(50)
     by = {(r.get("_id") or ""): int(r.get("count") or 0) for r in rows}
     total_mapped = sum(by.values())
     new_cnt = by.get("new", 0)

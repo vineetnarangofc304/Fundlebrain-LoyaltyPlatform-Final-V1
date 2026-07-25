@@ -651,7 +651,7 @@ async def occasions_report(
         }},
     ]
     with pymongo.timeout(120):
-        res = await customers_col.aggregate(pipeline, allowDiskUse=True).to_list(1)
+        res = await customers_col.aggregate(pipeline, allowDiskUse=True, maxTimeMS=25000).to_list(1)
     facet = res[0] if res else {}
     rows = facet.get("rows", []) or []
     total = (facet.get("total") or [{}])[0].get("n", 0) if facet.get("total") else 0

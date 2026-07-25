@@ -156,7 +156,7 @@ async def run_custom_report(body: dict, user: dict = Depends(get_current_user)):
         if "unique_customers" in metrics:
             group_stage["unique_customers"] = {"$addToSet": "$customer_id"}
         pipe = [{"$match": match}, {"$group": group_stage}, {"$sort": {"sum_net": -1} if "sum_net" in metrics else {"count": -1}}, {"$limit": 500}]
-        rows = await transactions_col.aggregate(pipe).to_list(500)
+        rows = await transactions_col.aggregate(pipe, maxTimeMS=25000).to_list(500)
         for r in rows:
             if "unique_customers" in r:
                 r["unique_customers"] = len(r["unique_customers"])
@@ -165,6 +165,6 @@ async def run_custom_report(body: dict, user: dict = Depends(get_current_user)):
         group_id = {d: f"${d}" for d in dim} if dim else None
         group_stage = {"_id": group_id, "count": {"$sum": 1}, "sum_spend": {"$sum": "$lifetime_spend"}, "points_balance": {"$sum": "$points_balance"}}
         pipe = [{"$match": fil}, {"$group": group_stage}, {"$sort": {"sum_spend": -1}}, {"$limit": 500}]
-        rows = await customers_col.aggregate(pipe).to_list(500)
+        rows = await customers_col.aggregate(pipe, maxTimeMS=25000).to_list(500)
         return {"rows": rows}
     return {"rows": []}

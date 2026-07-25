@@ -45,8 +45,15 @@ from typing import Any, Dict, Optional, List
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from database import (
-    db, customers_col, transactions_col, stores_col, points_ledger_col,
-    coupons_col, coupon_redemptions_col, api_logs_col, loyalty_config_col,
+    pos_db as db,
+    pos_customers_col as customers_col,
+    pos_transactions_col as transactions_col,
+    pos_stores_col as stores_col,
+    pos_points_ledger_col as points_ledger_col,
+    pos_coupons_col as coupons_col,
+    pos_coupon_redemptions_col as coupon_redemptions_col,
+    pos_loyalty_config_col as loyalty_config_col,
+    api_logs_col,
 )
 from db_logging import submit_log
 

@@ -1,0 +1,32 @@
+{
+  "summary": "Regression validation for the POS dedicated Motor pool + maxTimeMS analytics fix. 16/16 backend tests PASSED in ~9s. POS critical path (customer check, earn, idempotency, redeem/OTP envelope) works correctly on the new pos_* collection handles. All 7 capped report/dashboard endpoints (sales-trend, store-performance, top-skus, kpis, city-performance, store-wise-kpi, weekly-kpi) return 200 well under 30s with no MaxTimeMSExpired. Segment audience export streams CSV with 50+ customer rows via the long_col bounded pool. No 5xx regressions on sampled analytics endpoints.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration98_pos_pool_isolation_test.py",
+    "/app/test_reports/pytest/iteration98.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Pool split is clean: pos_ewards_routes.py aliases pos_* handles to the same local names (customers_col, transactions_col, etc.), so the endpoint logic remained untouched — only the underlying socket pool changed. This is the correct minimally-invasive shape for a P0 hotfix.",
+    "maxTimeMS=25000 caps are applied at the aggregation call site (not via a wrapper), which is the right place. Under normal preview load all 7 capped endpoints returned <2s; the cap will only surface in the pathological runaway case it is designed to prevent.",
+    "posAddPoint idempotency correctly returns a 400 duplicate-bill envelope on retry for a fully-committed bill and a 200 'resumed' envelope for a partial-commit — verified balance did not double-credit on repeat submission."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration98_pos_pool_isolation_test.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 ; POS x-api-key ZFQWql7I3vCH0ckuWmA8zVKDDJWYPBtoQGLruEnRrFI, merchant_id KAZO_FUNDLE, customer_key K00055, test mobile 6000013876",
+  "seed_data_creation": "None. Test uses existing preview customer KARAN SINGH (6000013876) and creates unique bill_numbers (IT98-*, IT98IDEM-*) that are naturally isolated by UUID.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 98 covers the connection-pool isolation regression. The critical POS billing path (posCustomerCheck, posAddPoint, posRedeem*) runs on the dedicated _pos_client pool and the 7 previously-uncapped report aggregations now carry maxTimeMS=25000. All 16 assertions pass. If POS 'Loyalty is not Active' reappears, first check pos_ewards_routes.py imports still resolve to pos_db handles from database.py and check backend logs for pymongo.errors.NetworkTimeout on the shared client (which would indicate a new endpoint accidentally using the wrong pool).",
+  "rca of the issue": "N/A — this iteration was regression validation only; the RCA (shared Motor pool starvation by uncapped analytics aggregations starving POS billing) was already root-caused and fixed by the main agent. This test confirms the fix holds under a functional smoke suite."
+}

@@ -620,7 +620,7 @@ async def nps_dashboard(
         }},
         {"$sort": {"_id": 1}},
     ]
-    rows = await nps_col.aggregate(trend_pipe, allowDiskUse=True).to_list(120)
+    rows = await nps_col.aggregate(trend_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(120)
     return [
         {
             "date": r["_id"],
@@ -643,5 +643,5 @@ async def coupon_detail(coupon_id: str, user: dict = Depends(get_current_user)):
         {"$group": {"_id": {"$substr": ["$redeemed_at", 0, 10]}, "count": {"$sum": 1}, "discount": {"$sum": "$discount"}}},
         {"$sort": {"_id": 1}},
     ]
-    trend = await coupon_redemptions_col.aggregate(by_date_pipe, allowDiskUse=True).to_list(120)
+    trend = await coupon_redemptions_col.aggregate(by_date_pipe, allowDiskUse=True, maxTimeMS=25000).to_list(120)
     return {"coupon": c, "redemptions": redemptions, "trend": [{"date": r["_id"], "count": r["count"], "discount": round(r["discount"], 2)} for r in trend]}

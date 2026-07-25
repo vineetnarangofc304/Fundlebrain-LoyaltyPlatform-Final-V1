@@ -98,7 +98,7 @@ async def get_customer(customer_id: str, user: dict = Depends(get_current_user))
         {"$sort": {"spend": -1}},
         {"$limit": 5},
     ]
-    cat = await transactions_col.aggregate(cat_pipe).to_list(10)
+    cat = await transactions_col.aggregate(cat_pipe, maxTimeMS=25000).to_list(10)
     favourite_categories = [{"category": c["_id"], "qty": c["qty"], "spend": round(c["spend"], 2)} for c in cat]
 
     # favourite products
@@ -109,7 +109,7 @@ async def get_customer(customer_id: str, user: dict = Depends(get_current_user))
         {"$sort": {"qty": -1}},
         {"$limit": 5},
     ]
-    pr = await transactions_col.aggregate(prod_pipe).to_list(10)
+    pr = await transactions_col.aggregate(prod_pipe, maxTimeMS=25000).to_list(10)
     favourite_products = [{"sku": p["_id"]["sku"], "name": p["_id"]["name"], "qty": p["qty"], "spend": round(p["spend"], 2)} for p in pr]
 
     return {
