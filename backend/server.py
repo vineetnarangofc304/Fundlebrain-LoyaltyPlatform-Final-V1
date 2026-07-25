@@ -571,6 +571,163 @@ async def _backfill_amount_paid(batch: int = 20000):
 
 
 
+async def _seed_and_bootstrap():
+    """ALL DB seeding / bootstrapping — run as a BACKGROUND task (never inline in the
+    lifespan startup) so a transient Atlas 'no primary' (failover/maintenance) at deploy
+    time can NEVER block or crash startup. The process must come up and answer /health
+    immediately for the Kubernetes readiness probe, or the whole deployment times out and
+    is killed. Every step is best-effort and never re-raises."""
+    from database import users_col, stores_col, loyalty_config_col
+    from routes.loyalty_routes import DEFAULT_CONFIG
+    from auth import hash_password
+    from datetime import datetime, timezone
+    import uuid
+
+    # Wait (with backoff) for a reachable/writable DB before seeding. Never raises —
+    # if the DB is briefly unavailable at boot we simply retry; the app is already live.
+    for attempt in range(1, 61):
+        try:
+            await users_col.find_one({}, {"_id": 1})
+            break
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[seed] DB not reachable yet (attempt {attempt}): {e}")
+            await asyncio.sleep(5)
+    else:
+        logger.error("[seed] DB never became reachable — seeding skipped this boot")
+        return
+
+    try:
+        # Seed super admin if not exists
+        super_admin = await users_col.find_one({"email": os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@fundle.io").lower()})
+        if not super_admin:
+            await users_col.insert_one({
+                "id": uuid.uuid4().hex,
+                "email": os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@fundle.io").lower(),
+                "name": "Fundle Super Admin",
+                "role": "super_admin",
+                "password_hash": hash_password(os.environ.get("SUPER_ADMIN_PASSWORD", "Fundle@2026")),
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info("Seeded super admin")
+
+        # Seed brand admin
+        brand_admin = await users_col.find_one({"email": os.environ.get("BRAND_ADMIN_EMAIL", "admin@kazo.com").lower()})
+        if not brand_admin:
+            await users_col.insert_one({
+                "id": uuid.uuid4().hex,
+                "email": os.environ.get("BRAND_ADMIN_EMAIL", "admin@kazo.com").lower(),
+                "name": "Kazo Brand Admin",
+                "role": "brand_admin",
+                "password_hash": hash_password(os.environ.get("BRAND_ADMIN_PASSWORD", "Kazo@2026")),
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info("Seeded brand admin")
+
+        # Backfill store_id on store-scoped users (security hardening for drilldown scope)
+        store_user_map = {
+            "store.mumbai@kazo.com": "Mumbai",
+            "staff.delhi@kazo.com": "Delhi",
+        }
+        for email, city in store_user_map.items():
+            u = await users_col.find_one({"email": email})
+            if u and not u.get("store_id"):
+                s = await stores_col.find_one({"city": city, "is_active": True})
+                if s:
+                    await users_col.update_one(
+                        {"email": email},
+                        {"$set": {"store_id": s["id"]}},
+                    )
+                    logger.info(f"Backfilled store_id for {email} -> {s['code']}")
+
+        # Seed all demo / operational users (idempotent — runs on every boot so
+        # production deployments with a fresh DB always have working logins).
+        demo_users = [
+            ("crm@kazo.com", "Priya Sharma", "crm_manager", None),
+            ("marketing@kazo.com", "Rohan Kapoor", "marketing_manager", None),
+            ("regional.north@kazo.com", "Anjali Verma", "regional_manager", None),
+            ("store.mumbai@kazo.com", "Neha Patel", "store_manager", "Mumbai"),
+            ("staff.delhi@kazo.com", "Karan Singh", "store_staff", "Delhi"),
+            ("support@kazo.com", "Riya Mehra", "support_agent", None),
+            ("analytics@kazo.com", "Aditya Rao", "analytics_viewer", None),
+            ("executive@kazo.com", "Kavita Iyer", "readonly_executive", None),
+            ("it@kazo.com", "Vikram Joshi", "brand_admin", None),
+        ]
+        for email, name, role, city in demo_users:
+            if await users_col.find_one({"email": email}):
+                continue
+            doc = {
+                "id": uuid.uuid4().hex,
+                "email": email,
+                "name": name,
+                "role": role,
+                "password_hash": hash_password("Kazo@2026"),
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if city:
+                s = await stores_col.find_one({"city": city, "is_active": True})
+                if s:
+                    doc["store_id"] = s["id"]
+            await users_col.insert_one(doc)
+            logger.info(f"Seeded demo user {email}")
+
+        # Seed / ensure Master Brain accounts (idempotent; also backfills the flags on existing rows)
+        mb_accounts = [
+            ("masteradmin@fundle.io", "Master Admin", "crm_manager", "Master@2026",
+             {"is_master_admin": True}),
+            ("vineetnarangofc@fundle.io", "Vineet Narang", "crm_manager", "Vineet@2026",
+             {"is_master_admin": True, "is_master_query_admin": True}),
+        ]
+        for email, name, role, pwd, flags in mb_accounts:
+            existing_mb = await users_col.find_one({"email": email})
+            if not existing_mb:
+                await users_col.insert_one({
+                    "id": uuid.uuid4().hex, "email": email, "name": name, "role": role,
+                    "password_hash": hash_password(pwd), "is_active": True,
+                    "created_at": datetime.now(timezone.utc).isoformat(), **flags,
+                })
+                logger.info(f"Seeded Master Brain account {email}")
+            else:
+                patch = {k: v for k, v in flags.items() if not existing_mb.get(k)}
+                if patch:
+                    await users_col.update_one({"email": email}, {"$set": patch})
+                    logger.info(f"Backfilled flags for {email}: {patch}")
+
+        # Seed loyalty config
+        cfg = await loyalty_config_col.find_one({"id": "default"})
+        if not cfg:
+            doc = dict(DEFAULT_CONFIG)
+            doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+            await loyalty_config_col.insert_one(doc)
+            logger.info("Seeded loyalty config")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[seed] core seeding error (continuing): {e}")
+
+    # Seed campaign_metrics (idempotent)
+    try:
+        from seed_campaign_metrics import seed_campaign_metrics
+        res = await seed_campaign_metrics()
+        if res["rows_inserted"]:
+            logger.info(f"Seeded campaign_metrics: {res}")
+    except Exception as e:
+        logger.warning(f"Could not seed campaign_metrics: {e}")
+
+    # Bootstrap POS defaults (credentials + test customer + test coupons)
+    try:
+        await bootstrap_pos_defaults()
+    except Exception as e:
+        logger.warning(f"Could not bootstrap POS defaults: {e}")
+
+    # Ensure the read-only demo account exists (powers the public /demo guided tour)
+    try:
+        from routes.demo_routes import ensure_demo_user
+        await ensure_demo_user()
+    except Exception as e:
+        logger.warning(f"Could not ensure demo user: {e}")
+
+
 @app.on_event("startup")
 async def startup():
     from database import users_col, stores_col, loyalty_config_col
@@ -596,144 +753,22 @@ async def startup():
         logger.warning("Object storage init deferred: %s", e)
 
     # Seed super admin if not exists
-    super_admin = await users_col.find_one({"email": os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@fundle.io").lower()})
-    if not super_admin:
-        await users_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "email": os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@fundle.io").lower(),
-            "name": "Fundle Super Admin",
-            "role": "super_admin",
-            "password_hash": hash_password(os.environ.get("SUPER_ADMIN_PASSWORD", "Fundle@2026")),
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-        logger.info("Seeded super admin")
-
-    # Seed brand admin
-    brand_admin = await users_col.find_one({"email": os.environ.get("BRAND_ADMIN_EMAIL", "admin@kazo.com").lower()})
-    if not brand_admin:
-        await users_col.insert_one({
-            "id": uuid.uuid4().hex,
-            "email": os.environ.get("BRAND_ADMIN_EMAIL", "admin@kazo.com").lower(),
-            "name": "Kazo Brand Admin",
-            "role": "brand_admin",
-            "password_hash": hash_password(os.environ.get("BRAND_ADMIN_PASSWORD", "Kazo@2026")),
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-        logger.info("Seeded brand admin")
-
-    # Backfill store_id on store-scoped users (security hardening for drilldown scope)
-    store_user_map = {
-        "store.mumbai@kazo.com": "Mumbai",
-        "staff.delhi@kazo.com": "Delhi",
-    }
-    for email, city in store_user_map.items():
-        u = await users_col.find_one({"email": email})
-        if u and not u.get("store_id"):
-            s = await stores_col.find_one({"city": city, "is_active": True})
-            if s:
-                await users_col.update_one(
-                    {"email": email},
-                    {"$set": {"store_id": s["id"]}},
-                )
-                logger.info(f"Backfilled store_id for {email} -> {s['code']}")
-
-    # Seed all demo / operational users (idempotent — runs on every boot so
-    # production deployments with a fresh DB always have working logins).
-    demo_users = [
-        ("crm@kazo.com", "Priya Sharma", "crm_manager", None),
-        ("marketing@kazo.com", "Rohan Kapoor", "marketing_manager", None),
-        ("regional.north@kazo.com", "Anjali Verma", "regional_manager", None),
-        ("store.mumbai@kazo.com", "Neha Patel", "store_manager", "Mumbai"),
-        ("staff.delhi@kazo.com", "Karan Singh", "store_staff", "Delhi"),
-        ("support@kazo.com", "Riya Mehra", "support_agent", None),
-        ("analytics@kazo.com", "Aditya Rao", "analytics_viewer", None),
-        ("executive@kazo.com", "Kavita Iyer", "readonly_executive", None),
-        ("it@kazo.com", "Vikram Joshi", "brand_admin", None),
-    ]
-    for email, name, role, city in demo_users:
-        if await users_col.find_one({"email": email}):
-            continue
-        doc = {
-            "id": uuid.uuid4().hex,
-            "email": email,
-            "name": name,
-            "role": role,
-            "password_hash": hash_password("Kazo@2026"),
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        if city:
-            s = await stores_col.find_one({"city": city, "is_active": True})
-            if s:
-                doc["store_id"] = s["id"]
-        await users_col.insert_one(doc)
-        logger.info(f"Seeded demo user {email}")
-
-    # Seed / ensure Master Brain accounts (idempotent; also backfills the flags on existing rows)
-    #  - masteradmin@fundle.io  -> is_master_admin (acts via Master Brain)
-    #  - vineetnarangofc@fundle.io -> is_master_admin + is_master_query_admin
-    #       (the OVERSEER: can see the Master Brain query log of ALL users)
-    mb_accounts = [
-        ("masteradmin@fundle.io", "Master Admin", "crm_manager", "Master@2026",
-         {"is_master_admin": True}),
-        ("vineetnarangofc@fundle.io", "Vineet Narang", "crm_manager", "Vineet@2026",
-         {"is_master_admin": True, "is_master_query_admin": True}),
-    ]
-    for email, name, role, pwd, flags in mb_accounts:
-        existing_mb = await users_col.find_one({"email": email})
-        if not existing_mb:
-            await users_col.insert_one({
-                "id": uuid.uuid4().hex, "email": email, "name": name, "role": role,
-                "password_hash": hash_password(pwd), "is_active": True,
-                "created_at": datetime.now(timezone.utc).isoformat(), **flags,
-            })
-            logger.info(f"Seeded Master Brain account {email}")
-        else:
-            # backfill the flags if missing (never downgrade an explicitly-set value)
-            patch = {k: v for k, v in flags.items() if not existing_mb.get(k)}
-            if patch:
-                await users_col.update_one({"email": email}, {"$set": patch})
-                logger.info(f"Backfilled flags for {email}: {patch}")
-
-    # Seed loyalty config
-    cfg = await loyalty_config_col.find_one({"id": "default"})
-    if not cfg:
-        doc = dict(DEFAULT_CONFIG)
-        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
-        await loyalty_config_col.insert_one(doc)
-        logger.info("Seeded loyalty config")
-
-    # Seed campaign_metrics (idempotent: derives per-channel funnel rows
-    # from existing campaign aggregates so Campaign ROI v2 funnel populates)
-    try:
-        from seed_campaign_metrics import seed_campaign_metrics
-        res = await seed_campaign_metrics()
-        if res["rows_inserted"]:
-            logger.info(f"Seeded campaign_metrics: {res}")
-    except Exception as e:
-        logger.warning(f"Could not seed campaign_metrics: {e}")
-
-    # Start weekly executive-digest scheduler (Mon 09:00 IST)
+    # ── DB seeding / bootstrapping is DEFERRED to a resilient background task ──
+    # (see _seed_and_bootstrap). It must NEVER run inline here: a transient Atlas
+    # 'no primary' at deploy time would block the lifespan for 120s and then EXIT
+    # the process, so the readiness probe (/health) never passes and the whole
+    # deployment is killed. Start the scheduler first (registering jobs does not
+    # touch the DB), then kick seeding off in the background.
     try:
         from scheduler import start_scheduler
         start_scheduler()
     except Exception as e:
         logger.warning(f"Could not start digest scheduler: {e}")
 
-    # Bootstrap POS defaults (credentials + test customer 966681235 + test coupons)
     try:
-        await bootstrap_pos_defaults()
+        asyncio.create_task(_seed_and_bootstrap())
     except Exception as e:
-        logger.warning(f"Could not bootstrap POS defaults: {e}")
-
-    # Ensure the read-only demo account exists (powers the public /demo guided tour)
-    try:
-        from routes.demo_routes import ensure_demo_user
-        await ensure_demo_user()
-    except Exception as e:
-        logger.warning(f"Could not ensure demo user: {e}")
+        logger.warning(f"Could not schedule seed/bootstrap: {e}")
 
     # Build hot-path indexes in the background so dashboards over 1M+ rows stay
     # fast. Non-blocking: the app starts serving immediately while Mongo builds.
