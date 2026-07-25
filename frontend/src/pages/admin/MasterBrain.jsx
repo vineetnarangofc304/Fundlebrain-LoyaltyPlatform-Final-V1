@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import api, { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { PageHeader } from "./_shared";
-import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History, Zap, Coins, AlertTriangle, CheckCircle2, Cpu } from "lucide-react";
+import { ShieldAlert, Send, Loader2, Sparkles, Trash2, Wrench, ScrollText, Lock, Paperclip, X, FileText, Image as ImageIcon, Undo2, Megaphone, Database, RefreshCw, Search, ChevronLeft, ChevronRight, ArrowLeft, History, Zap, Coins, AlertTriangle, CheckCircle2, Cpu, Activity, ShieldCheck, ArrowUpRight } from "lucide-react";
 import { toast } from "sonner";
 import MarkdownMessage from "./_markdown_message";
 
@@ -45,6 +46,7 @@ const STATUS_PILL = {
 
 export default function MasterBrain() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [tab, setTab] = useState("chat");
   const [sessions, setSessions] = useState([]);
   const [sessionId, setSessionId] = useState(null);
@@ -87,6 +89,11 @@ export default function MasterBrain() {
   const [qlIsGlobal, setQlIsGlobal] = useState(false);
   const [qlUser, setQlUser] = useState("");
   const [qlSearch, setQlSearch] = useState("");
+
+  // data health
+  const [health, setHealth] = useState(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthScanning, setHealthScanning] = useState(false);
 
   const isMaster = !!user?.is_master_admin;
   const isQueryAdmin = !!user?.is_master_query_admin;
@@ -161,11 +168,41 @@ export default function MasterBrain() {
       setQlUsers(r.data.users || []);
     } catch { /* ignore */ }
   };
+  const loadHealth = async () => {
+    setHealthLoading(true);
+    try {
+      const r = await api.get("/master-brain/data-health");
+      setHealth(r.data);
+      setHealthScanning(!!r.data?.scanning);
+      return r.data;
+    } catch { /* ignore */ return null; }
+    finally { setHealthLoading(false); }
+  };
+  const refreshHealth = async () => {
+    setHealthScanning(true);
+    try {
+      await api.post("/master-brain/data-health/refresh");
+      toast.info("Running a fresh data-health scan… this can take a minute.");
+      // Poll until the scan completes.
+      const started = Date.now();
+      const poll = async () => {
+        const d = await loadHealth();
+        if (d && !d.scanning) { setHealthScanning(false); toast.success("Data-health scan complete."); return; }
+        if (Date.now() - started > 5 * 60 * 1000) { setHealthScanning(false); return; }
+        setTimeout(poll, 5000);
+      };
+      setTimeout(poll, 5000);
+    } catch (e) {
+      setHealthScanning(false);
+      toast.error(e?.response?.data?.detail || "Couldn't start the scan.");
+    }
+  };
   useEffect(() => { if (tab === "log" && isMaster) loadLog(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "campaigns" && isMaster) loadCampaigns(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "datasets" && isMaster) loadDatasets(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "credits" && isMaster) loadReceipts(); }, [tab, isMaster]);
   useEffect(() => { if (tab === "querylog" && canAccess) loadQueryLog(); }, [tab, canAccess]);
+  useEffect(() => { if (tab === "health" && isMaster) loadHealth(); }, [tab, isMaster]);
   // A query-only overseer (no write rights) lands straight on the Query Log.
   useEffect(() => { if (!isMaster && isQueryAdmin) setTab("querylog"); }, [isMaster, isQueryAdmin]);
 
@@ -378,6 +415,7 @@ export default function MasterBrain() {
         actions={
           <div className="flex gap-2 flex-wrap">
             {isMaster && <TabBtn id="chat">Chat</TabBtn>}
+            {isMaster && <TabBtn id="health" icon={Activity}>Data Health</TabBtn>}
             {isMaster && <TabBtn id="log" icon={ScrollText}>Action Log</TabBtn>}
             {isMaster && <TabBtn id="campaigns" icon={Megaphone}>Campaigns</TabBtn>}
             {isMaster && <TabBtn id="credits" icon={Coins}>Bulk Credits</TabBtn>}
@@ -392,6 +430,77 @@ export default function MasterBrain() {
         <ShieldAlert className="w-4 h-4 shrink-0" />
         <span>Actions here are <b>live</b>. Master Brain always previews first and requires your confirmation + a reason; every change is logged with your name &amp; timestamp.</span>
       </div>
+
+      {/* ---------------- DATA HEALTH ---------------- */}
+      {tab === "health" && (
+        <div className="p-4" data-testid="mb-data-health">
+          <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
+            <div className="text-xs text-neutral-600">
+              Proactive daily scan of your loyalty data. Last scan:{" "}
+              <b>{health?.updated_at ? fmtTime(health.updated_at) : (health?.never_run ? "never" : "—")}</b>
+              {health && !health.never_run && (
+                <span className={`pill ml-2 ${health.clean ? "pill-success" : "pill-warning"}`} data-testid="mb-health-summary-pill">
+                  {health.clean ? "All clear" : `${health.issues} area(s) need attention`}
+                </span>
+              )}
+            </div>
+            <button className="k-btn k-btn-outline k-btn-sm" onClick={refreshHealth} disabled={healthScanning} data-testid="mb-health-refresh">
+              {healthScanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              {healthScanning ? "Scanning…" : "Run scan now"}
+            </button>
+          </div>
+
+          {healthLoading && !health && (
+            <div className="text-center text-neutral-500 py-12" data-testid="mb-health-loading">
+              <Loader2 className="w-6 h-6 animate-spin inline" /> Loading…
+            </div>
+          )}
+
+          {health?.never_run && !healthScanning && (
+            <div className="bg-white border border-black/10 p-8 text-center" data-testid="mb-health-neverrun">
+              <Activity className="w-8 h-8 mx-auto text-neutral-400 mb-2" />
+              <p className="text-sm text-neutral-600">No scan has run yet. Click <b>Run scan now</b> to check for negative balances, uncredited bills, double redemptions and more.</p>
+            </div>
+          )}
+
+          {health?.checks?.length > 0 && (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3" data-testid="mb-health-grid">
+              {health.checks.map((c) => {
+                const bad = c.count > 0 && (c.severity === "high" || c.severity === "medium");
+                const info = c.count > 0 && (c.severity === "low");
+                const unknown = c.severity === "unknown";
+                const tone = bad ? (c.severity === "high" ? "border-red-300 bg-red-50" : "border-amber-300 bg-amber-50")
+                  : info ? "border-sky-200 bg-sky-50"
+                  : unknown ? "border-neutral-200 bg-neutral-50"
+                  : "border-emerald-200 bg-emerald-50";
+                const Icon = unknown ? AlertTriangle : (bad ? AlertTriangle : (info ? Activity : ShieldCheck));
+                const iconTone = bad ? (c.severity === "high" ? "text-red-600" : "text-amber-600")
+                  : info ? "text-sky-600" : unknown ? "text-neutral-500" : "text-emerald-600";
+                return (
+                  <div key={c.key} className={`border rounded-lg p-4 ${tone}`} data-testid={`mb-health-card-${c.key}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Icon className={`w-4 h-4 ${iconTone}`} />
+                        <span className="text-sm font-semibold text-neutral-800">{c.title}</span>
+                      </div>
+                      <span className={`text-2xl font-bold tabular-nums ${iconTone}`} data-testid={`mb-health-count-${c.key}`}>
+                        {unknown ? "?" : Number(c.count).toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                    <p className="text-xs text-neutral-600 mt-2 min-h-[2.5rem]">{c.message}</p>
+                    {c.fix_route && c.count > 0 && (
+                      <button className="k-btn k-btn-outline k-btn-sm mt-2 flex items-center gap-1"
+                        onClick={() => navigate(c.fix_route)} data-testid={`mb-health-fix-${c.key}`}>
+                        {c.fix_label || "Fix"} <ArrowUpRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ---------------- ACTION LOG ---------------- */}
       {tab === "log" && (

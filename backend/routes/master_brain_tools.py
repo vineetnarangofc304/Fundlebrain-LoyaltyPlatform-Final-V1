@@ -913,11 +913,13 @@ async def bulk_award_bonus(attachment_id: str = "", mode: str = "flat", value: i
 
     cust_map = await _bulk_find_customers(mobiles)
     pairs: List[Dict[str, Any]] = []
+    not_found_mobiles: List[str] = []
     matched = not_found = skipped_zero = 0
     for m in mobiles:
         c = cust_map.get(_last10(m))
         if not c:
             not_found += 1
+            not_found_mobiles.append(m)
             continue
         matched += 1
         cur = int(c.get("points_balance") or 0)
@@ -939,6 +941,7 @@ async def bulk_award_bonus(attachment_id: str = "", mode: str = "flat", value: i
             "file": att.get("filename"), "expires_at": expires_at,
             "mobiles_in_file": len(mobiles), "matched_customers": matched,
             "not_found": not_found, "skipped_zero": skipped_zero,
+            "not_found_mobiles": not_found_mobiles,
             "customers_to_credit": len(pairs), "total_points": total_points}
     if prior:
         plan["already_awarded"] = {"when": prior.get("created_at"), "by": prior.get("created_by"),
@@ -2749,6 +2752,176 @@ async def _tool_audit_partial_commit_bills(sample_limit: int = 15, user=None) ->
                     f"No partially-committed bills found — every live earn bill has its ledger row. "
                     f"Cutoff: {cutoff}."),
     }
+
+
+# ============================================================
+# DATA HEALTH — daily proactive "Quick Wins" scan.
+# Runs the read-only audits OFF the request path (daily scheduler +
+# on-demand refresh) and PERSISTS a compact summary to dashboard_kv so
+# the Master Brain panel reads it INSTANTLY. Heavy full-collection scans
+# run SEQUENTIALLY (never concurrently) to avoid the DB-lock spiral.
+# ============================================================
+_DATA_HEALTH_DOC_ID = "data_health"
+_data_health_lock = asyncio.Lock()
+_DH_FIX_ROUTE = "/admin/points-integrity"
+
+
+def _system_master_user() -> Dict[str, Any]:
+    """Synthetic master-admin context for scheduler-run (unauthenticated) audits."""
+    return {"id": "system", "email": "scheduler@fundle.io",
+            "name": "Data Health Scan", "is_master_admin": True}
+
+
+def _dh_check(key, title, count, severity, message,
+              fix_label=None, extra=None) -> Dict[str, Any]:
+    return {"key": key, "title": title, "count": int(count or 0), "severity": severity,
+            "message": message, "fix_label": fix_label,
+            "fix_route": _DH_FIX_ROUTE if fix_label else None, "extra": extra or {}}
+
+
+async def run_data_health_scan(triggered_by: str = "scheduler") -> Dict[str, Any]:
+    """Run all read-only data-health audits and persist a compact summary to
+    dashboard_kv/data_health. NEVER call this inline on a user request — the panel
+    only reads the persisted doc via GET /master-brain/data-health."""
+    from database import db
+    if _data_health_lock.locked():
+        cur = await db["dashboard_kv"].find_one({"_id": _DATA_HEALTH_DOC_ID}, {"_id": 0})
+        return cur or {"checks": [], "scanning": True}
+    async with _data_health_lock:
+        await db["dashboard_kv"].update_one(
+            {"_id": _DATA_HEALTH_DOC_ID},
+            {"$set": {"scanning": True, "triggered_by": triggered_by, "started_at": _now_iso()}},
+            upsert=True)
+        u = _system_master_user()
+
+        async def _safe(coro):
+            try:
+                return await coro
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"data_health audit failed: {e}")
+                return {"computed": False, "error": str(e)}
+
+        # SEQUENTIAL (one heavy scan at a time) to spread DB load.
+        neg = await _safe(_tool_audit_negative_balances(user=u))
+        partial = await _safe(_tool_audit_partial_commit_bills(user=u))
+        dup_redeem = await _safe(_tool_audit_double_redemptions(user=u))
+        miss = await _safe(_tool_audit_missing_redemption_ledger(user=u))
+        dup_adj = await _safe(_tool_audit_duplicate_adjustments(user=u))
+        hist = await _safe(_tool_audit_historical_derived_points(user=u))
+
+        checks: List[Dict[str, Any]] = []
+
+        # 1) Negative balances (authoritative, indexed)
+        if neg.get("computed"):
+            n = int(neg.get("negative_balance_customers") or 0)
+            checks.append(_dh_check(
+                "negative_balances", "Negative point balances", n,
+                "high" if n else "ok",
+                (f"{n:,} customers have a negative balance "
+                 f"(total deficit {abs(int(neg.get('total_deficit_points') or 0)):,} pts)."
+                 if n else "No negative balances — field balances are clean."),
+                fix_label=("Fix negatives" if n else None),
+                extra={"total_deficit_points": neg.get("total_deficit_points")}))
+        else:
+            checks.append(_dh_check("negative_balances", "Negative point balances", 0,
+                                    "unknown", "Couldn't compute right now — re-run the scan."))
+
+        # 2) Partial-commit bills (points earned but never credited)
+        if partial.get("computed"):
+            n = int(partial.get("bills_missing_earn_ledger") or 0)
+            checks.append(_dh_check(
+                "partial_commit_bills", "Uncredited earn bills", n,
+                "high" if n else "ok",
+                (f"{n:,} live bill(s) earned {int(partial.get('points_never_credited') or 0):,} pts "
+                 f"that were never credited (partial commit)."
+                 if n else "Every live earn bill has its ledger row."),
+                fix_label=("Repair bills" if n else None),
+                extra={"points_never_credited": partial.get("points_never_credited"),
+                       "customers_affected": partial.get("customers_affected")}))
+        else:
+            checks.append(_dh_check("partial_commit_bills", "Uncredited earn bills", 0,
+                                    "unknown", "Couldn't compute right now — re-run the scan."))
+
+        # 3) Double redemptions (points deducted twice)
+        if dup_redeem.get("exact"):
+            n = int(dup_redeem.get("customers_affected") or 0)
+            checks.append(_dh_check(
+                "double_redemptions", "Double redemptions", n,
+                "high" if n else "ok",
+                (f"{n:,} customers had {int(dup_redeem.get('duplicate_rows_found') or 0):,} rows "
+                 f"double-deduct {int(dup_redeem.get('points_double_deducted') or 0):,} pts."
+                 if n else "No double-redemption deductions found."),
+                fix_label=("Credit back" if n else None),
+                extra={"points_double_deducted": dup_redeem.get("points_double_deducted")}))
+        else:
+            checks.append(_dh_check("double_redemptions", "Double redemptions", 0,
+                                    "unknown", "Couldn't complete an exact scan — re-run the scan."))
+
+        # 4) Missing redemption ledger — LIVE over-balance is the actionable count
+        if miss.get("computed"):
+            live = (miss.get("live_post_cutoff") or {})
+            n = int(live.get("bills") or 0)
+            hist_bills = int((miss.get("historic_pre_cutoff") or {}).get("bills") or 0)
+            checks.append(_dh_check(
+                "missing_redemption_ledger", "Redemptions without a ledger", n,
+                "medium" if n else "ok",
+                (f"{n:,} LIVE redemption bill(s) have no redeem ledger row "
+                 f"(potential over-balance){'; ' + format(hist_bills, ',') + ' historic audit-gap' if hist_bills else ''}."
+                 if n else (f"All redemption bills have a ledger row"
+                            + (f" ({hist_bills:,} historic audit-gap only)." if hist_bills else "."))),
+                fix_label=("Review" if n else None),
+                extra={"historic_bills": hist_bills,
+                       "live_points": live.get("points")}))
+        else:
+            checks.append(_dh_check("missing_redemption_ledger", "Redemptions without a ledger", 0,
+                                    "unknown", "Couldn't compute right now — re-run the scan."))
+
+        # 5) Duplicate adjustments
+        if dup_adj.get("computed"):
+            n = int(dup_adj.get("customers_affected") or 0)
+            checks.append(_dh_check(
+                "duplicate_adjustments", "Duplicate adjustments", n,
+                "medium" if n else "ok",
+                (f"{n:,} customers have {int(dup_adj.get('surplus_duplicate_rows') or 0):,} surplus "
+                 f"duplicate adjustment rows."
+                 if n else "No duplicate adjustments found."),
+                fix_label=("Review" if n else None),
+                extra={"surplus_points_wrongly_deducted": dup_adj.get("surplus_points_wrongly_deducted")}))
+        else:
+            checks.append(_dh_check("duplicate_adjustments", "Duplicate adjustments", 0,
+                                    "unknown", "Couldn't compute right now — re-run the scan."))
+
+        # 6) Historical derived points (informational)
+        if hist.get("computed"):
+            n = int(hist.get("historic_customers_with_derived_earned") or 0)
+            checks.append(_dh_check(
+                "historical_derived_points", "Historic derived points", n,
+                "low" if n else "ok",
+                (f"{n:,} historic customers carry derived earned points "
+                 f"({int(hist.get('derived_lifetime_points_earned_total') or 0):,} pts). "
+                 f"Per the rule, historic customers keep balance only."
+                 if n else "No derived points sitting on historic data."),
+                fix_label=("Normalize" if n else None),
+                extra={"derived_ledger_rows": hist.get("historic_derived_ledger_total_rows")}))
+        else:
+            checks.append(_dh_check("historical_derived_points", "Historic derived points", 0,
+                                    "unknown", "Couldn't compute right now — re-run the scan."))
+
+        issues = sum(1 for c in checks if c["severity"] in ("high", "medium") and c["count"] > 0)
+        summary = {
+            "checks": checks,
+            "issues": issues,
+            "clean": issues == 0,
+            "scanning": False,
+            "updated_at": _now_iso(),
+            "triggered_by": triggered_by,
+        }
+        await db["dashboard_kv"].update_one(
+            {"_id": _DATA_HEALTH_DOC_ID},
+            {"$set": summary, "$unset": {"started_at": ""}}, upsert=True)
+        summary["_id"] = _DATA_HEALTH_DOC_ID
+        summary.pop("_id", None)
+        return summary
 
 
 async def _tool_repair_partial_commit_bills(reason: str = "", confirm: bool = False,

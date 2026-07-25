@@ -2,11 +2,24 @@ import { useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import {
-  Award, Upload, FileText, RefreshCw, CheckCircle2, AlertTriangle, Undo2, Users, Coins,
+  Award, Upload, FileText, RefreshCw, CheckCircle2, AlertTriangle, Undo2, Users, Coins, Download,
 } from "lucide-react";
 import { PageHeader, SectionHeading, KPICard } from "./_shared";
 
 const fmtNum = (v) => (v == null ? "—" : Number(v).toLocaleString("en-IN"));
+
+const downloadMobilesCsv = (mobiles, filename) => {
+  const rows = ["Mobile", ...(mobiles || []).map((m) => String(m))];
+  const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
 
 export default function BulkBonusPage() {
   const fileRef = useRef(null);
@@ -204,6 +217,15 @@ export default function BulkBonusPage() {
               {preview.expires_at ? `expires ${String(preview.expires_at).slice(0, 10)}` : "no expiry"}
             </p>
 
+            {preview.not_found > 0 && (preview.not_found_mobiles || []).length > 0 && (
+              <button
+                onClick={() => downloadMobilesCsv(preview.not_found_mobiles, "bulk_bonus_not_found_mobiles.csv")}
+                className="k-btn k-btn-outline flex items-center gap-2 mt-3"
+                data-testid="bonus-download-notfound-btn">
+                <Download className="w-4 h-4" /> Download {fmtNum(preview.not_found)} not-found mobile(s) (CSV)
+              </button>
+            )}
+
             {preview.warning && (
               <div className="flex items-start gap-3 p-3 mt-4 rounded-lg border bg-amber-50 border-amber-200 text-amber-900" data-testid="bonus-dup-warning">
                 <AlertTriangle className="w-5 h-5 mt-0.5" />
@@ -261,6 +283,12 @@ export default function BulkBonusPage() {
               {result.audit_id && (
                 <button onClick={() => undo(result.audit_id)} disabled={busy} className="k-btn flex items-center gap-2 disabled:opacity-50" data-testid="bonus-undo-btn">
                   <Undo2 className="w-4 h-4" /> {busy ? "Undoing…" : "Undo this award"}
+                </button>
+              )}
+              {result.not_found > 0 && (result.not_found_mobiles || []).length > 0 && (
+                <button onClick={() => downloadMobilesCsv(result.not_found_mobiles, "bulk_bonus_not_found_mobiles.csv")}
+                  className="k-btn k-btn-outline flex items-center gap-2" data-testid="bonus-result-download-notfound-btn">
+                  <Download className="w-4 h-4" /> Download {fmtNum(result.not_found)} not-found (CSV)
                 </button>
               )}
               <button onClick={() => { resetRun(); setAttachment(null); setValue(""); }} className="k-btn" data-testid="bonus-done-btn">Award another batch</button>

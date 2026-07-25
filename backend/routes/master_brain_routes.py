@@ -31,7 +31,7 @@ from routes.ai_tools import TOOL_SCHEMAS, execute_tool, clear_stats_cache
 from routes.master_brain_tools import (
     MASTER_TOOL_SCHEMAS, MASTER_TOOL_HANDLERS, MASTER_READ_TOOL_SCHEMAS,
     _tool_undo_action, _tool_cancel_campaign, _tool_reverse_duplicate_bonus_credits,
-    _tool_backfill_ledger_mobiles,
+    _tool_backfill_ledger_mobiles, _DATA_HEALTH_DOC_ID,
 )
 from routes import mb_attachments as MBA
 
@@ -859,6 +859,30 @@ async def bulk_bonus_run(body: BulkBonusIn, user: dict = Depends(require_master_
     if res.get("error") and not res.get("blocked"):
         raise HTTPException(400, res.get("message") or res["error"])
     return res
+
+
+# ---- Data Health ("Quick Wins") — daily proactive scan, read instantly from cache ----
+@router.get("/data-health")
+async def data_health(user: dict = Depends(require_master_admin)):
+    """Return the latest persisted data-health scan (instant find_one — never runs the
+    heavy audits on this request). If it has never run, returns never_run=true."""
+    from database import db
+    doc = await db["dashboard_kv"].find_one({"_id": _DATA_HEALTH_DOC_ID}, {"_id": 0})
+    if not doc:
+        return {"checks": [], "issues": 0, "scanning": False, "updated_at": None, "never_run": True}
+    return doc
+
+
+@router.post("/data-health/refresh")
+async def data_health_refresh(user: dict = Depends(require_master_admin)):
+    """Kick off a fresh data-health scan in the BACKGROUND (never blocks). The panel polls
+    GET /data-health until scanning=false."""
+    from database import db
+    from routes.master_brain_tools import run_data_health_scan
+    await db["dashboard_kv"].update_one(
+        {"_id": _DATA_HEALTH_DOC_ID}, {"$set": {"scanning": True}}, upsert=True)
+    asyncio.create_task(run_data_health_scan(triggered_by=user.get("email") or "manual"))
+    return {"ok": True, "scanning": True}
 
 
 

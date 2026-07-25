@@ -780,6 +780,25 @@ async def startup():
     except Exception as e:
         logger.warning(f"Could not start amount_paid backfill: {e}")
 
+    # First-boot Data Health scan: on a FRESH deployment (no persisted scan yet) run the
+    # proactive audit once, deferred so it never competes with startup/backfill. Thereafter
+    # the daily 07:30 scheduler + the persisted doc keep it fresh (no rescan on restarts).
+    async def _first_boot_health_scan():
+        try:
+            await asyncio.sleep(180)
+            from database import db as _db
+            existing = await _db["dashboard_kv"].find_one({"_id": "data_health"}, {"_id": 1})
+            if existing:
+                return
+            from routes.master_brain_tools import run_data_health_scan
+            await run_data_health_scan(triggered_by="startup")
+        except Exception as e:
+            logger.warning(f"First-boot data-health scan failed: {e}")
+    try:
+        asyncio.create_task(_first_boot_health_scan())
+    except Exception as e:
+        logger.warning(f"Could not schedule first-boot data-health scan: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown():

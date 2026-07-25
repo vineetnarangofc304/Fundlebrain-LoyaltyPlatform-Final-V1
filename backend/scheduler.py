@@ -109,9 +109,22 @@ def start_scheduler():
                    coalesce=True,
                    misfire_grace_time=600)
 
+    # Data Health ("Quick Wins") — proactive daily scan of the loyalty-data audits,
+    # OFF the request path, persisted to dashboard_kv so the Master Brain panel reads
+    # it instantly. Runs at 07:30 IST (before the store day starts).
+    from routes.master_brain_tools import run_data_health_scan
+    sched.add_job(run_data_health_scan,
+                   CronTrigger(hour=7, minute=30, timezone="Asia/Kolkata"),
+                   id="data_health_daily",
+                   replace_existing=True,
+                   max_instances=1,
+                   coalesce=True,
+                   misfire_grace_time=3600,
+                   kwargs={"triggered_by": "daily_cron"})
+
     sched.start()
     _scheduler = sched
-    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST | RFM breakpoints refresh every 30m")
+    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST | RFM breakpoints refresh every 30m | data-health daily 07:30 IST")
     return sched
 
 
