@@ -21,7 +21,7 @@ from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
 from routes._dash_cache import dash_cache
-from routes._money import PAID_EXPR
+from routes._money import PAID_EXPR, GROSS_EXPR
 
 router = APIRouter(prefix="/dashboard", tags=["fundlebrain"], dependencies=[Depends(db_deadline)])
 
@@ -178,7 +178,7 @@ async def customer_360_v2(customer_id: str, user: dict = Depends(get_current_use
         {"$group": {
             "_id": None,
             "spend": {"$sum": PAID_EXPR},
-            "gross": {"$sum": "$gross_amount"},
+            "gross": {"$sum": GROSS_EXPR},
             "discount": {"$sum": "$discount_amount"},
             "visits": {"$sum": 1},
             "sale_visits": {"$sum": {"$cond": [{"$eq": ["$is_return", True]}, 0, 1]}},
@@ -394,7 +394,7 @@ async def customer_360_by_mobile(mobile: str, user: dict = Depends(get_current_u
         {"$group": {
             "_id": None,
             "spend": {"$sum": PAID_EXPR},
-            "gross": {"$sum": "$gross_amount"},
+            "gross": {"$sum": GROSS_EXPR},
             "discount": {"$sum": "$discount_amount"},
             "visits": {"$sum": 1},
             "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
@@ -596,7 +596,7 @@ async def store_performance_v2(
         {"$match": loyalty_match({"bill_date": {"$gte": start}, **scope_match})},
         {"$group": {"_id": {"s": "$store_id", "m": "$customer_mobile"},
                     "net": {"$sum": PAID_EXPR},
-                    "gross": {"$sum": "$gross_amount"},
+                    "gross": {"$sum": GROSS_EXPR},
                     "discount": {"$sum": "$discount_amount"},
                     "txns": {"$sum": 1},
                     "items": {"$sum": {"$size": {"$ifNull": ["$items", []]}}}}},

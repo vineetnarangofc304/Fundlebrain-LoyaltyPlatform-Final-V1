@@ -10,7 +10,7 @@ from database import transactions_col, audit_logs_col, customers_col, stores_col
 from auth import get_current_user
 
 from routes._db_timeout import db_deadline
-from routes._money import PAID_EXPR
+from routes._money import PAID_EXPR, GROSS_EXPR
 
 router = APIRouter(prefix="/reports", tags=["reports"], dependencies=[Depends(db_deadline)])
 digest_reports_col = db["digest_reports"]
@@ -150,7 +150,7 @@ async def run_custom_report(body: dict, user: dict = Depends(get_current_user)):
         if "sum_net" in metrics:
             group_stage["sum_net"] = {"$sum": PAID_EXPR}
         if "sum_gross" in metrics:
-            group_stage["sum_gross"] = {"$sum": "$gross_amount"}
+            group_stage["sum_gross"] = {"$sum": GROSS_EXPR}
         if "avg_net" in metrics:
             group_stage["avg_net"] = {"$avg": PAID_EXPR}
         if "unique_customers" in metrics:

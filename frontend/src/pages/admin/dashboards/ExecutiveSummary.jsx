@@ -104,7 +104,7 @@ export default function ExecutiveSummary() {
         <AIInsightStrip dashboardKey={`exec_summary_${period}d`} payload={aiPayload} title="Executive Intelligence Brief" />
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard label="Net Sales" value={fmtINR(k.net_sales)} delta={k.net_sales_delta_pct} hint={`vs prev ${period}d`} accent="burgundy" testid="es-kpi-net-sales" onClick={openTxn} />
+          <KPICard label="Total Paid" value={fmtINR(k.net_sales)} delta={k.net_sales_delta_pct} hint={`vs prev ${period}d`} accent="burgundy" testid="es-kpi-net-sales" onClick={openTxn} />
           <KPICard label="Transactions" value={fmtNum(k.transactions)} accent="indigo" testid="es-kpi-txns" onClick={openTxn} />
           <KPICard label="AOV" value={fmtINR(k.aov)} accent="teal" testid="es-kpi-aov" onClick={openTxn} />
           <KPICard label="Items Sold" value={fmtNum(k.items_sold)} accent="amber" testid="es-kpi-items" onClick={openTxn} />

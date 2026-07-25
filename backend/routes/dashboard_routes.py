@@ -11,7 +11,7 @@ from auth import get_current_user
 from routes._loyalty import loyalty_match, LOYALTY_TX_MATCH
 from routes._db_timeout import db_deadline
 from routes._dash_cache import dash_cache
-from routes._money import PAID_EXPR
+from routes._money import PAID_EXPR, GROSS_EXPR
 import logging
 
 logger = logging.getLogger("kazo-fundle")
@@ -153,7 +153,7 @@ async def kpis(
         {"$match": txn_filter},
         {"$group": {
             "_id": None,
-            "gross_sales": {"$sum": "$gross_amount"},
+            "gross_sales": {"$sum": GROSS_EXPR},
             "net_sales": {"$sum": PAID_EXPR},
             "discount": {"$sum": "$discount_amount"},
             "txn_count": {"$sum": 1},
@@ -609,7 +609,7 @@ async def command_center(
             "sales": [{"$group": {
                 "_id": None,
                 "net": {"$sum": PAID_EXPR},
-                "gross": {"$sum": "$gross_amount"},
+                "gross": {"$sum": GROSS_EXPR},
                 "discount": {"$sum": "$discount_amount"},
                 "txns": {"$sum": 1},
                 "units": {"$sum": units_expr},

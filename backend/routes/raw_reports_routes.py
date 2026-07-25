@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from auth import get_current_user
 from database import customers_col, transactions_col, stores_col, db
 from routes._loyalty import LOYALTY_TX_MATCH
-from routes._money import PAID_EXPR
+from routes._money import PAID_EXPR, GROSS_EXPR
 
 logger = logging.getLogger("kazo-fundle.raw_reports")
 
@@ -314,7 +314,7 @@ async def transaction_data(f: ReportFilter, user: dict = Depends(get_current_use
         {"$group": {
             "_id": {"key": field, "mobile": "$customer_mobile", "bill": "$bill_number"},
             "net":      {"$sum": PAID_EXPR},
-            "gross":    {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
+            "gross":    {"$sum": GROSS_EXPR},
             "discount": {"$sum": {"$ifNull": ["$discount_amount", 0]}},
             "earn":     {"$sum": "$points_earned"},
         }},

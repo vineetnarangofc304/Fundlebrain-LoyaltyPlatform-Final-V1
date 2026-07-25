@@ -119,7 +119,7 @@ export default function StoreDashboard() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <KPICard label="Stores reporting" value={fmtNum(data.leaderboard.length)} accent="slate" testid="sp-kpi-stores" />
           <KPICard label="Cities covered" value={fmtNum(data.by_city.length)} accent="teal" testid="sp-kpi-cities" />
-          <KPICard label="Total Net Sales" value={fmtINR(totalNet)} accent="burgundy" testid="sp-kpi-net" />
+          <KPICard label="Total Paid" value={fmtINR(totalNet)} accent="burgundy" testid="sp-kpi-net" />
           <KPICard label="Network AOV" value={fmtINR(avgAOV)} accent="indigo" testid="sp-kpi-aov" />
         </div>
 
@@ -215,7 +215,7 @@ function ByCity({ rows }) {
   return (
     <div className="grid lg:grid-cols-[3fr_2fr] gap-4" data-testid="sp-by-city">
       <div className="chart-card p-5">
-        <SectionHeading eyebrow="CITY MIX" title="Net sales by city" accent="indigo" />
+        <SectionHeading eyebrow="CITY MIX" title="Total paid by city" accent="indigo" />
         <ResponsiveContainer width="100%" height={420}>
           <BarChart data={rows} layout="vertical" margin={{ left: 40 }}>
             <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" />

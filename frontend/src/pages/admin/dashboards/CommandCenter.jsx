@@ -351,7 +351,7 @@ export default function CommandCenter() {
         {/* Hero KPIs */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <KPICard
-            label="Net Sales"
+            label="Total Paid"
             value={fmtINR(k.net_sales)}
             fullValue={fmtINRFull(k.net_sales)}
             delta={k.net_sales_delta_pct}
@@ -469,7 +469,7 @@ export default function CommandCenter() {
                 <span className="inline-block w-6 h-px" style={{ background: "#571326" }} />
                 <div>
                   <div className="text-[11px] uppercase tracking-[0.2em] text-neutral-500 mb-0.5">SALES TREND</div>
-                  <h3 className="font-display text-xl">Net revenue · {period}</h3>
+                  <h3 className="font-display text-xl">Total paid · {period}</h3>
                 </div>
               </div>
               <div className="flex items-center gap-3 text-[10px] uppercase tracking-widest text-neutral-500">

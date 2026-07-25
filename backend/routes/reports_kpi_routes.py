@@ -33,7 +33,7 @@ from auth import get_current_user
 from database import customers_col, transactions_col
 from routes._db_timeout import db_deadline
 from routes._dash_cache import cache_get, cache_get_stale, cache_set
-from routes._money import PAID_EXPR
+from routes._money import PAID_EXPR, NET_EXPR
 
 logger = logging.getLogger("kazo-fundle.kpi_reports")
 
@@ -98,7 +98,7 @@ def _store_group_stage() -> Dict[str, Any]:
             "city": {"$first": "$city"},
             "overall_sales": {"$sum": PAID_EXPR},
             "total_discount": {"$sum": "$discount_amount"},
-            "net_before_tax": {"$sum": "$net_amount_before_tax"},
+            "net_before_tax": {"$sum": NET_EXPR},
             "total_tax": {"$sum": "$tax_amount"},
             "fresh_bills": fresh_sum(1),
             "fresh_value": fresh_sum(PAID_EXPR),

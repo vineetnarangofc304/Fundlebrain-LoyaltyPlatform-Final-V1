@@ -12,7 +12,7 @@ from database import (
     loyalty_config_col,
 )
 from routes._loyalty import LOYALTY_TX_MATCH, loyalty_match
-from routes._money import PAID_EXPR
+from routes._money import PAID_EXPR, GROSS_EXPR
 
 import time as _time
 
@@ -217,7 +217,7 @@ async def _tool_get_overall_kpis(days: int = 30) -> Dict[str, Any]:
     sales = await transactions_col.aggregate([
         {"$match": loyalty_match({"bill_date": {"$gte": start}})},
         {"$group": {"_id": None, "net": {"$sum": PAID_EXPR},
-                    "txns": {"$sum": 1}, "gross": {"$sum": "$gross_amount"}}},
+                    "txns": {"$sum": 1}, "gross": {"$sum": GROSS_EXPR}}},
     ]).to_list(1)
     pts = await customers_col.aggregate([
         {"$match": {"mobile": {"$nin": [None, ""]}}},

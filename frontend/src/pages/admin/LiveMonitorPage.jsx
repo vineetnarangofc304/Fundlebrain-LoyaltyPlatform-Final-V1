@@ -370,7 +370,7 @@ export default function LiveMonitorPage() {
                   <th>Customer</th>
                   <th>Type</th>
                   <th>Mobile</th>
-                  <th className="text-right">Bill Amt</th>
+                  <th className="text-right">Total Paid</th>
                   <th className="text-right">Pts Base</th>
                   <th className="text-right">Tax</th>
                   <th className="text-right">Discount</th>
@@ -437,7 +437,7 @@ export default function LiveMonitorPage() {
                         <span className="text-rose-700">—</span>
                       )}
                     </td>
-                    <td className="text-right font-mono tabular-nums" data-testid={`lm-row-amount-${r.bill_number}`}>{fmtMoney2((r.bill_with_tax ?? r.net_amount ?? r.final_amount) || 0)}</td>
+                    <td className="text-right font-mono tabular-nums" data-testid={`lm-row-amount-${r.bill_number}`}>{fmtMoney2((r.amount_paid ?? r.bill_with_tax ?? r.net_amount ?? r.final_amount) || 0)}</td>
                     <td className="text-right font-mono tabular-nums text-emerald-700" data-testid={`lm-row-base-${r.bill_number}`}>{fmtMoney2((r.points_base ?? r.amount ?? r.net_amount) || 0)}</td>
                     <td className="text-right font-mono tabular-nums text-neutral-500">{fmtMoney2(r.tax_amount || 0)}</td>
                     <td className="text-right font-mono tabular-nums text-neutral-500">{fmtMoney2(r.discount_amount || 0)}</td>
@@ -558,13 +558,12 @@ function BillDrillModal({ row, onClose }) {
           <Field label="Mobile" value={row.customer_mobile || "—"} valueClass={row.has_mobile ? "text-emerald-700" : "text-rose-700 font-medium"} />
           <Field label="Tier" value={row.tier || "—"} />
           <Field label="Current Points" value={row.current_points?.toLocaleString() || "—"} />
-          <Field label="Gross" value={fmtMoney2(row.gross_amount || 0)} />
+          <Field label="Gross (pre-GST)" value={fmtMoney2(row.gross_amount || 0)} />
           <Field label="Points base (₹)" value={fmtMoney2((row.points_base ?? row.amount ?? row.net_amount) || 0)} valueClass="text-emerald-700 font-medium" />
           <Field label="Tax (GST)" value={fmtMoney2(row.tax_amount || 0)} />
-          <Field label="Bill w/ tax" value={fmtMoney2((row.bill_with_tax ?? row.net_amount) || 0)} />
+          <Field label="Total Paid (incl. GST)" value={fmtMoney2((row.amount_paid ?? row.bill_with_tax ?? row.net_amount) || 0)} valueClass="kazo-text-burgundy font-semibold" />
           <Field label="Discount" value={fmtMoney2(row.discount_amount || 0)} />
-          <Field label="Net" value={fmtMoney2(row.net_amount || 0)} />
-          <Field label="Final paid" value={fmtMoney2(row.final_amount || row.net_amount || 0)} />
+          <Field label="Net (post-disc, pre-GST)" value={fmtMoney2(row.net_amount || 0)} />
           <Field label="Points Earned" value={(row.points_earned || 0).toLocaleString()} valueClass="text-amber-700 font-medium" />
           <Field label="Points Redeemed" value={(row.points_redeemed || 0).toLocaleString()} valueClass="text-indigo-700 font-medium" />
           <Field label="Items" value={row.items_count} />

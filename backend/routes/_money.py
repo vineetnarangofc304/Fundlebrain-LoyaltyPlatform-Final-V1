@@ -62,3 +62,23 @@ PAID_COMPUTE: Dict[str, Any] = {
 
 # Report-time expression: prefer the denormalized field, else recompute on the fly.
 PAID_EXPR: Dict[str, Any] = {"$ifNull": ["$amount_paid", PAID_COMPUTE]}
+
+# ── The other three canonical money definitions (per client data dictionary) ──────
+# NET   = Bill amount AFTER discount, BEFORE GST  (== the loyalty Point Base).
+# GROSS = Bill amount BEFORE discount, BEFORE GST  (== NET + discount).
+# (TOTAL PAID = NET + GST, above. POINT BASE = NET, unchanged in the earn logic.)
+NET_EXPR: Dict[str, Any] = _NBT
+GROSS_EXPR: Dict[str, Any] = {"$add": [_NBT, {"$ifNull": ["$discount_amount", 0]}]}
+
+
+def net_amount_val(doc: Dict[str, Any]) -> float:
+    """Canonical NET (post-discount, pre-GST) for a bill doc."""
+    nbt = _f(doc.get("net_amount_before_tax"))
+    if nbt is None or nbt <= 0:
+        nbt = _f(doc.get("net_amount")) or 0.0
+    return round(nbt, 2)
+
+
+def gross_amount_val(doc: Dict[str, Any]) -> float:
+    """Canonical GROSS (pre-discount, pre-GST) = NET + discount."""
+    return round(net_amount_val(doc) + (_f(doc.get("discount_amount")) or 0.0), 2)

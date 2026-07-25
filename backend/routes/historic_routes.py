@@ -35,7 +35,7 @@ from database import (
 from auth import get_current_user, require_roles, MANAGEMENT_ROLES
 
 from routes._db_timeout import db_deadline
-from routes._money import paid_amount
+from routes._money import paid_amount, PAID_EXPR
 
 router = APIRouter(prefix="/historic-data", tags=["historic-data"], dependencies=[Depends(db_deadline)])
 logger = logging.getLogger("kazo-fundle.historic")
@@ -1436,7 +1436,7 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
             "unique_bills": {"$addToSet": {"store": "$store_id",
                                             "bill": "$bill_number",
                                             "date": "$bill_date"}},
-            "total_spend": {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
+            "total_spend": {"$sum": PAID_EXPR},
         }},
     ]
     await _beat(job_id)
@@ -2628,7 +2628,7 @@ async def backfill_loyalty_model(
             "unique_bills": {"$addToSet": {"store": "$store_id",
                                             "bill": "$bill_number",
                                             "date": "$bill_date"}},
-            "total_spend": {"$sum": {"$ifNull": ["$gross_amount", "$net_amount"]}},
+            "total_spend": {"$sum": PAID_EXPR},
             "txn_count": {"$sum": 1},
         }},
     ]

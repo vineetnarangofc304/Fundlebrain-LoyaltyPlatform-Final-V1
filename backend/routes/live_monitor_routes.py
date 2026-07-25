@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from database import transactions_col, customers_col, stores_col
 from auth import require_roles
-from routes._money import PAID_EXPR, paid_amount
+from routes._money import PAID_EXPR, paid_amount, net_amount_val, gross_amount_val
 
 router = APIRouter(prefix="/live-monitor", tags=["live-monitor"])
 
@@ -192,8 +192,9 @@ async def live_transactions(
             "tier": (c.get("tier") if c else None) or r.get("tier"),
             "current_points": (c.get("points_balance") if c else None),
             "customer_status": customer_status,
-            "gross_amount": r.get("gross_amount"),
-            "net_amount": r.get("net_amount"),
+            "gross_amount": gross_amount_val(r),
+            "net_amount": net_amount_val(r),
+            "amount_paid": paid_amount(r),
             "final_amount": r.get("final_amount"),
             "amount": r.get("amount"),
             "points_base": r.get("loyalty_gross_amount", r.get("amount")),
@@ -219,8 +220,9 @@ _EXPORT_COLS = [
     ("Store Name", "store_name"), ("Store Code", "store_code"), ("City", "city"), ("Zone", "zone"),
     ("Customer Mobile", "customer_mobile"), ("Customer Name", "customer_name"), ("Tier", "tier"),
     ("Customer Status", "customer_status"), ("Bill Type", "bill_type"),
-    ("Net Before Tax", "net_before_tax"), ("Tax", "tax"), ("Discount", "discount"),
-    ("Total Paid", "total_paid"), ("Points Earned", "points_earned"),
+    ("Gross (pre-discount, pre-GST)", "gross"),
+    ("Net (post-discount, pre-GST)", "net_before_tax"), ("Tax (GST)", "tax"), ("Discount", "discount"),
+    ("Total Paid (incl. GST)", "total_paid"), ("Points Earned", "points_earned"),
     ("Points Redeemed", "points_redeemed"), ("Payment Mode", "payment_mode"), ("Source", "source"),
 ]
 _EXPORT_MAX = 100_000
@@ -294,6 +296,7 @@ async def live_export(
                     "customer_status": "walk_in" if not r.get("customer_mobile") else (
                         "new" if (c.get("visit_count") or 0) <= 1 else "repeat"),
                     "bill_type": "Return" if r.get("is_return") else "Regular",
+                    "gross": round(nbt + float(r.get("discount_amount") or 0), 2),
                     "net_before_tax": round(nbt, 2), "tax": round(tax, 2),
                     "discount": round(float(r.get("discount_amount") or 0), 2),
                     "total_paid": paid_amount(r),

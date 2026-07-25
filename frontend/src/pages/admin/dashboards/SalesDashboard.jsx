@@ -72,7 +72,7 @@ export default function SalesDashboard() {
         </div>
 
         <div className="chart-card p-5" data-accent="burgundy">
-          <SectionHeading eyebrow="REVENUE TREND" title={`Daily net revenue · ${range.label || (range.period_days === 0 ? "all time" : `last ${range.period_days} days`)}`} accent="burgundy" />
+          <SectionHeading eyebrow="REVENUE TREND" title={`Daily total paid · ${range.label || (range.period_days === 0 ? "all time" : `last ${range.period_days} days`)}`} accent="burgundy" />
           <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={trend}>
               <defs>
