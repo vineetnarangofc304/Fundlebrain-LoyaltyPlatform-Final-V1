@@ -1,6 +1,7 @@
 """MongoDB connection singleton."""
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReadPreference
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -9,12 +10,29 @@ load_dotenv(Path(__file__).parent / ".env")
 _mongo_url = os.environ["MONGO_URL"]
 _db_name = os.environ["DB_NAME"]
 
+# readPreference=primaryPreferred is CRITICAL for availability on the shared Atlas
+# cluster: it repeatedly loses its PRIMARY for short windows (elections / node
+# maintenance → topology ReplicaSetNoPrimary). With the default PRIMARY preference,
+# every read during that window waits the full ~30s serverSelection timeout and then
+# 500s with `ServerSelectionTimeoutError: No replica set members match "Primary()"`
+# — which is exactly what surfaces on the POS as "Loyalty is not Active". With
+# primaryPreferred, reads transparently fall back to a healthy SECONDARY when there
+# is no primary (so posCustomerCheck / dashboards keep working). This can NEVER cause
+# a read-after-write inconsistency: when a primary IS up, primaryPreferred always
+# reads from it; only when there is NO primary do reads use a secondary, and in that
+# state writes cannot commit anyway. retryReads/retryWrites ride out a single blip.
+_COMMON_KW = dict(
+    read_preference=ReadPreference.PRIMARY_PREFERRED,
+    retryReads=True,
+    retryWrites=True,
+)
+
 # Main request pool. Explicit sizing so a live POS bill / dashboard read always
 # has warm sockets available. Best-effort api_logs WRITES run on a separate tiny
 # pool (see db_logging.py) so background logging can never starve this pool —
 # that starvation is what caused the production `NetworkTimeout: read operation
 # timed out` 500s on posAddPoint.
-client = AsyncIOMotorClient(_mongo_url, maxPoolSize=100, minPoolSize=10)
+client = AsyncIOMotorClient(_mongo_url, maxPoolSize=100, minPoolSize=10, **_COMMON_KW)
 db = client[_db_name]
 
 # ── Dedicated POS / loyalty critical-path pool ─────────────────────────────────
@@ -27,7 +45,7 @@ db = client[_db_name]
 # Give the POS its OWN client (same Atlas DB, separate sockets) so analytics load
 # on `client` can never block a live bill. Same isolation pattern already used for
 # api_logs writes (_log_client) and background rollups (_long_client).
-_pos_client = AsyncIOMotorClient(_mongo_url, maxPoolSize=30, minPoolSize=5)
+_pos_client = AsyncIOMotorClient(_mongo_url, maxPoolSize=30, minPoolSize=5, **_COMMON_KW)
 pos_db = _pos_client[_db_name]
 
 pos_customers_col = pos_db["customers"]
