@@ -22,8 +22,12 @@ import typing
 from typing import Any, Optional
 
 _STORE: dict = {}
-DEFAULT_TTL = 300   # seconds — "fresh" window
-STALE_TTL = 3600    # seconds — serve-stale-while-revalidate window
+# Fresh window. Raised to 30 min so a cached view stays served between warm
+# passes (and without a warmer at all — it's now opt-in). Freshness beyond this
+# is handled by the stale-while-revalidate layer below, which serves the last
+# value instantly and refreshes in the background.
+DEFAULT_TTL = 1800   # seconds — "fresh" window
+STALE_TTL = 7200     # seconds — serve-stale-while-revalidate window
 _REFRESHING: set = set()   # keys with an in-flight background refresh
 
 
