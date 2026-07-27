@@ -32,6 +32,14 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### 🔴 FIXED — Bill money not aligned to locked definitions (negative Net) (Jul 27, 2026)
+On the Bill Detail modal (Live Monitor), NET showed a **nonsensical negative** value (e.g. −₹517.48) that contradicted Point Base (₹5,176.38) and Total Paid (₹5,435.24), because NET was read from a raw/corrupt stored `net_amount` (which some eWards payloads set to `gross − garbage_discount`). User confirmed (option A) the discount was genuine, so the true Gross should be ₹10,611.38.
+- **Locked definitions:** GROSS = before discount, before GST · NET = after discount, before GST · POINT BASE = NET · TOTAL PAID = after discount, incl GST (= NET + GST).
+- **Fix (`routes/_money.py`, DISPLAY/REPORTS only — points-earning untouched):** NET is now DERIVED as **NET = Total Paid − GST** (`NET_EXPR = PAID_EXPR − tax`; `net_amount_val = paid_amount − tax`) so it can never contradict Total Paid or Point Base; **GROSS = NET + discount**. `PAID_EXPR` (sacrosanct revenue) is unchanged. Safe across all bill types — normal (`bill_with_tax − tax = pre-tax net`), historic (reduces to old `_NBT`), returns (`amount_paid=return_net`, tax=0 → NET=return_net). Verified: reported bill → NET ₹5,176.38, GROSS ₹10,611.38, PAID ₹5,435.24 (all aligned).
+- **Verified:** `testing_agent` iteration_100 → **100% (5/5)**. Identities hold across 50 live-monitor rows (incl. 5 discounted + 6 returns); modal shows no negative Net; dashboard/KPI/report endpoints 200; Total Paid unchanged. Regression suite: `/app/backend/tests/iteration100_money_identities_test.py`. ⚠️ **Redeploy required** for production.
+- Optional future hardening (from review): clamp NET to `max(NET,0)` for non-return docs so a corrupt `tax > paid` can't reintroduce a negative NET in aggregates.
+
+
 ### 🔴 FIXED — Master Brain "The response ended early" on multi-customer summaries (Jul 27, 2026)
 Master Brain chat repeatedly showed **"The response ended early. Your data is safe — tell me to continue…"** when a user pasted ~6 mobiles and asked "Need Earn Burn summary of above customers" (and every "continue" repeated it).
 - **Root cause:** the LLM issued 6 serial per-customer tool calls (`customer_lookup`/`customer_search`) + aggregations = 8-15 tool round-trips. The turn exceeded the K8s ingress ~60s streaming cap, so the SSE connection was cut BEFORE the terminal `done` event — and the frontend stream reader (which sets `finalized=true` only on `done`/`error`) fell through to its "response ended early" fallback.
