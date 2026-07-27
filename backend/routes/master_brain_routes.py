@@ -66,6 +66,13 @@ MB_STREAM_DB_DEADLINE = 90
 # own pymongo.timeout and the deterministic-confirm path) so a large updateMany completes in ONE
 # call instead of being capped at the read deadline, half-applied, and fabricated as "batches".
 MB_STREAM_MUTATION_DB_DEADLINE = 600
+# Soft wall-clock budget for the STREAMING tool-gathering loop. The K8s ingress cuts the
+# response at ~60s; if a turn keeps calling tools past this, we STOP gathering and synthesise
+# a final answer NOW (leaving ~15s headroom for that synthesis) so the SSE stream ALWAYS ends
+# with a real `done` event instead of the connection being cut mid-turn (which the UI shows as
+# "The response ended early"). Checked BETWEEN iterations, so an in-flight tool/mutation write
+# is never interrupted.
+MB_STREAM_WALL_BUDGET = 40
 # Analysis/read questions get the Fundle read tools PLUS the read-only Master audits (e.g.
 # the fast duplicate-redemption audit). The full action set is added only on write intent.
 READ_TOOL_SCHEMAS = TOOL_SCHEMAS + MASTER_READ_TOOL_SCHEMAS
@@ -89,6 +96,7 @@ CRITICAL — READ vs WRITE separation (this is what keeps you fast and reliable)
 - When the user is ASKING A QUESTION / requesting analysis, a count, a list, a report, or "where do I see X" (e.g. "how many customers have a negative balance and why?"), answer it using ONLY the READ tools (run_aggregation, customer_search, get_data_dictionary, export_csv, …). Do NOT call ANY action/repair tool (fix_negative_balances, fix_double_redemptions, retier_customers, grant/adjust, send_campaign, …) — not even in "preview" — merely to answer a question. Using a repair tool to "check" data is WRONG and slow.
 - BUT when the user EXPLICITLY asks you to DO an action (e.g. "fix the double redemptions for 60000…", "re-tier the zero-spend customers", "grant 100 points to …", "send an SMS to Gold"), you MUST immediately CALL the matching action tool with confirm=false to PREVIEW it. The action tool gathers its OWN data — do NOT say "I don't have the scan result" or ask the user to generate data first; just call the tool. After it returns, show the preview table + count and ask for confirmation + a reason.
 - For analysis answers, recommend follow-up actions in PROSE plus the suggested-actions block (the user clicks Execute to run them under the preview→confirm→reason flow).
+- ⚡ BATCH multi-entity reads into ONE query — NEVER loop a per-item read tool. When the user gives a LIST of mobiles/customers/stores (e.g. several mobile numbers pasted together) or asks for a summary "of the above customers", you MUST NOT call a per-customer tool (`customer_lookup`, `customer_search`, …) once per mobile. Make a SINGLE `run_aggregation` with `$match: {mobile: {$in: [ ...all the mobiles... ]}}` on `customers` (or `customer_mobile` with `$in` on `transactions` / `points_ledger` for an earn-vs-burn summary) that returns EVERY row in one call, then present them all as one table. One aggregation for N customers — never N separate lookups/searches (N serial round-trips are slow and time out on large data, so the response gets cut off). Only fall back to a single broadened `customer_search` if the batched `$in` genuinely returns nothing.
 
 ON TOP of reads, you have an ACTION layer that WRITES to the live database:
 - grant_bonus_points / adjust_points — award or add/deduct points for one customer
@@ -1278,9 +1286,22 @@ async def _persist_turn(session_id, user, existing, stored_user_text, att_chips,
 
 
 async def _run_stream_loop(messages, model, provider, user, tools, emit, trace) -> str:
-    """Like _run_tool_loop but emits live events and has NO hard wall-clock cap (the SSE
-    heartbeats keep the connection alive, so heavy execution can take the time it needs)."""
+    """Like _run_tool_loop but emits live events. It has a SOFT wall-clock budget
+    (MB_STREAM_WALL_BUDGET): once we've gathered some data and spent the budget, we stop
+    looping and synthesise a final answer so the SSE stream ALWAYS ends with a real `done`
+    (never a cut connection → "response ended early"). The budget is checked BETWEEN
+    iterations so an in-flight tool call / mutation write is never interrupted."""
+    start = time.monotonic()
     for _ in range(MAX_TOOL_ITERATIONS):
+        # Wall-clock guard — synthesise NOW if we've spent the budget gathering data.
+        if trace and (time.monotonic() - start) > MB_STREAM_WALL_BUDGET:
+            await emit({"type": "status", "text": "Composing the summary…"})
+            try:
+                return await _final_synthesis("", _last_user_q(messages), trace, model, provider)
+            except Exception:  # noqa: BLE001
+                return ("I pulled the data for several of these, but it's a large request. Ask me to "
+                        "continue, or send fewer mobiles at a time (or a single store / date range) "
+                        "and I'll finish the full summary.")
         await emit({"type": "status", "text": "Analysing…"})
         params = _build_completion_params(messages, model, provider, tools=tools)
         try:
