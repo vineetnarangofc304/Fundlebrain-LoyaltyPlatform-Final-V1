@@ -1,0 +1,22 @@
+{
+  "summary": "Verified NET/GROSS money-identity fix (routes/_money.py). Backend: created iteration100_money_identities_test.py — 5/5 tests pass. GET /api/live-monitor/transactions?limit=50 returned 50 rows; for EVERY row net_amount == round(amount_paid - (tax_amount or 0), 2) and gross_amount == round(net + (discount or 0), 2). 5 rows had discount>0 (GROSS >= NET verified). 6 return rows preserved (negative amounts still consistent). 30 rows verified NET == points_base (rest were returns/zero). Dashboard KPIs (/api/dashboard/kpis), /api/dashboard/sales-trend, /api/kpi-reports/store-wise-kpi all return 200. Total Paid math untouched (PAID_EXPR unchanged). Frontend: logged in as super_admin, opened /admin/live-monitor, filtered Source=Historical + Last 365d, clicked bill RPRO-B3 — Bill Detail modal shows Gross ₹500, Points base ₹500, Tax ₹0, Total Paid ₹500, Discount ₹0, Net ₹500 — all internally consistent, NO negative Net. Screenshot captured.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration100_money_identities_test.py",
+    "/app/test_reports/pytest/iteration100.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routes/_money.py: NET_EXPR is derived from PAID_EXPR minus tax; this correctly protects against corrupted raw net_amount rows. Clean, minimal change. Returns still work because paid_amount for returns == return_net and tax==0.",
+    "For future robustness, consider clamping NET_EXPR to max(NET, 0) at the report-aggregation level for non-return docs (is_return != true) so a corrupt tax > paid_amount cannot re-introduce a negative NET in aggregates."
+  ],
+  "updated_files": ["/app/backend/tests/iteration100_money_identities_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "None — used existing preview/historical bills.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iteration100_money_identities_test.py is a good regression suite for the money definitions. It reads BASE_URL from /app/frontend/.env if REACT_APP_BACKEND_URL is not in env. It asserts identity NET = paid - tax, GROSS = NET + discount, and gross_sum >= net_sum in store-wise-kpi. UI verified via Live Monitor modal on Historical rows (Today window is often empty in preview).",
+  "test_credentials": "superadmin@fundle.io / Fundle@2026",
+  "rca of the issue": "Previously live_monitor_routes computed net_amount/gross_amount from the raw stored net_amount field which for some (corrupt/legacy) POS payloads was negative, producing a Net of -517.48 alongside a positive Points Base of 5176.38. Fix in routes/_money.py derives NET from the sacrosanct Total Paid (PAID_EXPR) minus tax, so NET is now guaranteed consistent with Total Paid and Points Base. Verified across 50 live-monitor rows including discount>0 and return rows."
+}

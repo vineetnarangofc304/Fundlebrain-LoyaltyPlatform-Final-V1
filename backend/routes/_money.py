@@ -63,20 +63,29 @@ PAID_COMPUTE: Dict[str, Any] = {
 # Report-time expression: prefer the denormalized field, else recompute on the fly.
 PAID_EXPR: Dict[str, Any] = {"$ifNull": ["$amount_paid", PAID_COMPUTE]}
 
+# GST/tax portion of the bill (denormalized tax_amount, else legacy tax_gst, else 0).
+_TAX: Dict[str, Any] = {"$ifNull": ["$tax_amount", {"$ifNull": ["$tax_gst", 0]}]}
+
 # ── The other three canonical money definitions (per client data dictionary) ──────
-# NET   = Bill amount AFTER discount, BEFORE GST  (== the loyalty Point Base).
-# GROSS = Bill amount BEFORE discount, BEFORE GST  (== NET + discount).
+# NET   = Bill amount AFTER discount, BEFORE GST  =  TOTAL PAID − GST   (== the loyalty
+#         Point Base). We DERIVE it from the paid figure (not the raw net_amount) so NET
+#         can NEVER contradict Total Paid or Point Base — even when a POS feed sent a bad
+#         raw net_amount / discount (which produced nonsensical negative NETs before).
+#         • normal bill  : bill_with_tax − tax        = pre-tax net (= Point Base)
+#         • historic bill: (net_amt+tax) − tax        = net_amt      (unchanged)
+#         • return       : amount_paid(=return_net) − 0 = return_net  (returns carry no tax)
+# GROSS = Bill amount BEFORE discount, BEFORE GST  =  NET + discount.
 # (TOTAL PAID = NET + GST, above. POINT BASE = NET, unchanged in the earn logic.)
-NET_EXPR: Dict[str, Any] = _NBT
-GROSS_EXPR: Dict[str, Any] = {"$add": [_NBT, {"$ifNull": ["$discount_amount", 0]}]}
+NET_EXPR: Dict[str, Any] = {"$subtract": [PAID_EXPR, _TAX]}
+GROSS_EXPR: Dict[str, Any] = {"$add": [NET_EXPR, {"$ifNull": ["$discount_amount", 0]}]}
 
 
 def net_amount_val(doc: Dict[str, Any]) -> float:
-    """Canonical NET (post-discount, pre-GST) for a bill doc."""
-    nbt = _f(doc.get("net_amount_before_tax"))
-    if nbt is None or nbt <= 0:
-        nbt = _f(doc.get("net_amount")) or 0.0
-    return round(nbt, 2)
+    """Canonical NET (post-discount, pre-GST) = Total Paid − GST  (== the Point Base)."""
+    tax = _f(doc.get("tax_amount"))
+    if tax is None:
+        tax = _f(doc.get("tax_gst")) or 0.0
+    return round(paid_amount(doc) - tax, 2)
 
 
 def gross_amount_val(doc: Dict[str, Any]) -> float:
