@@ -26,6 +26,7 @@ import time
 import logging
 
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReadPreference
 
 from database import db
 
@@ -42,6 +43,8 @@ rollups_col = db["dashboard_rollups"]
 try:
     _long_client = AsyncIOMotorClient(
         os.environ["MONGO_URL"], timeoutMS=None, maxPoolSize=4, minPoolSize=0,
+        read_preference=ReadPreference.PRIMARY_PREFERRED,
+        retryReads=True, retryWrites=True,
     )
     _long_db = _long_client[os.environ["DB_NAME"]]
 except Exception as e:  # pragma: no cover - defensive; never block startup

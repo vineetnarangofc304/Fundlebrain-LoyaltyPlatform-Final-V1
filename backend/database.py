@@ -25,6 +25,7 @@ _COMMON_KW = dict(
     read_preference=ReadPreference.PRIMARY_PREFERRED,
     retryReads=True,
     retryWrites=True,
+    serverSelectionTimeoutMS=10000,
 )
 
 # Main request pool. Explicit sizing so a live POS bill / dashboard read always

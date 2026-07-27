@@ -25,6 +25,7 @@ import os
 import asyncio
 import logging
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReadPreference
 
 logger = logging.getLogger("kazo-fundle.db-logging")
 
@@ -38,6 +39,9 @@ _log_client = AsyncIOMotorClient(
     maxPoolSize=8,
     minPoolSize=0,
     serverSelectionTimeoutMS=5000,
+    read_preference=ReadPreference.PRIMARY_PREFERRED,
+    retryReads=True,
+    retryWrites=True,
 )
 _log_col = _log_client[_DB_NAME]["api_logs"]
 
