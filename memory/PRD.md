@@ -32,6 +32,10 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### 🧩 Replication prompt for new brand "POPPAT JAMAL" delivered (Jun 2026)
+Created `/app/memory/PROMPT_POPPAT_JAMAL.md` — a full copy-paste Emergent build prompt to clone this entire platform for **Poppat Jamal & Sons** (heritage home/kitchen/crockery/dinnerware/gifting retailer, est. 1901 George Town/Chennai; domain `poppatjamals.com`). Follows the exact proven template used for City Metro & Doodles Cinema (GitHub import → POS-configurable/deferred → strip Emergent branding → full feature clone in 10 phases). Per user: bonuses/tiers/category-multipliers stay 100% config-driven in the Loyalty Rules editor (nothing hardcoded); POS to be provided later (kept as "ASK me before Phase 3"); logo + homepage visuals to be pulled from poppatjamals.com; category examples mapped to their real catalog (Cookware, Bakeware, Dinnerware, Glassware, Kitchenware, Casserole, Storage, Lunch box & Tiffins, Barbeque, Appliances, Gifting). Prompt also bakes in all prod-hardening lessons (Mongo primaryPreferred + dedicated POS pool + maxTimeMS + non-blocking startup, canonical Total Paid money defs §5b, SSE Master Brain wall-clock budget, crash-safe posAddPoint, store-login lockdown, Points Integrity Center).
+
+
 ### 🔴 FIXED — Bill money not aligned to locked definitions (negative Net) (Jul 27, 2026)
 On the Bill Detail modal (Live Monitor), NET showed a **nonsensical negative** value (e.g. −₹517.48) that contradicted Point Base (₹5,176.38) and Total Paid (₹5,435.24), because NET was read from a raw/corrupt stored `net_amount` (which some eWards payloads set to `gross − garbage_discount`). User confirmed (option A) the discount was genuine, so the true Gross should be ₹10,611.38.
 - **Locked definitions:** GROSS = before discount, before GST · NET = after discount, before GST · POINT BASE = NET · TOTAL PAID = after discount, incl GST (= NET + GST).
