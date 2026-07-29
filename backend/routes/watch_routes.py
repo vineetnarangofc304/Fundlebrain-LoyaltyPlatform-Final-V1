@@ -10,6 +10,7 @@ import hashlib
 import logging
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 from database import db
@@ -19,6 +20,8 @@ load_dotenv()
 logger = logging.getLogger("kazo-fundle.watch")
 router = APIRouter(prefix="/watch", tags=["watch"])
 _tts_cache = db["demo_tts_cache"]
+
+FILM_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "generated", "fundle_film.mp4")
 
 TTS_MODEL = "tts-1-hd"   # HD quality — generated once, then cached, so quality over speed
 TTS_VOICE = "onyx"       # deep, authoritative — reads as a confident brand narrator
@@ -59,6 +62,14 @@ WATCH_NARRATION = {
 async def watch_script():
     """Ordered narration lines (captions come from the same text that voices the audio)."""
     return {"voice": TTS_VOICE, "model": TTS_MODEL, "narration": WATCH_NARRATION}
+
+
+@router.get("/film.mp4")
+async def watch_film():
+    """Serve the pre-rendered narrated product film (mp4) as a download, if generated."""
+    if not os.path.exists(FILM_PATH):
+        raise HTTPException(404, "Film not generated yet")
+    return FileResponse(FILM_PATH, media_type="video/mp4", filename="fundle_film.mp4")
 
 
 @router.get("/tts/{scene_id}")

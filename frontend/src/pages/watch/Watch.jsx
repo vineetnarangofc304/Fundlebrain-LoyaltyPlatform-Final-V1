@@ -340,6 +340,7 @@ function CaptionBand({ text }) {
 /* ── main player ────────────────────────────────────────── */
 export default function Watch() {
   const navigate = useNavigate();
+  const REC = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("rec") === "1";
   const [phase, setPhase] = useState("cover");   // cover | loading | playing | done
   const [idx, setIdx] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -383,7 +384,8 @@ export default function Watch() {
     if (nxt) { try { fetch(`${API}/api/watch/tts/${nxt.id}`).catch(() => {}); } catch (e) { /* noop */ } }
 
     const a = audioRef.current;
-    const estDur = estimateDur(narrationRef.current[scene.id]);
+    const forcedDur = (REC && typeof window !== "undefined" && Array.isArray(window.__REC_DUR__)) ? window.__REC_DUR__[idx] : null;
+    const estDur = forcedDur != null ? forcedDur : estimateDur(narrationRef.current[scene.id]);
     let usingFallback = false;
     let raf; let last = 0; let acc = 0;
 
@@ -408,7 +410,7 @@ export default function Watch() {
     const cleanupAudio = () => { if (a) { a.removeEventListener("timeupdate", onTime); a.removeEventListener("ended", onEnd); a.removeEventListener("error", onErr); } };
     function onErr() { if (!usingFallback) { cleanupAudio(); runFallback(); } }
 
-    if (a) {
+    if (a && !REC) {
       a.pause();
       a.muted = muted;
       a.src = `${API}/api/watch/tts/${scene.id}`;
@@ -438,6 +440,18 @@ export default function Watch() {
 
   const gotoScene = (i) => { setPaused(false); setNonce((n) => n + 1); setIdx(i); setPhase("playing"); };
   const restart = () => gotoScene(0);
+
+  // Recording harness (only when ?rec=1): expose start + a done flag so an offline
+  // renderer can drive the reel deterministically. No effect for normal visitors.
+  useEffect(() => {
+    if (!REC || typeof window === "undefined") return;
+    window.__REC__ = true;
+    window.__REC_START__ = () => { setMuted(true); start(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [REC]);
+  useEffect(() => {
+    if (REC && typeof window !== "undefined" && phase === "done") window.__REC_DONE__ = true;
+  }, [REC, phase]);
 
   const togglePause = () => {
     setPaused((p) => {
@@ -488,7 +502,7 @@ export default function Watch() {
       <audio ref={audioRef} preload="auto" />
 
       <div className="absolute top-6 right-6 z-50">
-        <button onClick={share} className="text-[#94A3B8] hover:text-white flex items-center gap-1.5 text-sm" data-testid="watch-share"><Share2 className="w-4 h-4" /> Share</button>
+        {!REC && <button onClick={share} className="text-[#94A3B8] hover:text-white flex items-center gap-1.5 text-sm" data-testid="watch-share"><Share2 className="w-4 h-4" /> Share</button>}
       </div>
 
       <div className="relative z-10 min-h-screen flex items-center justify-center px-4">
@@ -502,7 +516,7 @@ export default function Watch() {
       </div>
 
       {scene.kind === "chat" && <CaptionBand text={capText} />}
-      {phase === "playing" && (
+      {phase === "playing" && !REC && (
         <PlayerChrome idx={idx} total={SCENES.length} sceneProgress={progress} paused={paused} muted={muted}
           onToggle={togglePause} onMute={() => setMuted((m) => !m)} onRestart={restart} onSeek={onSeek} />
       )}
