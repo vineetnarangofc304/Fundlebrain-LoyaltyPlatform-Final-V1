@@ -7,7 +7,7 @@ import { requestExport } from "@/lib/exportClient";
 import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "./_shared";
 import { ColumnPicker, ReportTable, useColumns, GrowthCell } from "./reportkit";
 import { fmtINR, fmtMoney2, fmtNum } from "@/lib/format";
-import { Download, Search, RefreshCw } from "lucide-react";
+import { Download, Search, RefreshCw, CheckCircle2, AlertTriangle } from "lucide-react";
 
 import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Cell, Legend } from "recharts";
 
@@ -48,6 +48,24 @@ const COMPARE_COLS = [
   { key: "prev_customers", label: "Cust (PY)", num: true },
   { key: "growth_customers", label: "Cust Growth", render: GrowthCell },
 ];
+
+const ReconLine = ({ label, parts, total }) => {
+  const sum = parts.reduce((a, [, v]) => a + (Number(v) || 0), 0);
+  const ok = sum === (Number(total) || 0);
+  return (
+    <span className="inline-flex items-center gap-1.5" data-testid={`skpi-recon-${label.replace(/\s+/g, "-").toLowerCase()}`}>
+      {ok ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> : <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />}
+      <span className="text-neutral-600">
+        <span className="font-medium">{label}</span>{" "}
+        {parts.map(([n, v], i) => (
+          <span key={n}>{i > 0 ? " + " : ""}{n} <b>{fmtNum(v)}</b></span>
+        ))}{" = "}
+        <b className={ok ? "text-emerald-700" : "text-amber-700"}>{fmtNum(total)}</b>
+        {!ok && <span className="text-amber-700"> (Σ {fmtNum(sum)})</span>}
+      </span>
+    </span>
+  );
+};
 
 export default function StoreKPIReport() {
   const [params, setParams] = useState({
@@ -178,6 +196,17 @@ export default function StoreKPIReport() {
           <KPICard label="Return Bills" value={fmtNum(t.return_bills)} accent="rose" testid="skpi-kpi-rbills" />
           <KPICard label="Customers" value={fmtNum(t.overall_customers)} accent="teal" testid="skpi-kpi-cust" />
           <KPICard label="New Customers" value={fmtNum(t.new_customer_count)} accent="emerald" testid="skpi-kpi-new" />
+        </div>
+
+        {/* Reconciliation — the sub-totals add up exactly to the headline counts */}
+        <div className="chart-card p-4" data-testid="skpi-recon">
+          <div className="flex flex-wrap items-center gap-x-10 gap-y-2 text-sm">
+            <span className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">Reconciliation</span>
+            <ReconLine label="Fresh Bills" total={t.fresh_bills}
+              parts={[["New", t.new_txn], ["Repeat", t.repeat_txn], ["Unmapped", t.unmapped_txn]]} />
+            <ReconLine label="Customers" total={t.overall_customers}
+              parts={[["New", t.new_customer_count], ["Existing", t.existing_customers]]} />
+          </div>
         </div>
 
         {/* Charts */}

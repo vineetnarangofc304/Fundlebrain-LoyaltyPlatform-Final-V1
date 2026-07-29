@@ -109,6 +109,23 @@ def _store_matrix_group() -> Dict[str, Any]:
 
 
 def _finalize_matrix_row(g: Dict[str, Any]) -> Dict[str, Any]:
+    # Reconcile New/Repeat against Mapped so no mapped bill is silently dropped
+    # (New = Mapped − Repeat) and force the customer partition New + Existing == Overall.
+    mfresh = int(g.get("mapped_fresh_txn", 0) or 0)
+    mret = int(g.get("mapped_return_txn", 0) or 0)
+    rfresh = min(int(g.get("repeat_fresh_txn", 0) or 0), mfresh)
+    rret = min(int(g.get("repeat_return_txn", 0) or 0), mret)
+    nfresh = mfresh - rfresh
+    nret = mret - rret
+    mfresh_v = _r2(g.get("mapped_fresh_value"))
+    mret_v = _r2(g.get("mapped_return_value"))
+    rfresh_v = _r2(g.get("repeat_fresh_value"))
+    rret_v = _r2(g.get("repeat_return_value"))
+    nfresh_v = round(mfresh_v - rfresh_v, 2)
+    nret_v = round(mret_v - rret_v, 2)
+    overall_cust = len(g.get("customers", []) or [])
+    new_cust = min(len(g.get("new_customers", []) or []), overall_cust)
+    existing_cust = overall_cust - new_cust
     return {
         "store_id": g.get("_id") or "",
         "store_code": g.get("store_code") or "—",
@@ -124,33 +141,33 @@ def _finalize_matrix_row(g: Dict[str, Any]) -> Dict[str, Any]:
         "return_bills": int(g.get("return_bills", 0) or 0),
         "return_value": _r2(g.get("return_value")),
         "return_discount": _r2(g.get("return_discount")),
-        "new_fresh_txn": int(g.get("new_fresh_txn", 0) or 0),
-        "new_return_txn": int(g.get("new_return_txn", 0) or 0),
-        "new_fresh_value": _r2(g.get("new_fresh_value")),
-        "new_return_value": _r2(g.get("new_return_value")),
-        "new_fresh_atv": _atv(g.get("new_fresh_value", 0) or 0, g.get("new_fresh_txn", 0) or 0),
-        "new_return_atv": _atv(g.get("new_return_value", 0) or 0, g.get("new_return_txn", 0) or 0),
-        "repeat_fresh_txn": int(g.get("repeat_fresh_txn", 0) or 0),
-        "repeat_return_txn": int(g.get("repeat_return_txn", 0) or 0),
-        "repeat_fresh_value": _r2(g.get("repeat_fresh_value")),
-        "repeat_return_value": _r2(g.get("repeat_return_value")),
-        "repeat_fresh_atv": _atv(g.get("repeat_fresh_value", 0) or 0, g.get("repeat_fresh_txn", 0) or 0),
-        "repeat_return_atv": _atv(g.get("repeat_return_value", 0) or 0, g.get("repeat_return_txn", 0) or 0),
-        "mapped_fresh_txn": int(g.get("mapped_fresh_txn", 0) or 0),
-        "mapped_return_txn": int(g.get("mapped_return_txn", 0) or 0),
-        "mapped_fresh_value": _r2(g.get("mapped_fresh_value")),
-        "mapped_return_value": _r2(g.get("mapped_return_value")),
-        "mapped_fresh_atv": _atv(g.get("mapped_fresh_value", 0) or 0, g.get("mapped_fresh_txn", 0) or 0),
-        "mapped_return_atv": _atv(g.get("mapped_return_value", 0) or 0, g.get("mapped_return_txn", 0) or 0),
+        "new_fresh_txn": nfresh,
+        "new_return_txn": nret,
+        "new_fresh_value": nfresh_v,
+        "new_return_value": nret_v,
+        "new_fresh_atv": _atv(nfresh_v, nfresh),
+        "new_return_atv": _atv(nret_v, nret),
+        "repeat_fresh_txn": rfresh,
+        "repeat_return_txn": rret,
+        "repeat_fresh_value": rfresh_v,
+        "repeat_return_value": rret_v,
+        "repeat_fresh_atv": _atv(rfresh_v, rfresh),
+        "repeat_return_atv": _atv(rret_v, rret),
+        "mapped_fresh_txn": mfresh,
+        "mapped_return_txn": mret,
+        "mapped_fresh_value": mfresh_v,
+        "mapped_return_value": mret_v,
+        "mapped_fresh_atv": _atv(mfresh_v, mfresh),
+        "mapped_return_atv": _atv(mret_v, mret),
         "unmapped_fresh_txn": int(g.get("unmapped_fresh_txn", 0) or 0),
         "unmapped_return_txn": int(g.get("unmapped_return_txn", 0) or 0),
         "unmapped_fresh_value": _r2(g.get("unmapped_fresh_value")),
         "unmapped_return_value": _r2(g.get("unmapped_return_value")),
         "unmapped_fresh_atv": _atv(g.get("unmapped_fresh_value", 0) or 0, g.get("unmapped_fresh_txn", 0) or 0),
         "unmapped_return_atv": _atv(g.get("unmapped_return_value", 0) or 0, g.get("unmapped_return_txn", 0) or 0),
-        "overall_customers": len(g.get("customers", []) or []),
-        "new_customer_count": len(g.get("new_customers", []) or []),
-        "existing_customers": len(g.get("existing_customers", []) or []),
+        "overall_customers": overall_cust,
+        "new_customer_count": new_cust,
+        "existing_customers": existing_cust,
     }
 
 
@@ -308,13 +325,13 @@ async def _weekly_kpi(match: Dict[str, Any], granularity: str) -> List[Dict[str,
             continue
         c = cmap.get(b, {})
         overall_cust = int(c.get("overall", 0) or 0)
-        new_cust = int(c.get("new", 0) or 0)
-        rep_cust = int(c.get("existing", 0) or 0)
+        new_cust = min(int(c.get("new", 0) or 0), overall_cust)
+        rep_cust = overall_cust - new_cust  # partition: New + Repeat == Overall customers
         total_orders = int(g.get("total_orders", 0) or 0)
         mapped_orders = int(g.get("mapped_orders", 0) or 0)
-        repeat_orders = int(g.get("repeat_orders", 0) or 0)
         unmapped_orders = int(g.get("unmapped_orders", 0) or 0)
-        new_order = int(g.get("new_order", 0) or 0)
+        new_order = min(int(g.get("new_order", 0) or 0), mapped_orders)
+        repeat_orders = mapped_orders - new_order  # New + Repeat orders == Mapped orders
         out.append({
             "period": b,
             "number_of_stores": len([s for s in (g.get("stores") or []) if s]),

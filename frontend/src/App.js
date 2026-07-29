@@ -72,6 +72,7 @@ import DigestsPage from "@/pages/admin/DigestsPage";
 import HistoricDataPage from "@/pages/admin/HistoricDataPage";
 import VerifyLoadPage from "@/pages/admin/VerifyLoadPage";
 import ReconciliationPage from "@/pages/admin/ReconciliationPage";
+import DailyReco from "@/pages/admin/DailyReco";
 import SegmentBuilderPage from "@/pages/admin/SegmentBuilderPage";
 import LiveMonitorPage from "@/pages/admin/LiveMonitorPage";
 import POSCredentialsPage from "@/pages/admin/POSCredentialsPage";
@@ -214,6 +215,7 @@ function App() {
             <Route path="historic-data" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><HistoricDataPage /></ProtectedRoute>} />
             <Route path="verify-load" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><VerifyLoadPage /></ProtectedRoute>} />
             <Route path="reconciliation" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><ReconciliationPage /></ProtectedRoute>} />
+            <Route path="daily-reco" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><DailyReco /></ProtectedRoute>} />
             <Route path="segments" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><SegmentBuilderPage /></ProtectedRoute>} />
             <Route path="live-monitor" element={<LiveMonitorPage />} />
             <Route path="pos-credentials" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><POSCredentialsPage /></ProtectedRoute>} />

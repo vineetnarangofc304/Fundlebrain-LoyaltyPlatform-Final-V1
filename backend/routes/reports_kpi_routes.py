@@ -109,6 +109,7 @@ def _store_group_stage() -> Dict[str, Any]:
             "repeat_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING]}, 1, 0]}},
             "repeat_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING]}, PAID_EXPR, 0]}},
             "mapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _HAS_MOBILE]}, 1, 0]}},
+            "mapped_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _HAS_MOBILE]}, PAID_EXPR, 0]}},
             "unmapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, {"$not": [_HAS_MOBILE]}]}, 1, 0]}},
             "customers": addset({"$and": [_NE_RETURN, _HAS_MOBILE]}),
             "new_customers": addset({"$and": [_NE_RETURN, _IS_NEW, _HAS_MOBILE]}),
@@ -121,9 +122,31 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
     def atv(value, txn):
         return round(value / txn, 2) if txn else 0.0
 
+    # ── Transaction reconciliation (exact identities, robust to any untagged bill) ──
+    # Every MAPPED fresh bill is a New or a Repeat customer transaction; therefore
+    #   New Txns + Repeat Txns == Mapped Txns   and   Mapped Txns + Unmapped Txns == Fresh Bills.
+    # We derive New = Mapped − Repeat so a bill whose new_or_existing tag was never
+    # stamped still reconciles (it counts as New rather than silently disappearing).
+    fresh_bills = int(g.get("fresh_bills", 0) or 0)
+    mapped_txn = int(g.get("mapped_txn", 0) or 0)
+    unmapped_txn = int(g.get("unmapped_txn", 0) or 0)
+    repeat_txn = int(g.get("repeat_txn", 0) or 0)
+    if repeat_txn > mapped_txn:
+        repeat_txn = mapped_txn
+    new_txn = mapped_txn - repeat_txn
+    mapped_value = round(g.get("mapped_value", 0) or 0, 2)
+    repeat_value = round(g.get("repeat_value", 0) or 0, 2)
+    new_value = round(mapped_value - repeat_value, 2)
+
+    # ── Customer reconciliation (exact partition): New + Existing == Overall ──
+    # `new_customers` (first-ever bill lands in range) is a subset of `customers`; any
+    # returning/untagged customer is Existing. Forcing Existing = Overall − New removes
+    # the double-count for customers who have both a "new" and an "existing" bill in range.
     overall_cust = len(g.get("customers", []) or [])
     new_cust = len(g.get("new_customers", []) or [])
-    existing_cust = len(g.get("existing_customers", []) or [])
+    if new_cust > overall_cust:
+        new_cust = overall_cust
+    existing_cust = overall_cust - new_cust
     return {
         "store_id": g.get("_id") or "",
         "store_code": g.get("store_code") or "—",
@@ -135,22 +158,22 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
         "total_discount": round(g.get("total_discount", 0) or 0, 2),
         "net_before_tax": round(g.get("net_before_tax", 0) or 0, 2),
         "total_tax": round(g.get("total_tax", 0) or 0, 2),
-        "fresh_bills": int(g.get("fresh_bills", 0) or 0),
+        "fresh_bills": fresh_bills,
         "fresh_value": round(g.get("fresh_value", 0) or 0, 2),
         "return_bills": int(g.get("return_bills", 0) or 0),
         "return_value": round(g.get("return_value", 0) or 0, 2),
-        "new_txn": int(g.get("new_txn", 0) or 0),
-        "new_value": round(g.get("new_value", 0) or 0, 2),
-        "new_atv": atv(g.get("new_value", 0) or 0, g.get("new_txn", 0) or 0),
-        "repeat_txn": int(g.get("repeat_txn", 0) or 0),
-        "repeat_value": round(g.get("repeat_value", 0) or 0, 2),
-        "repeat_atv": atv(g.get("repeat_value", 0) or 0, g.get("repeat_txn", 0) or 0),
-        "mapped_txn": int(g.get("mapped_txn", 0) or 0),
-        "unmapped_txn": int(g.get("unmapped_txn", 0) or 0),
+        "new_txn": new_txn,
+        "new_value": new_value,
+        "new_atv": atv(new_value, new_txn),
+        "repeat_txn": repeat_txn,
+        "repeat_value": repeat_value,
+        "repeat_atv": atv(repeat_value, repeat_txn),
+        "mapped_txn": mapped_txn,
+        "unmapped_txn": unmapped_txn,
         "overall_customers": overall_cust,
         "new_customer_count": new_cust,
         "existing_customers": existing_cust,
-        "overall_atv": atv(g.get("fresh_value", 0) or 0, g.get("fresh_bills", 0) or 0),
+        "overall_atv": atv(g.get("fresh_value", 0) or 0, fresh_bills),
     }
 
 

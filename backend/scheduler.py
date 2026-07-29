@@ -122,9 +122,22 @@ def start_scheduler():
                    misfire_grace_time=3600,
                    kwargs={"triggered_by": "daily_cron"})
 
+    # Daily Reco (missing-bill) auto-pull — fetches the emailed Reco file and adds ONLY
+    # the missing transactions. No-op unless RECO_DAILY_ENABLED + IMAP config are set.
+    from routes.reco_routes import reco_daily_job, _imap_config
+    _rc = _imap_config()
+    sched.add_job(reco_daily_job,
+                   CronTrigger(hour=_rc["daily_hour"], minute=_rc["daily_minute"], timezone="Asia/Kolkata"),
+                   id="reco_daily_pull",
+                   replace_existing=True,
+                   max_instances=1,
+                   coalesce=True,
+                   misfire_grace_time=3600)
+
     sched.start()
     _scheduler = sched
-    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST | RFM breakpoints refresh every 30m | data-health daily 07:30 IST")
+    logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST | RFM breakpoints refresh every 30m | data-health daily 07:30 IST | reco daily pull %02d:%02d IST (enabled=%s)",
+                _rc["daily_hour"], _rc["daily_minute"], _rc["daily_enabled"])
     return sched
 
 

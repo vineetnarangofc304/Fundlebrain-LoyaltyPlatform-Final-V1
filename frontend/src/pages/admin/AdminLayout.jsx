@@ -71,6 +71,7 @@ const SECTIONS = [
       { to: "/admin/historic-data", icon: Database, label: "Historical Upload", testid: "nav-historic-data" },
       { to: "/admin/verify-load", icon: ClipboardCheck, label: "Verify Load", testid: "nav-verify-load" },
       { to: "/admin/reconciliation", icon: ShieldCheck, label: "Data Reconciliation", testid: "nav-reconciliation" },
+      { to: "/admin/daily-reco", icon: Upload, label: "Daily Reco", testid: "nav-daily-reco" },
       { to: "/admin/redemption-repair", icon: ShieldAlert, label: "Redemption Repair", testid: "nav-redemption-repair", masterOnly: true },
       { to: "/admin/points-integrity", icon: ShieldAlert, label: "Points Integrity", testid: "nav-points-integrity", masterOnly: true },
     ],
