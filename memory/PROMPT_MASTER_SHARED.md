@@ -6,7 +6,7 @@ You are building an enterprise, single-tenant **Loyalty + CRM + Analytics + Camp
 
 **A) SOURCE OF TRUTH — IMPORT FROM GITHUB FIRST**
 - The complete working codebase is **PUBLIC on GitHub**. Pull it as the baseline; only adapt brand + POS + the items below.
-- **Repo URL:** `<<PASTE YOUR PUBLIC GITHUB REPO URL HERE>>` · **Branch:** `<<main>>` · **GitHub username:** `<<YOUR USERNAME>>` · **Access:** `<<blank if public, else read-only PAT>>`
+- **Repo URL:** `https://github.com/vineetnarangofc304/Fundlebrain-LoyaltyPlatform-Final-V1` · **Branch:** `main` · **GitHub username:** `vineetnarangofc304` · **Repo name:** `Fundlebrain-LoyaltyPlatform-Final-V1` · **Access:** `blank if public, else connect GitHub / paste a read-only PAT`
 - Steps: import → install backend (`pip install -r backend/requirements.txt` incl. `emergentintegrations`) + frontend (`yarn`) → boot via supervisor → confirm it seeds super-admin → THEN apply B–C + the brand block. Missing feature? BUILD it to this spec.
 
 **B) POS IS CONFIGURABLE — NOT ALWAYS eWARDS (ask first)**
