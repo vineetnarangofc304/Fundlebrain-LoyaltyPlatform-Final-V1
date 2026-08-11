@@ -121,11 +121,16 @@ export default function ShopperBillReport() {
   useEffect(() => {
     api.get("/shopper-report/filter-options").then((r) => setOpts(r.data)).catch(() => {});
   }, []);
-  // initial + re-fetch when sort/pageSize change
+  // initial load + auto-apply whenever a DROPDOWN filter, the date range, sort or page
+  // size changes. (Free-text City / Search still use the Apply button / Enter so we
+  // don't fire on every keystroke.) Without this, changing Recency to Dormant/Lapsed
+  // left the grid showing the previous Active rows — the "Dormant & Lapsed not visible" bug.
   useEffect(() => {
     fetchReport(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.sort_by, params.sort_dir, pageSize]);
+  }, [params.sort_by, params.sort_dir, params.recency, params.bill_type,
+      params.customer_type, params.store_id, params.zone,
+      params.start_date, params.end_date, pageSize]);
 
   const onSort = (col) => {
     if (!col.sort) return;

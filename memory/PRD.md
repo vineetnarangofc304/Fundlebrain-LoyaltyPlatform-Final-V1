@@ -32,6 +32,10 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### 📄 Shopper Bill Report — Dormant & Lapsed "not visible" (doc Point 2) — FIXED (Jun 2026)
+Client doc Point 2 (`/admin/reports/shopper-bills`): selecting **Dormant** or **Lapsed** showed no recency data — the screenshot showed the Recency dropdown set to "Dormant" while the grid still displayed **Active** rows. Root cause = frontend UX bug in `ShopperBillReport.jsx`: the results grid only auto-refetched on `sort_by/sort_dir/pageSize`, NOT on filter changes, so changing the Recency dropdown left the previous (default 30-day, Active) rows on screen until the user clicked Apply. Backend recency logic was already correct (a prior fix drops the lower date bound for dormant/lapsed so their all-history bills show). Fix: added the dropdown filters (`recency`, `bill_type`, `customer_type`, `store_id`, `zone`) + the date range to the auto-refetch `useEffect` deps so any filter selection instantly re-runs the report (free-text City/Search still use Apply/Enter). Verified on preview: selecting Dormant → 5 rows all "Dormant (6-12M)"; Lapsed → rows all "Lapsed (12M+)". NOTE: fixed in preview — client sees it on production (kazoloyalty.fundlebrain.ai), so a **redeploy** is required to push the fix live.
+
+
 ### 📄 Store KPI Report doc punch-list — reconciliation + Daily Reco (Jun 2026)
 Resolved the client Google-doc points for the **Store KPI Report** (`/admin/reports/store-kpi`):
 - **Point 2 (New Txn + Repeat Txn ≠ Fresh Bills):** Root cause = mapped fresh bills with a blank `new_or_existing` tag (38/56 in preview) fell out of both buckets. Fix in `reports_kpi_routes.py::_finalize_store_row`: derive **New = Mapped − Repeat** (robust to any untagged bill) → identity **New + Repeat == Mapped**, **Mapped + Unmapped == Fresh Bills** holds exactly. Also ran the `new_or_existing` backfill (blanks 44→0) for accurate split.
