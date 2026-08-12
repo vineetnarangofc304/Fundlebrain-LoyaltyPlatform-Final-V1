@@ -87,12 +87,12 @@ export default function ShopperBillReport() {
       if (v === "" || v === "all") return;
       out[k] = v;
     });
-    // Recency (Dormant/Lapsed) describes a customer's GLOBAL last visit, which is
-    // necessarily OLDER than a recent bill-date window — sending the default recent
-    // range would intersect to zero rows. Same for a specific search (mobile / bill /
-    // trans-id): the matched bills may sit outside the default 30-day window. In both
-    // cases drop the date range so the search spans all history.
-    if (out.recency === "dormant" || out.recency === "lapsed" || out.q) {
+    // A specific search (mobile / bill / trans-id) may match bills outside the default
+    // 30-day window, so drop the date range for a search. Recency now describes the
+    // shopper's status BEFORE each bill (the gap to their previous visit), so it works
+    // WITHIN the chosen date range — we KEEP the range for dormant/lapsed so you can
+    // spot shoppers who returned after being away during that period.
+    if (out.q) {
       delete out.start_date;
       delete out.end_date;
     }
@@ -222,7 +222,7 @@ export default function ShopperBillReport() {
                 <option value="lapsed">Lapsed (12M+)</option>
               </select>
               {(params.recency === "dormant" || params.recency === "lapsed") && (
-                <div className="text-[9px] text-amber-700 mt-1" data-testid="sbr-recency-hint">Date range ignored — searches all history</div>
+                <div className="text-[9px] text-amber-700 mt-1" data-testid="sbr-recency-hint">Returning shoppers — recency is their status just before each bill</div>
               )}
             </div>
             <div>

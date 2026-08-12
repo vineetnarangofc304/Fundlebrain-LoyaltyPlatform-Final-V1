@@ -8,10 +8,15 @@ Client spec (KAZO):
     Discount / Total Bill Amount / Total Lifetime purchase / Total lifetime
     bill cuts (NET = sale bills − return bills).
 
-Recency (measured from TODAY back to the customer's last visit):
-    0-6 months   → Active
-    6-12 months  → Dormant
-    12 months +  → Lapsed
+Recency (the shopper's status JUST BEFORE this bill — the gap between this bill's
+day and the customer's immediately-preceding visit day; lets you spot shoppers who
+had gone dormant/lapsed and have now returned):
+    first-ever visit (no earlier day) → New
+    0-6 months since previous visit   → Active
+    6-12 months since previous visit  → Dormant
+    12 months + since previous visit  → Lapsed
+"Last Visit" / "2nd-last Visit" are therefore shown RELATIVE to the bill (the
+previous visit, and the one before that) so each row is self-consistent.
 
 Two routers:
   * `router`        (under db_deadline 45s) — paginated listing + filter options.
@@ -22,6 +27,7 @@ Two routers:
 """
 from __future__ import annotations
 
+import bisect
 import csv
 import io
 import logging
@@ -141,6 +147,31 @@ def _recency_bucket(label: str) -> str:
             else "lapsed" if "Lapsed" in label else "unknown")
 
 
+def _recency_from_gap(bill_day: Optional[str], prev_day: Optional[str]) -> str:
+    """Recency the shopper was in JUST BEFORE this bill = the gap (in days) between
+    this bill's day and the customer's immediately-preceding visit day:
+        first-ever visit (no earlier day) → 'New'
+        gap 0-182 days                    → 'Active (0-6M)'
+        gap 183-365 days                  → 'Dormant (6-12M)'
+        gap 365+ days                     → 'Lapsed (12M+)'
+    Both args are IST 'YYYY-MM-DD' day strings (lexically == chronologically sortable)."""
+    if not prev_day:
+        return "New"
+    if not bill_day:
+        return "—"
+    try:
+        d1 = datetime.strptime(bill_day, "%Y-%m-%d")
+        d0 = datetime.strptime(prev_day, "%Y-%m-%d")
+    except Exception:
+        return "—"
+    gap = (d1 - d0).days
+    if gap <= RECENCY_6M_DAYS:
+        return "Active (0-6M)"
+    if gap <= RECENCY_12M_DAYS:
+        return "Dormant (6-12M)"
+    return "Lapsed (12M+)"
+
+
 def _build_match(start_date, end_date, bill_type, customer_type, store_id, zone,
                  city, q) -> Dict[str, Any]:
     m: Dict[str, Any] = {}
@@ -229,10 +260,11 @@ async def _visit_map(mobiles: List[str], timeout_s: Optional[int] = None) -> Dic
 
     async def _run():
         async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
-            days = sorted([d for d in (r.get("days") or []) if d], reverse=True)
+            days_desc = sorted([d for d in (r.get("days") or []) if d], reverse=True)
             out[r["_id"]] = {
-                "last": days[0] if days else None,
-                "second": days[1] if len(days) > 1 else None,
+                "last": days_desc[0] if days_desc else None,
+                "second": days_desc[1] if len(days_desc) > 1 else None,
+                "days_asc": days_desc[::-1],   # ascending — for per-bill previous-visit lookup
                 "sale": int(r.get("sale", 0)),                 # purchase (non-return) bills = "Total Visits"
                 "net_cuts": int(r.get("sale", 0)) - int(r.get("ret", 0)),
                 "paid": round(float(r.get("paid", 0) or 0), 2),
@@ -254,7 +286,19 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
                            (cust or {}).get("home_store_id") or "", {})
 
     bd_date, bd_time = _to_ist_parts(bill_date)
-    last_visit = (visit or {}).get("last") or _ist_date((cust or {}).get("last_visit_at")) or None
+    # Per-bill recency = the shopper's status BEFORE this transaction. Find the visit
+    # day immediately preceding this bill's day and measure the gap. "Last Visit" /
+    # "2nd Last Visit" are shown RELATIVE to this bill (the previous visit, and the one
+    # before that) so the row is self-consistent with its Recency label.
+    days_asc = (visit or {}).get("days_asc") or []
+    prev_day = prev_prev_day = None
+    if bd_date and days_asc:
+        idx = bisect.bisect_left(days_asc, bd_date)   # days_asc[:idx] are all < bd_date
+        if idx >= 1:
+            prev_day = days_asc[idx - 1]
+        if idx >= 2:
+            prev_prev_day = days_asc[idx - 2]
+    recency = _recency_from_gap(bd_date, prev_day)
     net_before_tax = round(float(tx.get("net_amount_before_tax") or tx.get("net_amount") or 0), 2)
     total_tax = round(float(tx.get("tax_amount") or 0), 2)
     total_disc = round(float(tx.get("discount_amount") or tx.get("discount") or 0), 2)
@@ -272,9 +316,9 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
         "transaction_id": tx.get("transaction_id") or "",
         "bill_number": tx.get("bill_number") or "",
         "customer_type": tx.get("new_or_existing") or "",
-        "recency": _recency_label(last_visit, now),
-        "last_visit": last_visit or "",
-        "second_last_visit": (visit or {}).get("second") or "",
+        "recency": recency,
+        "last_visit": prev_day or "",
+        "second_last_visit": prev_prev_day or "",
         # Total Visits = number of PURCHASE (non-return) bills, computed live from the
         # bill data so it matches Customer 360 (the stored visit_count counted returns
         # too and could be stale → the "11 vs 12" mismatch).
@@ -328,63 +372,56 @@ async def shopper_bills(
 
     recency = (recency or "").lower()
     if recency in {"active", "dormant", "lapsed"}:
-        # Recency is a CUSTOMER attribute → needs a join. To stay scale-safe we
-        # SORT FIRST (index-backed on bill_date) so the index ordering is reused,
-        # then do the index-backed point $lookup, filter on the computed bucket,
-        # and $limit so the pipeline short-circuits once a page is filled. We skip
-        # the (expensive) exact total for this path — pagination uses "has more".
-        cut6, cut12 = _recency_cutoffs(now)
-        # SCALE FIX: a dormant/lapsed customer's bills are ALL older than the bucket
-        # cutoff (their last visit is, by definition, before it). So we can safely cap
-        # bill_date — this keeps the scan on a small, index-backed slice of OLD bills
-        # instead of walking every recent (active) bill. Active needs no extra bound.
-        bucket_max = cut12 if recency == "lapsed" else cut6 if recency == "dormant" else None
-        if bucket_max:
-            bd = dict(match.get("bill_date") or {})
-            # Dormant/Lapsed customers' bills are ALL older than the bucket cutoff. A client
-            # that also sends a RECENT start_date (e.g. the default MTD range) would otherwise
-            # create an impossible window (start_date > bucket_max) → zero rows, which is the
-            # "dormant & lapsed not visible" bug. Drop the lower bound and keep only the upper cap.
-            bd.pop("$gte", None)
-            bd.pop("$gt", None)
-            bd["$lt"] = bucket_max if "$lt" not in bd else min(bd["$lt"], bucket_max)
-            match["bill_date"] = bd
-        pipe: List[Dict[str, Any]] = [
-            {"$match": match},
-            {"$sort": {sort_field: 1 if sort_dir == "asc" else -1, "_id": 1}},
-            {"$lookup": {
-                "from": "customers", "localField": "customer_mobile",
-                "foreignField": "mobile", "as": "_cust",
-                "pipeline": [{"$project": {"_id": 0, "last_visit_at": 1}}],
-            }},
-            {"$addFields": {"_lv": {"$ifNull": [{"$first": "$_cust.last_visit_at"}, None]}}},
-            {"$addFields": {"_recency": {"$switch": {"branches": [
-                {"case": {"$eq": ["$_lv", None]}, "then": "unknown"},
-                {"case": {"$gte": ["$_lv", cut6]}, "then": "active"},
-                {"case": {"$gte": ["$_lv", cut12]}, "then": "dormant"},
-            ], "default": "lapsed"}}}},
-            {"$match": {"_recency": recency}},
-            {"$project": {"_cust": 0, "_lv": 0, "_recency": 0}},
-            {"$skip": offset},
-            {"$limit": limit + 1},   # +1 sentinel → know if there's a next page
-        ]
+        # Per-bill recency (the shopper's status BEFORE the bill) can't be pre-filtered
+        # by a simple index range, so we STREAM the matched bills in sorted order,
+        # enrich them in batches (each batch computes the per-bill recency), keep only
+        # the rows whose computed bucket matches, and stop as soon as the requested page
+        # is filled. The user's date range + store/zone/city filters bound the scan.
+        # Exact total is omitted for this path — pagination uses "has more".
+        collected: List[Dict[str, Any]] = []
+        skipped = 0
+        scanned = 0
+        SCAN_CAP = 200_000
+        batch: List[Dict[str, Any]] = []
+
+        async def _sift(rows_in: List[Dict[str, Any]]) -> bool:
+            nonlocal skipped
+            for fr in await _enrich(rows_in, stores, now, timeout_s=30):
+                if _recency_bucket(fr.get("recency", "")) != recency:
+                    continue
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                collected.append(fr)
+                if len(collected) > limit:
+                    return True   # have limit+1 → know there's a next page
+            return False
+
         try:
-            raw = await transactions_col.aggregate(
-                pipe, allowDiskUse=True, maxTimeMS=40000).to_list(limit + 1)
+            cursor = transactions_col.find(match, {"_id": 0}).sort(
+                sort_field, direction).max_time_ms(40000)
+            stop = False
+            async for tx in cursor:
+                batch.append(tx)
+                scanned += 1
+                if len(batch) >= ENRICH_BATCH:
+                    if await _sift(batch):
+                        stop = True
+                        break
+                    batch = []
+                    if scanned >= SCAN_CAP:
+                        break
+            if not stop and batch:
+                await _sift(batch)
         except PyMongoError:
             raise HTTPException(
                 status_code=400,
                 detail="The recency filter needs a narrower date range (or add a "
                        "store / zone / city filter) — too many bills to scan at once.")
-        has_more = len(raw) > limit
-        raw = raw[:limit]
-        total = None   # exact total intentionally omitted for the recency path
-        rows = await _enrich(raw, stores, now)
-        # customer.last_visit_at (used for the index-backed pre-filter) can be stale, so
-        # re-validate each row against its bill-derived recency label and keep only the
-        # ones that truly fall in the selected bucket — no more "Active" rows under Lapsed.
-        rows = [r for r in rows if _recency_bucket(r.get("recency", "")) == recency]
-        return {"total": total, "rows": rows,
+
+        has_more = len(collected) > limit
+        rows = collected[:limit]
+        return {"total": None, "rows": rows,
                 "offset": offset, "limit": limit, "has_more": has_more,
                 "columns": [{"key": k, "label": l} for k, l in COLUMNS]}
 
