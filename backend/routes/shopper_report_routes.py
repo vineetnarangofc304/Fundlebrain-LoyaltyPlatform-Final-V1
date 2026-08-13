@@ -11,7 +11,7 @@ Client spec (KAZO):
 Recency (the shopper's status JUST BEFORE this bill — the gap between this bill's
 day and the customer's immediately-preceding visit day; lets you spot shoppers who
 had gone dormant/lapsed and have now returned):
-    first-ever visit (no earlier day) → New
+    NEW customer (no previous txn)    → Active   (per doc Point 2)
     0-6 months since previous visit   → Active
     6-12 months since previous visit  → Dormant
     12 months + since previous visit  → Lapsed
@@ -149,14 +149,16 @@ def _recency_bucket(label: str) -> str:
 
 def _recency_from_gap(bill_day: Optional[str], prev_day: Optional[str]) -> str:
     """Recency the shopper was in JUST BEFORE this bill = the gap (in days) between
-    this bill's day and the customer's immediately-preceding visit day:
-        first-ever visit (no earlier day) → 'New'
+    this bill's day and the customer's immediately-preceding visit day. Per the KAZO
+    doc (Point 2): a NEW customer (no previous transaction) is tagged Active; an OLD
+    customer is tagged from the gap to their previous/last transaction:
+        first-ever visit (no earlier day) → 'Active (0-6M)'   (new customer = Active)
         gap 0-182 days                    → 'Active (0-6M)'
         gap 183-365 days                  → 'Dormant (6-12M)'
         gap 365+ days                     → 'Lapsed (12M+)'
     Both args are IST 'YYYY-MM-DD' day strings (lexically == chronologically sortable)."""
     if not prev_day:
-        return "New"
+        return "Active (0-6M)"   # new customer (first-ever visit) → Active, per doc Point 2
     if not bill_day:
         return "—"
     try:
