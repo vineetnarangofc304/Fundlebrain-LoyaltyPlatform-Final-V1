@@ -111,6 +111,7 @@ import LROccasions from "@/pages/admin/legacy_reports/Occasions";
 import StoreOps from "@/pages/store/StoreOps";
 import DemoLanding from "@/pages/public/DemoLanding";
 import Watch from "@/pages/watch/Watch";
+import Reel from "@/pages/reels/Reel";
 
 function ProtectedRoute({ children, roles }) {
   const { user, loading } = useAuth();
@@ -167,6 +168,7 @@ function App() {
 
           {/* Public cinematic demo reel (shareable) */}
           <Route path="/watch" element={<Watch />} />
+          <Route path="/reel" element={<Reel />} />
 
           {/* Admin */}
           <Route path="/admin" element={<ProtectedRoute><AdminLayout /></ProtectedRoute>}>

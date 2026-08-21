@@ -62,6 +62,7 @@ from routes.store_logins_routes import router as store_logins_router
 from routes.exports_routes import router as exports_router
 from routes.demo_routes import router as demo_router
 from routes.watch_routes import router as watch_router
+from routes.reel_routes import router as reel_router
 from routes.reco_routes import router as reco_router
 from routes.master_brain_routes import router as master_brain_router
 
@@ -132,6 +133,7 @@ api_router.include_router(exports_router)
 api_router.include_router(recon_router)
 api_router.include_router(demo_router)
 api_router.include_router(watch_router)
+api_router.include_router(reel_router)
 api_router.include_router(reco_router)
 api_router.include_router(master_brain_router)
 
