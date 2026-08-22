@@ -530,10 +530,14 @@ async def send_sms_campaign_karix(mobile: str, text: str, template_id: Optional[
         if tpl and tpl.get("sender_id"):
             sender = str(tpl["sender_id"]).strip()
     digits = re.sub(r"\D", "", mobile or "")
-    dest = digits[-10:] if len(digits) >= 10 else digits   # bulk JSON API expects 10-digit dest
+    dest = digits[-10:] if len(digits) >= 10 else digits   # Karix fundle_campaign expects a 10-digit dest (per Karix doc)
+    # EXACT format from the Karix fundle_campaign doc — {dest,text,send} only. The account resolves
+    # DLT (PE + content template) by REVERSE-LOOKUP on sender+text, so the body must match a
+    # DLT-approved template verbatim (do NOT add dlt_* / type fields — not part of this account's API).
     payload = {"ver": "1.0", "key": key,
                "messages": [{"dest": [dest], "text": text, "send": sender}]}
-    log_payload = {"send": sender, "pipe": "campaign", "endpoint": endpoint, "account": cfg.get("sms_campaign_account")}
+    log_payload = {"send": sender, "pipe": "campaign", "endpoint": endpoint,
+                   "account": cfg.get("sms_campaign_account"), "dest": dest}
     last_err = None
     attempts = 4
     for attempt in range(1, attempts + 1):

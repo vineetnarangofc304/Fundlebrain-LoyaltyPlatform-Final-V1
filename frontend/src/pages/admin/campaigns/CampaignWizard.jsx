@@ -265,6 +265,13 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   </select>
                 )}
                 {form.template_id && <div className="text-[10px] text-emerald-700 mt-1">✓ This campaign will actually send messages via Karix when launched.</div>}
+                {(() => {
+                  const sel = templates.find((t) => t.id === form.template_id);
+                  if (sel && sel.channel === "sms" && !(sel.dlt_template_id || "").trim()) {
+                    return <div className="text-[10px] text-rose-600 mt-1" data-testid="tpl-no-dlt-warning">⚠ This SMS template has no DLT content template ID — launch will be blocked. Add it in Templates first, and make sure the body matches your DLT-approved content verbatim.</div>;
+                  }
+                  return null;
+                })()}
               </div>
 
               <textarea className="k-input" placeholder="Optional preview / fallback body (only used if no Karix template above)" value={form.message_template} onChange={(e) => setForm({ ...form, message_template: e.target.value })} data-testid="message-template-input" />

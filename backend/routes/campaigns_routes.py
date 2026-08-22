@@ -361,6 +361,12 @@ async def _do_launch(c: dict, user: dict) -> dict:
                 raise HTTPException(400, "WhatsApp/RCS template requires waba_template_id")
             if t.get("waba_approval_status") != "approved":
                 raise HTTPException(400, "WhatsApp/RCS template must be approved before launch")
+        if t["channel"] == "sms" and not (t.get("dlt_template_id") or "").strip():
+            raise HTTPException(400, ("This SMS template has no DLT content template ID. Open "
+                                      "Communications → Templates → this template and add the "
+                                      "DLT-approved content template ID (and make sure the body "
+                                      "matches it verbatim) before launching — otherwise the "
+                                      "operator silently drops the promotional SMS."))
 
         limit = send_limit
         job_id = uuid.uuid4().hex
