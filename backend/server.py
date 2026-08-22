@@ -744,6 +744,39 @@ async def _seed_and_bootstrap():
     except Exception as e:
         logger.warning(f"Could not ensure demo user: {e}")
 
+    # One-time seed of the DLT-approved "KAZO End of Season Sale" promotional SMS template so the
+    # user can launch a real, deliverable campaign immediately after deploy. Idempotent + one-time
+    # (a `seed_flags` marker) so if the user later edits/deletes it, it is NOT recreated on restart.
+    try:
+        from database import templates_col, db as _db
+        seed_flags = _db["seed_flags"]
+        already = await seed_flags.find_one({"_id": "kazo_eoss_template"})
+        if not already:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            await templates_col.insert_one({
+                "id": uuid.uuid4().hex,
+                "name": "KAZO End of Season Sale",
+                "channel": "sms",
+                "event_trigger": "campaign_bulk",
+                "body": ("KAZO End of Season Sale is LIVE! Get up to 50% OFF on your favorite "
+                         "styles. Shop now and refresh your wardrobe. T&C Apply."),
+                "variables": [],
+                "sender_id": "KAZOFN",
+                "dlt_entity_id": "1101409540000012086",
+                "dlt_template_id": "1107178315446496099",
+                "dlt_tm_id": None,
+                "waba_template_id": None, "waba_params_order": [], "waba_language": "en",
+                "waba_category": None, "waba_approval_status": "pending", "waba_approval_note": None,
+                "preview_url": False, "status": "active",
+                "note": "DLT-approved promotional template (seeded). Body must match DLT content verbatim.",
+                "created_at": now_iso, "updated_at": now_iso, "created_by": "system-seed",
+            })
+            await seed_flags.insert_one({"_id": "kazo_eoss_template", "seeded_at": now_iso})
+            logger.info("Seeded DLT-approved 'KAZO End of Season Sale' SMS template")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not seed EOSS template: {e}")
+
+
 
 @app.on_event("startup")
 async def startup():

@@ -352,11 +352,17 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
 # reports can reconcile by mid. Also handle the older "1701|91XXXXXXXXXX:<mid>" pipe format.
 _REQID_RE = re.compile(r"request\s*id\s*[=:]\s*([A-Za-z0-9\-]{6,})", re.I)
 _MID_RE = re.compile(r"([A-Za-z0-9\-]{8,})\s*$")
+_ACKID_RE = re.compile(r'"ackid"\s*:\s*"?([A-Za-z0-9\-]{6,})"?', re.I)
 
 
 def _parse_provider_mid(resp: Optional[str]) -> Optional[str]:
     if not resp:
         return None
+    # Karix bulk JsonReceiver (fundle_campaign) accept body is {"ackid":"...", "status":{...}} —
+    # the ackid IS the id Karix references in the bulk DLR, so capture it first.
+    m_ack = _ACKID_RE.search(resp)
+    if m_ack:
+        return m_ack.group(1)
     m = _REQID_RE.search(resp)
     if m:
         return m.group(1)
@@ -1062,7 +1068,7 @@ async def get_bulk_job(job_id: str, user: dict = Depends(get_current_user)):
 async def _ingest_dlr(data: Dict[str, Any]) -> Dict[str, Any]:
     """Ingest a single Karix DLR record → update the matching message_log row's delivery_status."""
     mid = (data.get("mid") or data.get("MID") or data.get("messageId") or data.get("id")
-           or data.get("msgid") or data.get("smscId") or "")
+           or data.get("msgid") or data.get("smscId") or data.get("ackid") or data.get("ackId") or "")
     dest = (data.get("dest") or data.get("msisdn") or data.get("to") or data.get("mobile") or "")
     raw_status = (data.get("status") or data.get("dlrstatus") or data.get("dlrStatus")
                   or data.get("stat") or data.get("state") or "")
