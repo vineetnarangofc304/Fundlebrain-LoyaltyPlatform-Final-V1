@@ -63,20 +63,48 @@ async def audience_preview(body: AudiencePreviewIn, user: dict = Depends(get_cur
     """Ad-hoc audience size + sample for the Campaign Wizard (before a campaign is created)."""
     af = body.audience_filter or {}
     at = body.audience_type or "all"
+    from routes.blacklist_util import blacklist_col, blacklisted_set, norm10
+    blacklisted = await blacklist_col.count_documents({})
+    # Marketing DB — the audience is EVERY number in the list (members + non-members), NOT just
+    # those in the loyalty base. Count the raw mobile list (blacklist-excluded), not customers_col.
+    if at == "marketing_db":
+        mdb_id = af.get("marketing_db_id")
+        if not mdb_id:
+            return {"total_audience": 0, "sample": [], "needs_filter": True,
+                    "blacklisted_total": blacklisted}
+        mdb = await db["marketing_databases"].find_one(
+            {"id": mdb_id}, {"_id": 0, "mobiles": 1, "member_count": 1, "non_member_count": 1})
+        mobiles = (mdb or {}).get("mobiles") or []
+        bl = await blacklisted_set()
+        eff = [m for m in mobiles if norm10(m) not in bl] if bl else list(mobiles)
+        sample_mobiles = eff[:10]
+        member_map: Dict[str, Any] = {}
+        if sample_mobiles:
+            async for cst in customers_col.find(
+                    {"mobile": {"$in": sample_mobiles}},
+                    {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1}):
+                member_map[cst["mobile"]] = cst
+        sample = [
+            ({"mobile": m, "name": member_map[m].get("name"), "tier": member_map[m].get("tier"),
+              "city": member_map[m].get("city")} if m in member_map
+             else {"mobile": m, "name": None, "tier": "non-member"})
+            for m in sample_mobiles
+        ]
+        return {"total_audience": len(eff), "sample": sample,
+                "member_count": (mdb or {}).get("member_count"),
+                "non_member_count": (mdb or {}).get("non_member_count"),
+                "blacklisted_total": blacklisted}
     # Guard: an audience type that REQUIRES a filter key but has none must not degenerate to the
     # whole base (which is misleading in the wizard) — report needs_filter with a 0 count instead.
     required = {"tier": "tier", "city": "city", "cohort": "cohort", "segment": "segment_id"}
     if at in required and not af.get(required[at]):
-        from routes.blacklist_util import blacklist_col
         return {"total_audience": 0, "sample": [], "needs_filter": True,
-                "blacklisted_total": await blacklist_col.count_documents({})}
+                "blacklisted_total": blacklisted}
     fake = {"audience_type": at, "audience_filter": af}
     fil = await _audience_filter_async(fake)
     total = await customers_col.count_documents(fil)
     sample = await customers_col.find(
         fil, {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1}).limit(10).to_list(10)
-    from routes.blacklist_util import blacklist_col
-    blacklisted = await blacklist_col.count_documents({})
     return {"total_audience": total, "sample": sample, "blacklisted_total": blacklisted}
 
 
@@ -278,10 +306,42 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
 async def _do_launch(c: dict, user: dict) -> dict:
     campaign_id = c["id"]
     launched_at = datetime.now(timezone.utc).isoformat()
-    fil = await _audience_filter_async(c)
-    audience_size = await customers_col.count_documents(fil)
     send_limit = int(c.get("send_limit") or 50000)
-    dataset_size = await _freeze_dataset(campaign_id, fil, send_limit, launched_at)
+    cap = min(send_limit, 50000)
+
+    # Marketing-DB audiences send to EVERY number in the list (members + non-members) — resolve the
+    # raw mobile list (dedup + blacklist-exclude + cap) and drive the send/freeze from that, NOT the
+    # loyalty base (which would silently drop all non-members).
+    explicit_mobiles: Optional[List[str]] = None
+    if c.get("audience_type") == "marketing_db":
+        mdb_id = (c.get("audience_filter") or {}).get("marketing_db_id")
+        mdb = await db["marketing_databases"].find_one(
+            {"id": mdb_id}, {"_id": 0, "mobiles": 1}) if mdb_id else None
+        raw = (mdb or {}).get("mobiles") or []
+        seen: set = set()
+        ordered: List[str] = []
+        for m in raw:
+            mm = (m or "").strip()
+            if mm and mm not in seen:
+                seen.add(mm)
+                ordered.append(mm)
+        try:
+            from routes.blacklist_util import blacklisted_set, norm10
+            bl = await blacklisted_set()
+            if bl:
+                ordered = [m for m in ordered if norm10(m) not in bl]
+        except Exception:  # noqa: BLE001
+            pass
+        explicit_mobiles = ordered[:cap]
+
+    if explicit_mobiles is not None:
+        fil: Dict[str, Any] = {}
+        audience_size = len(explicit_mobiles)
+        dataset_size = await _freeze_dataset_from_mobiles(campaign_id, explicit_mobiles, launched_at)
+    else:
+        fil = await _audience_filter_async(c)
+        audience_size = await customers_col.count_documents(fil)
+        dataset_size = await _freeze_dataset(campaign_id, fil, send_limit, launched_at)
 
     template_id = c.get("template_id")
     if template_id:
@@ -323,7 +383,7 @@ async def _do_launch(c: dict, user: dict) -> dict:
 
         # Fire-and-forget background task
         asyncio.create_task(_run_bulk_send_job(job_id, template_id, fil, limit, campaign_id,
-                                               c.get("coupon_batch_id")))
+                                               c.get("coupon_batch_id"), explicit_mobiles))
 
         await campaigns_col.update_one(
             {"id": campaign_id},

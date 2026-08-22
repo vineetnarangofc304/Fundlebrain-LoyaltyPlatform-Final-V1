@@ -29,11 +29,13 @@ export default function CampaignManager() {
     const [c, co, tpl] = await Promise.all([
       api.get("/campaigns"),
       api.get("/coupons", { params: { is_active: true } }),
-      api.get("/templates", { params: { status: "active" } }).catch(() => ({ data: [] })),
+      api.get("/templates", { params: { status: "active" } }).catch(() => ({ data: { rows: [] } })),
     ]);
     setItems(c.data);
     setCoupons(co.data);
-    setTemplates(Array.isArray(tpl.data) ? tpl.data : []);
+    // /api/templates returns { rows, total } — normalise to an array and keep only active ones.
+    const tplRows = Array.isArray(tpl.data) ? tpl.data : (tpl.data?.rows || []);
+    setTemplates(tplRows.filter((t) => t.status === "active"));
   };
   useEffect(() => { load(); }, []);
 

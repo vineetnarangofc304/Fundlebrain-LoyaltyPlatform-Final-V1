@@ -170,6 +170,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
   const [testMobile, setTestMobile] = useState("");
   const [testParams, setTestParams] = useState({});
   const [testSending, setTestSending] = useState(false);
+  const [testVia, setTestVia] = useState("");  // "" = auto, "campaign", "transactional"
   const [testResult, setTestResult] = useState(null);
   const [approvalEdit, setApprovalEdit] = useState({ open: false, status: "pending", note: "" });
   const [approvalSaving, setApprovalSaving] = useState(false);
@@ -265,7 +266,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
     setTestResult(null);
     try {
       const r = await api.post(`/templates/${form.id}/test-send`, {
-        mobile: testMobile, params: testParams,
+        mobile: testMobile, params: testParams, via: testVia || undefined,
       });
       setTestResult(r.data);
       if (r.data.ok) toast.success("Sent");
@@ -432,6 +433,17 @@ function TemplateEditor({ template, onClose, onSaved }) {
               {testVars.map((v) => (
                 <input key={v.key} className="k-input mb-2 text-xs" placeholder={`${v.label}${v.example ? ` (e.g. ${v.example})` : ""}`} value={testParams[v.key] || ""} onChange={(e) => setTestParams({ ...testParams, [v.key]: e.target.value })} data-testid={`test-param-${v.key}`} />
               ))}
+              {form.channel === "sms" && (
+                <label className="block mb-2">
+                  <div className="text-[10px] uppercase tracking-widest text-emerald-800/70 mb-1">Send via</div>
+                  <select className="k-input text-xs" value={testVia} onChange={(e) => setTestVia(e.target.value)} data-testid="test-via-select">
+                    <option value="">Auto (campaign pipe for promotional templates)</option>
+                    <option value="campaign">Campaign / bulk (fundle_campaign · KAZOFN)</option>
+                    <option value="transactional">Transactional (KAZOIN)</option>
+                  </select>
+                  <div className="text-[10px] text-neutral-500 mt-1">Promotional SMS must go via the campaign pipe or operators drop it (ACK only).</div>
+                </label>
+              )}
               <button onClick={testSend} disabled={testSending || !form.id} className="k-btn kazo-bg-burgundy k-btn-sm w-full" data-testid="test-send-btn">
                 <Send className="w-3.5 h-3.5" /> {testSending ? "Sending…" : "Send test now"}
               </button>

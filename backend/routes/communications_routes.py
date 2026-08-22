@@ -140,12 +140,15 @@ def _normalize_mobile(mobile: str) -> str:
 # ---------------- Template CRUD ----------------
 @router.get("/templates")
 async def list_templates(channel: Optional[str] = None, event_trigger: Optional[str] = None,
+                          status: Optional[str] = None,
                           user: dict = Depends(get_current_user)):
     flt: Dict[str, Any] = {}
     if channel:
         flt["channel"] = channel
     if event_trigger:
         flt["event_trigger"] = event_trigger
+    if status:
+        flt["status"] = status
     rows = await templates_col.find(flt, {"_id": 0}).sort("updated_at", -1).to_list(500)
     return {"rows": rows, "total": len(rows)}
 
@@ -475,24 +478,36 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
 
 def _karix_json_ok(body: Optional[str]) -> bool:
     """Parse the Karix JsonReceiver (bulk) response. Lenient — only flag EXPLICIT failures so a
-    successful accept (even with an unfamiliar shape) is not marked failed."""
+    successful accept (even with an unfamiliar shape) is not marked failed.
+
+    The 'fundle_campaign' JsonReceiver returns a NESTED status object, e.g.
+        {"ackid":"...","time":"...","status":{"code":"200","desc":"Request accepted"}}
+    so we must read status.code, not str(status)."""
     if not body:
         return True
     try:
         d = json.loads(body)
     except Exception:  # noqa: BLE001
         return _karix_submit_ok(body)
+    OK = {"200", "202", "201", "0", "000", "success", "ok", "accepted", "submitted", "request accepted"}
+
+    def _bad(v: Any) -> bool:
+        s = str(v).strip().lower()
+        return bool(s) and s not in OK
+
     if isinstance(d, dict):
-        # common shapes: {"statusCode":"200"} / {"status":"success"} / {"messages":[{"code":"..."}]}
+        st = d.get("status")
+        if isinstance(st, dict):
+            # nested status object — the code is authoritative; ignore the human 'desc'
+            code = str(st.get("code") or st.get("statusCode") or "").strip().lower()
+            return not (code and code not in OK)
+        # flat shapes: {"statusCode":"200"} / {"status":"success"} / {"messages":[{"code":"..."}]}
         for k in ("statusCode", "status", "code", "responseCode"):
-            v = str(d.get(k, "")).strip().lower()
-            if v and v not in ("200", "202", "201", "0", "000", "success", "ok", "accepted", "submitted"):
+            if _bad(d.get(k, "")):
                 return False
         for m in (d.get("messages") or []):
-            if isinstance(m, dict):
-                mc = str(m.get("code") or m.get("statusCode") or m.get("status") or "").strip().lower()
-                if mc and mc not in ("200", "202", "201", "0", "000", "success", "ok", "accepted", "submitted"):
-                    return False
+            if isinstance(m, dict) and _bad(m.get("code") or m.get("statusCode") or m.get("status") or ""):
+                return False
     return True
 
 
@@ -600,6 +615,7 @@ async def send_whatsapp_karix(mobile: str, template_id_external: str,
 class TestSendIn(BaseModel):
     mobile: str
     params: Dict[str, Any] = {}
+    via: Optional[str] = None  # "transactional" | "campaign" | None(auto by event_trigger)
 
 
 @router.post("/templates/{tid}/test-send")
@@ -609,8 +625,20 @@ async def test_send(tid: str, body: TestSendIn, user: dict = Depends(get_current
         raise HTTPException(404, "Template not found")
     if t["channel"] == "sms":
         text = _render(t["body"], body.params)
-        return await send_sms_karix(body.mobile, text, template_id=tid,
-                                      event_trigger=t.get("event_trigger"))
+        # Route promotional SMS through the BULK 'fundle_campaign' pipe (operators drop
+        # promotional traffic sent via the transactional pipe). Auto-detect from the template's
+        # event_trigger unless the caller forces a pipe with `via`.
+        via = (body.via or "").strip().lower()
+        if via not in ("transactional", "campaign"):
+            via = "campaign" if t.get("event_trigger") == "campaign_bulk" else "transactional"
+        if via == "campaign":
+            res = await send_sms_campaign_karix(body.mobile, text, template_id=tid,
+                                                event_trigger=t.get("event_trigger"))
+        else:
+            res = await send_sms_karix(body.mobile, text, template_id=tid,
+                                       event_trigger=t.get("event_trigger"))
+        res["pipe"] = res.get("pipe") or via
+        return res
     if t["channel"] == "whatsapp":
         if not t.get("waba_template_id"):
             raise HTTPException(400, "WhatsApp template requires waba_template_id (the Karix-approved template id)")
@@ -834,10 +862,13 @@ def _waba_positional_params(template: Dict[str, Any], params: Dict[str, Any]) ->
 
 async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dict[str, Any],
                                 limit: int, campaign_id: Optional[str] = None,
-                                coupon_batch_id: Optional[str] = None):
+                                coupon_batch_id: Optional[str] = None,
+                                explicit_mobiles: Optional[List[str]] = None):
     """Background worker: pulls audience, dispatches messages, updates job state.
     Campaign SMS goes out via the BULK Karix account (fundle_campaign). If coupon_batch_id is set,
-    each recipient's own unique coupon code is injected as {{coupon_code}}."""
+    each recipient's own unique coupon code is injected as {{coupon_code}}.
+    When explicit_mobiles is provided (Marketing-DB audience) we send to EVERY number in that list —
+    members are personalised from their profile, non-members get a minimal {mobile} record."""
     started = datetime.now(timezone.utc).isoformat()
     ctx = {"campaign_id": campaign_id, "bulk_job_id": job_id, "source": "campaign_bulk"}
     await bulk_jobs_col.update_one(
@@ -852,11 +883,27 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
         # aggressive prod client timeoutMS). Sending SMS is slow, so we must NOT hold a live
         # cursor across the send loop — its getMores would exceed the deadline mid-run and
         # fail with "operation exceeded time limit".
-        with pymongo.timeout(300):
-            recipients = await customers_col.find(
-                audience_filter or {},
-                {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
-                 "points_balance": 1, "city": 1}).limit(min(limit, 50000)).to_list(min(limit, 50000))
+        if explicit_mobiles is not None:
+            # Marketing-DB / explicit-mobile campaign — send to ALL numbers (members + non-members).
+            mob_list = [m for m in explicit_mobiles if m][:min(limit, 50000)]
+            member_map: Dict[str, Any] = {}
+            CH = 5000
+            for i in range(0, len(mob_list), CH):
+                chunk = mob_list[i:i + CH]
+                with pymongo.timeout(120):
+                    docs = await customers_col.find(
+                        {"mobile": {"$in": chunk}},
+                        {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
+                         "points_balance": 1, "city": 1}).to_list(len(chunk))
+                for d in docs:
+                    member_map[d["mobile"]] = d
+            recipients = [member_map.get(m, {"mobile": m}) for m in mob_list]
+        else:
+            with pymongo.timeout(300):
+                recipients = await customers_col.find(
+                    audience_filter or {},
+                    {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
+                     "points_balance": 1, "city": 1}).limit(min(limit, 50000)).to_list(min(limit, 50000))
         # Phase 4 — exclude blacklisted numbers from the send (never fatal).
         try:
             from routes.blacklist_util import blacklisted_set, norm10
@@ -914,12 +961,28 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
                        "completed_at": datetime.now(timezone.utc).isoformat(),
                        "processed": processed, "sent": sent, "failed": failed}},
         )
+        # Write the terminal state back onto the linked campaign so its lifecycle actually ends in
+        # the DB (otherwise it stays status='running'/sent=0 forever → can't be deleted, stale ROI).
+        if campaign_id:
+            from database import campaigns_col
+            await campaigns_col.update_one(
+                {"id": campaign_id},
+                {"$set": {"status": "completed", "sent": sent, "failed": failed,
+                          "completed_at": datetime.now(timezone.utc).isoformat()}},
+            )
     except Exception as e:
         await bulk_jobs_col.update_one(
             {"id": job_id},
             {"$set": {"status": "failed", "error": str(e),
                        "completed_at": datetime.now(timezone.utc).isoformat()}},
         )
+        if campaign_id:
+            from database import campaigns_col
+            await campaigns_col.update_one(
+                {"id": campaign_id},
+                {"$set": {"status": "cancelled", "send_error": str(e)[:300],
+                          "completed_at": datetime.now(timezone.utc).isoformat()}},
+            )
 
 
 @router.post("/communications/bulk-send")

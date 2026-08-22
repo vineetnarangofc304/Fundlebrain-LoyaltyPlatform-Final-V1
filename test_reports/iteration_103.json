@@ -1,0 +1,45 @@
+{
+  "summary": "Independently verified the 3 P0 fixes on Campaign Manager + Communications Templates (backend pytest 23/23 passing + Playwright UI runs). Bug 1 (wizard template dropdown), Bug 2 (Marketing-DB campaigns send to ALL numbers incl. non-members via the fundle_campaign bulk pipe) and Bug 3 (Templates test-send auto-routes promotional SMS through the campaign pipe, plus the Send-via override) are all CONFIRMED FIXED. Regressions checked: audience-preview 'all', the needs_filter guard for tier/city/cohort/segment, simulated launch metrics, double-launch guard, auth (httpOnly kazo_token cookie, 401 on bad password, 403 unauthenticated). One NEW pre-existing P1 defect found: a Karix-mode campaign's DB record is never updated after the bulk job finishes (status stays 'running', sent stays 0), so the campaign cannot be deleted and stored metrics are stale while the UI cosmetically shows 'completed'.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "DELETE /api/campaigns/{id} + routes/communications_routes.py::_run_bulk_send_job", "issue": "_run_bulk_send_job receives campaign_id but never writes back to campaigns_col on completion. After a real Karix send the campaign doc stays status='running', sent=0, so (a) DELETE /api/campaigns/{id} returns 400 'Cannot delete a running campaign' forever (reproduced from UI: toast error, row not removed) and (b) campaign.sent/delivered stay 0 for ROI/reporting. CampaignManager.jsx only patches status/sent in local React state (lines ~76-93), so the 'completed' badge is cosmetic and lost on reload. Fix: on job completion/failure update campaigns_col {status:'completed'|'cancelled', sent, completed_at}.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/templates", "issue": "Accepts and silently ignores the `status` query param that CampaignManager.jsx sends (?status=active). Harmless today because the frontend filters client-side, but the filter should either be implemented or dropped from the caller."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CampaignManager (campaign row status/delete)", "issue": "Status shows 'completed' from client-side polling only; the delete button then fails with 'Cannot delete a running campaign'. Inconsistent state visible to the user.", "selector": "[data-testid^=\"delete-\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration103_campaign_p0_test.py",
+    "/app/backend/tests/_cleanup_i103.py",
+    "/app/test_reports/pytest/iteration103_results.xml"
+  ],
+  "action_items": [
+    "Update campaigns_col at the end of _run_bulk_send_job (status completed/cancelled + sent/failed + completed_at) so real-Karix campaigns are deletable and their persisted metrics are correct.",
+    "Optional: implement or remove the unused ?status= filter on GET /api/templates.",
+    "Housekeeping: 3 stuck campaigns (TEST_I103_LAUNCH x2, BUG2_LAUNCH_TEST) cannot be deleted until the status write-back is fixed."
+  ],
+  "critical_code_review_comments": [
+    "communications_routes.py::_run_bulk_send_job — takes campaign_id purely for logging context; add the campaign status/metric write-back in both the success and except branches, otherwise the campaign lifecycle can never terminate in the DB.",
+    "communications_routes.py is 1137 lines — consider splitting provider senders (Karix txn/bulk/WABA) out of the route module.",
+    "_karix_json_ok() nested-status handling verified correct against the live fundle_campaign response {\"status\":{\"code\":\"200\",\"desc\":\"Request accepted\"}}.",
+    "campaigns_routes.py::_do_launch marketing_db branch correctly dedups + blacklist-filters + caps before freezing the dataset; audience count matches the raw list size."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration103_campaign_p0_test.py",
+    "/app/backend/tests/_cleanup_i103.py"
+  ],
+  "success_rate": {"backend": "100% (23/23 pytest)", "frontend": "95% (all 3 bug flows verified; 1 status/delete inconsistency)"},
+  "seed_data_creation": "Created + deleted marketing DB 'TEST_I103_MDB' (9990002222 member + 9990001111/9990003333/9990004444 non-members). Launched TEST_I103_LAUNCH (4 real Karix bulk SMS to fake numbers) and TEST_I103_SIM (simulated). Test-sends fired to 9999999999 only. Campaigns could not be deleted due to the status bug above.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (from /app/memory/test_credentials.md, valid)",
+  "context_for_next_testing_agent": "Use /app/backend/tests/iteration103_campaign_p0_test.py as the regression suite for campaign/marketing-DB/test-send behaviour. It fires REAL Karix bulk SMS — it deliberately uses only fake numbers (9990001111/3333/4444, 9999999999) and the scratch member 9990002222; never seed real customer mobiles. Evidence captured: wizard template dropdown = 11 options; marketing_db audience-preview total = full list incl. tier='non-member' samples; bulk job processed=sent=4, failed=0; message-log for 9990001111 shows payload_summary.pipe='campaign', account='fundle_campaign', status='ok'; test-send returns pipe='campaign' for campaign_bulk and for via='campaign' override, pipe='transactional' for purchase templates; UI Send-via select has Auto/Campaign/Transactional and the UI test-send returned a Karix ackid with status.code=200.",
+  "rca_of_the_issue": "Karix-mode campaign lifecycle: launch_campaign sets status='running' and spawns _run_bulk_send_job as a fire-and-forget task. That worker only updates bulk_send_jobs, never campaigns_col, so the campaign document is permanently 'running' with sent=0. DELETE /api/campaigns/{id} blocks status=='running', hence the 400. Reproduction: create + launch any campaign with a template_id, wait for the bulk job to complete, then click the delete (trash) icon on that row."
+}
