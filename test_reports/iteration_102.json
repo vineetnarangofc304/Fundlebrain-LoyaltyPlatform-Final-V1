@@ -1,0 +1,49 @@
+{
+  "summary": "Full backend + frontend verification of the 4 new features: Marketing Database, Unique Coupons, Campaign Scheduling and the bulk (fundle_campaign) SMS pipe config. Backend: created /app/backend/tests/iteration102_mdb_unique_sched_api_test.py (23 pytest cases, HTTP-level against the public preview URL) — 23/23 PASS after correcting bad test fixtures. Frontend: 3 Playwright runs covering the Marketing Database page (create/list/detail/member filter/run-campaign prefill/delete), the Coupons > Unique coupons tab (allocate/list/detail codes bound to mobiles/export CSV download/delete) and the Campaign wizard scheduling flow (Schedule button swap, scheduled row with sched-time/Launch now/Unschedule, revert to draft, delete). All flows PASS. One real integration bug found & fixed (mixed-content HTTP redirect on /segments). No campaign with a Karix template was ever launched; every created dataset/batch/campaign was deleted and verified gone from Mongo.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Unique coupon batch — 'Segment' audience source",
+        "issue": "FIXED BY TESTER: UniqueCouponsPanel called api.get('/segments') (no trailing slash). FastAPI redirect_slashes returned a 307 to an absolute http:// URL, so the browser blocked it as Mixed Content ('insecure XMLHttpRequest endpoint http://.../api/segments/') and the segment list silently fell into the .catch() empty fallback. Changed to api.get('/segments/'); mixed-content errors now 0. NOTE: audit other api.get/post calls that omit a trailing slash on collection routes that only define '/' — same latent bug pattern.",
+        "affected_selectors": ["unique-src-segment", "unique-segment-select"]
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "Campaign wizard Review step + Unique coupon modal",
+        "issues": ["'Schedule for later' (schedule-at-input) and the unique-coupon valid-from/valid-to fields use the native browser datetime-local picker (mm/dd/yyyy, US format) instead of the shadcn calendar component used elsewhere; also renders dates as 12/24/2026 while the rest of the app uses '22 Aug 2026' — inconsistent for an India-market product. Cosmetic only, functionality works."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration102_mdb_unique_sched_api_test.py",
+    "/app/test_reports/pytest/iteration102_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL (cosmetic): use the shadcn date/time picker + dd MMM yyyy formatting for schedule-at-input and unique-from/to-input instead of the native browser datetime-local control.",
+    "RECOMMENDED: grep the frontend for api.get/post('/<collection>') calls missing a trailing slash where the backend only defines '/' — each one becomes a blocked mixed-content 307 in the HTTPS preview (same root cause as the /segments bug fixed here).",
+    "HOUSEKEEPING: 4 stale campaigns from earlier iterations are stuck in status 'running' and therefore undeletable (TEST_Campaign_1779281588, TEST_Campaign_1779304771, TEST_sim_970a67, TEST_kx_f89ef6, all from May 2026). Simulated campaigns never transition out of 'running', so DELETE /api/campaigns/{id} always 400s for them. Consider a completion step for simulated campaigns or allowing force-delete."
+  ],
+  "critical_code_review_comments": [
+    "marketing_db_routes.py GET /{mdb_id}/customers loads the entire mobiles array and resolves every member in memory before slicing the page — fine at the 200k cap for a one-off, but a 200k dataset means a full $in scan per page request. Consider caching the member flag on the dataset (recompute already exists) instead of recomputing on every page view.",
+    "coupons_routes.py _gen_unique_code uniqueness is only checked against the in-memory `used` set for the current batch — a code could collide with a code from a previous batch. There is no unique index on unique_coupons.code, so POS _lookup_pos_coupon on a colliding code would be ambiguous. Add a unique index on unique_coupons.code (and on marketing_databases.id / coupon_batches.id).",
+    "campaigns_routes.py /unschedule correctly $unsets schedule_at and gates on status=='scheduled' (400 otherwise) — verified. Delete of a 'running' campaign correctly 400s.",
+    "provider-config masks sms_campaign_api_key with bullet chars and never returns the raw key — verified good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration102_mdb_unique_sched_api_test.py",
+    "/app/frontend/src/pages/admin/coupons/UniqueCouponsPanel.jsx"
+  ],
+  "success_rate": {"backend": "100% (23/23)", "frontend": "100% (3/3 flows, after 1 tester-side fix)"},
+  "seed_data_creation": "None persisted. Temporary: marketing DBs 'TEST_QA Marketing DB'/'TEST_QA MDB UI', coupon batches 'TEST_QA Uniq'/'TEST_QA Uniq UI'/'TEST_QA Uniq UI2', campaigns 'TEST_QA Sched'/'TEST_QA Sched UI' — all deleted and verified absent from Mongo (marketing_databases, coupon_batches, unique_coupons, campaigns counts = 0).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (portal=crm) — login returns token AND sets httpOnly kazo_token cookie (asserted in test).",
+  "context_for_next_testing_agent": "Backend regression file: /app/backend/tests/iteration102_mdb_unique_sched_api_test.py (run with `pytest tests/iteration102_mdb_unique_sched_api_test.py -p no:randomly -o addopts=''` — tests are order-dependent within each class, hence the zz_ delete naming). IMPORTANT GOTCHA: the throwaway mobiles 90000008xx and 9000009xx are ALREADY seeded in this DB as 'Perf Customer' records, so they are MEMBERS — never use them to assert non_member_count. The file has a `non_member_mobiles` session fixture that probes random 9xxxxxxxxx numbers via the marketing-db member=false endpoint to get guaranteed non-members; reuse it. Verified working: marketing-db create/dedupe/member stats/list/detail/customers+member filters/recompute/delete, coupons unique allocate/list/detail/export CSV/delete + 400 on empty audience, campaign create scheduled/list/unschedule (->draft, schedule_at unset)/400 on re-unschedule/delete, provider-config bulk campaign fields with masked key. UI verified via the sidebar MARKETING group (must click 'MARKETING' to expand before nav-marketing-db is visible). Never select a Karix template in the wizard before clicking Schedule/Launch — assert review-sendmode contains 'Simulated' first (the test does).",
+  "rca_of_the_issue": "Mixed-content bug: FastAPI's redirect_slashes builds the redirect Location from the request scheme seen by the app (http, since TLS terminates at the k8s ingress). Requesting /api/segments (no trailing slash) from an HTTPS page therefore yielded a 307 to http://.../api/segments/, which Chrome blocks as insecure mixed content; the axios call rejected and the component's .catch(() => ({data:{rows:[]}})) hid the failure, leaving the Segment audience dropdown permanently empty. Fix applied: call the canonical path '/segments/' directly. Verified: 0 mixed-content console errors on re-run."
+}

@@ -450,3 +450,122 @@ agent_communication:
         audience-count, wizard-create-draft, wizard-create-launch, launch-{id}, roi-{id}, delivery-{id},
         campaign-delivery-modal, open-blacklist-btn, campaign-blacklist-modal, blacklist-mobile-input,
         blacklist-add-btn, blacklist-remove-{mobile}.
+
+# ==== Marketing Database + Unique Coupons + Campaign Scheduling + Bulk SMS pipe (session 3) ====
+backend:
+  - task: "Marketing Database — create (paste/upload), list, detail with member vs non-member stats, delete; usable as campaign audience"
+    implemented: true
+    working: true
+    file: "routes/marketing_db_routes.py, routes/campaigns_routes.py (_audience_filter_async marketing_db)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            New /api/marketing-db router. POST "" (paste mobiles_text/mobiles), POST /upload (CSV/XLSX, auto-detects
+            mobile column), GET "" list, GET /{id}, GET /{id}/customers (paginated, member flag + name/tier), DELETE /{id},
+            POST /{id}/recompute. Mobiles normalised to last-10, deduped; member stats = intersection with customers_col.
+            audience_type='marketing_db' resolves to {mobile:{$in:mobiles}} in campaigns. Self-verified via curl + tests/test_mdb_unique_sched.py (member stats correct).
+  - task: "Unique per-mobile coupons — allocate (segment/marketing_db/mobiles), batches list/detail/export/delete; POS mobile-bound single-use redemption"
+    implemented: true
+    working: true
+    file: "routes/coupons_routes.py (unique/*), routes/pos_ewards_routes.py (_lookup_pos_coupon), database.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            POST /api/coupons/unique/allocate → coupon_batches + unique_coupons (one code per mobile, locked to that
+            mobile). GET /unique/batches, GET /unique/batches/{id} (paginated codes + counts), GET /unique/batches/{id}/export
+            (CSV), DELETE /unique/batches/{id}. POS posCouponDetails + posRedeemCoupon now fall back to unique_coupons via
+            _lookup_pos_coupon: rejects if a different mobile tries it, rejects if already redeemed, marks redeemed + bumps
+            batch counter. Verified via tests/test_mdb_unique_sched.py (correct/wrong/redeemed lookups).
+  - task: "Campaign scheduling — schedule_at auto-fires via scheduler; unschedule"
+    implemented: true
+    working: true
+    file: "routes/campaigns_routes.py (_do_launch, run_due_campaigns, /unschedule), scheduler.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Launch refactored to _do_launch(c,user). New run_due_campaigns() APScheduler job every 60s auto-launches any
+            status='scheduled' campaign whose schedule_at<=now (no user action). POST /campaigns/{id}/unschedule reverts to
+            draft. Verified via tests/test_mdb_unique_sched.py (past-due scheduled campaign auto-fired to completed).
+  - task: "Campaign SMS via BULK Karix account (fundle_campaign JSON API); transactional stays on old pipe; MID capture + body-aware status"
+    implemented: true
+    working: true
+    file: "routes/communications_routes.py (send_sms_campaign_karix, _parse_provider_mid, _karix_json_ok, config), routes/master_brain_tools.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Campaign bulk sends now use send_sms_campaign_karix → Karix JsonReceiver (account fundle_campaign, sender KAZOFN,
+            key from provider_config). _run_bulk_send_job + MB campaigns use it; transactional SMS unchanged. Fixed
+            _parse_provider_mid to capture 'Request ID=' (so DLRs match) and _karix_submit_ok/_karix_json_ok so 'Platform
+            Accepted' vs in-body failures are labelled correctly. Provider config backfills the campaign account keys.
+            NOTE: real delivery needs the correct DLT-approved template body under KAZOFN — untested live-send (needs a real number).
+
+frontend:
+  - task: "Marketing Database page + Unique Coupons tab + Wizard (marketing_db audience, unique-batch attach, scheduling) + Provider Settings bulk section"
+    implemented: true
+    working: "NA"
+    file: "pages/admin/MarketingDatabasePage.jsx, pages/admin/coupons/UniqueCouponsPanel.jsx, pages/admin/CouponEngine.jsx, pages/admin/campaigns/CampaignWizard.jsx, pages/admin/CampaignManager.jsx, pages/admin/communications/ProviderSettingsPage.jsx, AdminLayout.jsx, App.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            New nav 'Marketing Database' under Segment Builder. Page: list w/ member vs non-member counts, create modal
+            (paste OR CSV/Excel upload), detail w/ member-filter + search + 'Run campaign on this dataset'. Coupons page now
+            has Static/Unique tabs; Unique panel: create-batch (offer + audience: marketing_db/segment/paste) → batches list
+            → detail (codes, filter, export CSV, delete). Wizard adds marketing_db audience, unique-coupon attach, and a
+            'Schedule for later' datetime → Schedule button. Campaign list shows scheduled time + Launch-now + Unschedule.
+            Provider Settings has a 'SMS — Campaign / Bulk (fundle_campaign)' section. Smoke-tested via screenshots.
+
+metadata:
+  version: "1.3"
+  test_sequence: 102
+
+test_plan:
+  current_focus:
+    - "Marketing Database page + Unique Coupons tab + Wizard (marketing_db audience, unique-batch attach, scheduling) + Provider Settings bulk section"
+    - "Marketing Database — create (paste/upload), list, detail with member vs non-member stats, delete; usable as campaign audience"
+    - "Unique per-mobile coupons — allocate, batches, POS mobile-bound single-use redemption"
+    - "Campaign scheduling — schedule_at auto-fires via scheduler; unschedule"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Session-3 features (login superadmin@fundle.io / Fundle@2026 at /crm/login). SAFETY: do NOT launch any campaign
+        with a Karix template linked (sends REAL SMS). Use SIMULATED campaigns (no template). Use throwaway 10-digit mobiles
+        and clean up test data (marketing DBs, coupon batches, campaigns) after.
+        BACKEND: (1) Marketing DB: POST /api/marketing-db {name,mobiles_text} (mix a real customer mobile + fake numbers) →
+        total/member_count/non_member_count; GET /api/marketing-db; GET /api/marketing-db/{id}/customers?member=true; DELETE.
+        (2) Unique coupons: POST /api/coupons/unique/allocate {name,coupon_type,discount_value,min_bill_amount,valid_from,valid_to,
+        prefix,audience:{source:'mobiles',mobiles:[...]}} → batch; GET /api/coupons/unique/batches; GET /unique/batches/{id};
+        DELETE. (3) Scheduling: create a campaign with status 'scheduled' + a PAST schedule_at, then the 60s scheduler auto-fires
+        it (status→completed); POST /api/campaigns/{id}/unschedule reverts a future-scheduled one to draft.
+        FRONTEND: 'Marketing Database' nav under Segment Builder → New database (paste numbers) → row shows members vs
+        non-members → open detail → member filter + 'Run campaign on this dataset' opens the wizard prefilled. Coupons page →
+        'Unique coupons' tab → New unique batch (offer + Paste numbers) → Allocate → batch appears → open → Export CSV.
+        Campaign wizard: audience 'From Marketing Database' selectable; Review step has a 'Schedule for later' datetime that
+        turns the button into 'Schedule'. Campaign list shows scheduled time + 'Launch now' + 'Unschedule'. testids:
+        nav-marketing-db, marketing-database-page, mdb-new-btn, mdb-create-modal, mdb-name-input, mdb-paste-input,
+        mdb-create-submit, mdb-open-{id}, mdb-member-filter, mdb-run-campaign, coupon-tab-unique, unique-new-btn,
+        unique-allocate-btn, unique-open-{id}, unique-export, audience-mdb-select, coupon-batch-select, schedule-at-input,
+        wizard-create-schedule, launch-now-{id}, unschedule-{id}.

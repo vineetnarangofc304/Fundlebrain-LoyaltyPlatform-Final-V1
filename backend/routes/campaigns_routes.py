@@ -1,5 +1,6 @@
 """Campaign manager."""
 import asyncio
+import logging
 import random
 import re
 import uuid
@@ -17,6 +18,7 @@ from auth import get_current_user, require_roles, log_audit, MANAGEMENT_ROLES
 from models import CampaignCreate, Campaign
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+logger = logging.getLogger("kazo-fundle.campaigns")
 
 campaign_datasets_col = db["campaign_datasets"]   # frozen targeted-mobile snapshot per campaign
 items_col = db["items"]                            # SKU master (sku, category, subcategory)
@@ -164,6 +166,12 @@ async def _audience_filter_async(c: dict) -> dict:
             seg = await _db["segments"].find_one({"id": seg_id}, {"_id": 0})
             if seg:
                 return await compile_tree(seg["tree"])
+    if c.get("audience_type") == "marketing_db":
+        mdb_id = (c.get("audience_filter") or {}).get("marketing_db_id")
+        if mdb_id:
+            mdb = await db["marketing_databases"].find_one({"id": mdb_id}, {"_id": 0, "mobiles": 1})
+            mobiles = (mdb or {}).get("mobiles") or []
+            return {"mobile": {"$in": mobiles}} if mobiles else {"mobile": {"$in": ["__none__"]}}
     return _audience_filter(c)
 
 
@@ -264,7 +272,11 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
         raise HTTPException(404, "Campaign not found")
     if c["status"] not in ("draft", "scheduled"):
         raise HTTPException(400, f"Campaign already {c['status']}")
+    return await _do_launch(c, user)
 
+
+async def _do_launch(c: dict, user: dict) -> dict:
+    campaign_id = c["id"]
     launched_at = datetime.now(timezone.utc).isoformat()
     fil = await _audience_filter_async(c)
     audience_size = await customers_col.count_documents(fil)
@@ -310,7 +322,8 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
         await bulk_jobs_col.insert_one(job_doc)
 
         # Fire-and-forget background task
-        asyncio.create_task(_run_bulk_send_job(job_id, template_id, fil, limit, campaign_id))
+        asyncio.create_task(_run_bulk_send_job(job_id, template_id, fil, limit, campaign_id,
+                                               c.get("coupon_batch_id")))
 
         await campaigns_col.update_one(
             {"id": campaign_id},
@@ -351,6 +364,43 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
     await log_audit(user, "launch_campaign", "campaign", campaign_id,
                       {"audience": audience_size, "mode": "simulated"})
     return {"success": True, "audience": audience_size, "sent": sent, "mode": "simulated"}
+
+
+_SCHED_USER = {"id": "scheduler", "email": "scheduler@system", "role": "super_admin"}
+
+
+async def run_due_campaigns() -> None:
+    """Scheduler tick: auto-launch any campaign whose scheduled time has arrived (no user action)."""
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        due = await campaigns_col.find(
+            {"status": "scheduled", "schedule_at": {"$lte": now}}, {"_id": 0}).limit(25).to_list(25)
+    except Exception as e:  # noqa: BLE001
+        logger.error("run_due_campaigns query failed: %s", e)
+        return
+    for c in due:
+        try:
+            await _do_launch(c, _SCHED_USER)
+            logger.info("Auto-launched scheduled campaign %s (%s)", c.get("id"), c.get("name"))
+        except Exception as e:  # noqa: BLE001
+            logger.error("Auto-launch failed for %s: %s", c.get("id"), e)
+            await campaigns_col.update_one(
+                {"id": c["id"]},
+                {"$set": {"status": "draft", "schedule_error": str(e)[:300]}})
+
+
+@router.post("/{campaign_id}/unschedule")
+async def unschedule_campaign(campaign_id: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    """Cancel a pending schedule — reverts the campaign to draft so it will NOT auto-fire."""
+    c = await campaigns_col.find_one({"id": campaign_id}, {"_id": 0, "status": 1})
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    if c.get("status") != "scheduled":
+        raise HTTPException(400, "Only a scheduled campaign can be unscheduled")
+    await campaigns_col.update_one({"id": campaign_id}, {"$set": {"status": "draft"}, "$unset": {"schedule_at": ""}})
+    await log_audit(user, "unschedule_campaign", "campaign", campaign_id, {})
+    return {"ok": True}
+
 
 
 @router.patch("/{campaign_id}")

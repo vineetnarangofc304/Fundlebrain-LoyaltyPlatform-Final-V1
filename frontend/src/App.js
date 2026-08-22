@@ -74,6 +74,7 @@ import VerifyLoadPage from "@/pages/admin/VerifyLoadPage";
 import ReconciliationPage from "@/pages/admin/ReconciliationPage";
 import DailyReco from "@/pages/admin/DailyReco";
 import SegmentBuilderPage from "@/pages/admin/SegmentBuilderPage";
+import MarketingDatabasePage from "@/pages/admin/MarketingDatabasePage";
 import LiveMonitorPage from "@/pages/admin/LiveMonitorPage";
 import POSCredentialsPage from "@/pages/admin/POSCredentialsPage";
 import SearchRedeemPointsOTP from "@/pages/admin/support_desk/SearchRedeemPointsOTP";
@@ -219,6 +220,7 @@ function App() {
             <Route path="reconciliation" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><ReconciliationPage /></ProtectedRoute>} />
             <Route path="daily-reco" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><DailyReco /></ProtectedRoute>} />
             <Route path="segments" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><SegmentBuilderPage /></ProtectedRoute>} />
+            <Route path="marketing-database" element={<ProtectedRoute roles={["super_admin","brand_admin","crm_manager","marketing_manager"]}><MarketingDatabasePage /></ProtectedRoute>} />
             <Route path="live-monitor" element={<LiveMonitorPage />} />
             <Route path="pos-credentials" element={<ProtectedRoute roles={["super_admin","brand_admin"]}><POSCredentialsPage /></ProtectedRoute>} />
 

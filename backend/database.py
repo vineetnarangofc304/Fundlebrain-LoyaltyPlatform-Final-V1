@@ -56,6 +56,7 @@ pos_stores_col = pos_db["stores"]
 pos_loyalty_config_col = pos_db["loyalty_config"]
 pos_coupons_col = pos_db["coupons"]
 pos_coupon_redemptions_col = pos_db["coupon_redemptions"]
+pos_unique_coupons_col = pos_db["unique_coupons"]   # per-mobile unique coupons (POS pool)
 
 
 def get_db():

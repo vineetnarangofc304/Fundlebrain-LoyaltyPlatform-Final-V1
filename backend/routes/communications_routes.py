@@ -8,6 +8,7 @@
 """
 import uuid
 import re
+import json
 import asyncio
 import logging
 import pymongo
@@ -72,6 +73,12 @@ class ProviderConfigIn(BaseModel):
     rcs_api_key: Optional[str] = None
     rcs_from_number: Optional[str] = None
     dlr_pull_endpoint: Optional[str] = None  # optional Karix DLR pull API (account-specific); DLRs normally arrive by webhook
+    # ---- Campaign (bulk / promotional) SMS account — Karix "fundle_campaign" JSON API ----
+    sms_campaign_api_key: Optional[str] = None
+    sms_campaign_endpoint: Optional[str] = None
+    sms_campaign_sender_id: Optional[str] = None
+    sms_campaign_entity_id: Optional[str] = None   # DLT Principal Entity (PE) ID for the bulk account
+    sms_campaign_account: Optional[str] = None
 
 
 DEFAULT_CONFIG = {
@@ -81,6 +88,13 @@ DEFAULT_CONFIG = {
     "sms_dlt_entity_id": "",
     "sms_dlt_template_id": "",
     "sms_dlt_tm_id": "",
+    # Campaign / bulk promotional pipe (separate Karix account "fundle_campaign", JSON API).
+    # Transactional SMS (new-txn, coupons, OTP) stays on sms_* above; CAMPAIGNS use these.
+    "sms_campaign_api_key": "ZxQ5XriI1uKO9fJfNK0ifQ==",
+    "sms_campaign_endpoint": "https://japi.instaalerts.zone/httpapi/JsonReceiver",
+    "sms_campaign_sender_id": "KAZOFN",
+    "sms_campaign_entity_id": "1101409540000012086",
+    "sms_campaign_account": "fundle_campaign",
     "whatsapp_endpoint": "https://rcmapi.instaalerts.zone/services/rcm/sendMessage",
     "whatsapp_from_number": "919133325826",
     "whatsapp_api_key": "",
@@ -96,6 +110,12 @@ async def _get_config() -> Dict[str, Any]:
     if not cfg:
         cfg = dict(DEFAULT_CONFIG)
         await provider_config_col.insert_one({**cfg, "_id": "singleton"})
+        return cfg
+    # Backfill any newly-added default keys onto an older singleton (e.g. the bulk campaign pipe).
+    missing = {k: v for k, v in DEFAULT_CONFIG.items() if k not in cfg}
+    if missing:
+        await provider_config_col.update_one({"_id": "singleton"}, {"$set": missing})
+        cfg = {**cfg, **missing}
     return cfg
 
 
@@ -323,18 +343,40 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
     })
 
 
-# Karix MID commonly appears in the accept body as e.g. "1701|91XXXXXXXXXX:<mid>" or a bare
-# token; grab the last long alphanumeric run as a best-effort message id.
+# The KAZO Karix (InstaAlerts) QueryStringReceiver accept body looks like:
+#   "Request accepted for Request ID=1333159741266381600 & Statuscode=200 & Info=Platform Accepted & Time=…"
+# The "Request ID" IS the message id Karix references in the DLR — capture it so delivery
+# reports can reconcile by mid. Also handle the older "1701|91XXXXXXXXXX:<mid>" pipe format.
+_REQID_RE = re.compile(r"request\s*id\s*[=:]\s*([A-Za-z0-9\-]{6,})", re.I)
 _MID_RE = re.compile(r"([A-Za-z0-9\-]{8,})\s*$")
 
 
 def _parse_provider_mid(resp: Optional[str]) -> Optional[str]:
     if not resp:
         return None
+    m = _REQID_RE.search(resp)
+    if m:
+        return m.group(1)
     tail = resp.split("·")[0].strip()          # drop our "delivered on attempt" suffix
     tok = tail.split(":")[-1].split("|")[-1].strip()
-    m = _MID_RE.search(tok) or _MID_RE.search(tail)
-    return m.group(1) if m else None
+    mm = _MID_RE.search(tok) or _MID_RE.search(tail)
+    return mm.group(1) if mm else None
+
+
+def _karix_submit_ok(body: Optional[str]) -> bool:
+    """A Karix HTTP 200 does NOT guarantee acceptance — the body can carry an in-band status.
+    Treat an explicit in-body 'Statuscode=<non-200>' or clear failure words as a submit failure
+    so the Message Log shows the real accept/reject instead of a misleading 'sent'."""
+    if not body:
+        return True
+    low = body.lower()
+    m = re.search(r"statuscode\s*=\s*(\d+)", low)
+    if m:
+        return m.group(1) == "200"
+    if any(k in low for k in ("invalid", "reject", "fail", "insufficient",
+                              "not delivered", "blocked", "blacklist", "error")):
+        return False
+    return True
 
 
 def _norm_dlr_status(raw: Optional[str]) -> str:
@@ -404,8 +446,9 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as c:
                 r = await c.get(cfg["sms_endpoint"], params=params)
-            ok = r.status_code == 200
-            status = "ok" if ok else f"http_{r.status_code}"
+            # HTTP 200 is only the transport ACK — inspect the body for the real submit status.
+            ok = r.status_code == 200 and _karix_submit_ok(r.text)
+            status = "ok" if ok else (f"http_{r.status_code}" if r.status_code != 200 else "rejected")
             # Always record what Karix returned (some non-200 bodies are empty) so the Message
             # Log shows the real accept/reject + reason.
             resp_text = r.text or f"HTTP {r.status_code} (empty body)"
@@ -428,6 +471,83 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
     err = f"{err} — gateway: {cfg.get('sms_endpoint')} (after {attempts} attempts)"
     await _log("sms", "exception", mob, params, err, template_id, event_trigger, context)
     return {"ok": False, "error": err}
+
+
+def _karix_json_ok(body: Optional[str]) -> bool:
+    """Parse the Karix JsonReceiver (bulk) response. Lenient — only flag EXPLICIT failures so a
+    successful accept (even with an unfamiliar shape) is not marked failed."""
+    if not body:
+        return True
+    try:
+        d = json.loads(body)
+    except Exception:  # noqa: BLE001
+        return _karix_submit_ok(body)
+    if isinstance(d, dict):
+        # common shapes: {"statusCode":"200"} / {"status":"success"} / {"messages":[{"code":"..."}]}
+        for k in ("statusCode", "status", "code", "responseCode"):
+            v = str(d.get(k, "")).strip().lower()
+            if v and v not in ("200", "202", "201", "0", "000", "success", "ok", "accepted", "submitted"):
+                return False
+        for m in (d.get("messages") or []):
+            if isinstance(m, dict):
+                mc = str(m.get("code") or m.get("statusCode") or m.get("status") or "").strip().lower()
+                if mc and mc not in ("200", "202", "201", "0", "000", "success", "ok", "accepted", "submitted"):
+                    return False
+    return True
+
+
+async def send_sms_campaign_karix(mobile: str, text: str, template_id: Optional[str] = None,
+                                   event_trigger: Optional[str] = None,
+                                   context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Send a PROMOTIONAL / campaign SMS via the Karix bulk account ('fundle_campaign', JSON API).
+    Transactional SMS keeps using send_sms_karix. Falls back to the transactional pipe only if the
+    bulk account is not configured (so nothing breaks), tagging the log so it's visible."""
+    cfg = await _get_config()
+    key = (cfg.get("sms_campaign_api_key") or "").strip()
+    endpoint = (cfg.get("sms_campaign_endpoint") or "").strip()
+    sender = (cfg.get("sms_campaign_sender_id") or "").strip()
+    if not key or not endpoint:
+        res = await send_sms_karix(mobile, text, template_id, event_trigger,
+                                   {**(context or {}), "pipe": "transactional_fallback"})
+        return res
+    if template_id:
+        tpl = await templates_col.find_one({"id": template_id}, {"_id": 0, "sender_id": 1})
+        if tpl and tpl.get("sender_id"):
+            sender = str(tpl["sender_id"]).strip()
+    digits = re.sub(r"\D", "", mobile or "")
+    dest = digits[-10:] if len(digits) >= 10 else digits   # bulk JSON API expects 10-digit dest
+    payload = {"ver": "1.0", "key": key,
+               "messages": [{"dest": [dest], "text": text, "send": sender}]}
+    log_payload = {"send": sender, "pipe": "campaign", "endpoint": endpoint, "account": cfg.get("sms_campaign_account")}
+    last_err = None
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=8.0)) as c:
+                r = await c.post(endpoint, json=payload)
+            ok = r.status_code in (200, 201, 202) and _karix_json_ok(r.text)
+            status = "ok" if ok else (f"http_{r.status_code}" if r.status_code not in (200, 201, 202) else "rejected")
+            resp_text = r.text or f"HTTP {r.status_code} (empty body)"
+            if attempt > 1:
+                resp_text = f"{resp_text} · sent on attempt {attempt}/{attempts}"
+            await _log("sms", status, dest, log_payload, resp_text, template_id, event_trigger,
+                       {**(context or {}), "pipe": "campaign"})
+            return {"ok": ok, "status_code": r.status_code, "response": r.text,
+                    "attempts": attempt, "pipe": "campaign"}
+        except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+            last_err = e
+            if attempt < attempts:
+                await asyncio.sleep(0.6 * attempt)
+            continue
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            break
+    err = f"{type(last_err).__name__}: {last_err}".strip().rstrip(":").strip() or type(last_err).__name__
+    err = f"{err} — bulk gateway: {endpoint} (after {attempts} attempts)"
+    await _log("sms", "exception", dest, log_payload, err, template_id, event_trigger,
+               {**(context or {}), "pipe": "campaign"})
+    return {"ok": False, "error": err, "pipe": "campaign"}
+
 
 
 async def send_whatsapp_karix(mobile: str, template_id_external: str,
@@ -513,6 +633,7 @@ async def get_provider_config(user: dict = Depends(get_current_user)):
     cfg = await _get_config()
     masked = {**cfg,
                "sms_api_key": _mask_secret(cfg.get("sms_api_key")),
+               "sms_campaign_api_key": _mask_secret(cfg.get("sms_campaign_api_key")),
                "whatsapp_api_key": _mask_secret(cfg.get("whatsapp_api_key")),
                "rcs_api_key": _mask_secret(cfg.get("rcs_api_key"))}
     return masked
@@ -525,7 +646,7 @@ async def update_provider_config(body: ProviderConfigIn, user: dict = Depends(ge
     cur = await _get_config()
     update = {k: v for k, v in body.model_dump().items() if v is not None and v != ""}
     # Don't overwrite secret with the masked placeholder coming back from UI
-    for secret_key in ("sms_api_key", "whatsapp_api_key", "rcs_api_key"):
+    for secret_key in ("sms_api_key", "sms_campaign_api_key", "whatsapp_api_key", "rcs_api_key"):
         if secret_key in update and "•" in update[secret_key]:
             update.pop(secret_key)
     if not update:
@@ -533,6 +654,7 @@ async def update_provider_config(body: ProviderConfigIn, user: dict = Depends(ge
     await provider_config_col.update_one({"_id": "singleton"}, {"$set": update})
     return {**cur, **update,
              "sms_api_key": _mask_secret({**cur, **update}.get("sms_api_key")),
+             "sms_campaign_api_key": _mask_secret({**cur, **update}.get("sms_campaign_api_key")),
              "whatsapp_api_key": _mask_secret({**cur, **update}.get("whatsapp_api_key")),
              "rcs_api_key": _mask_secret({**cur, **update}.get("rcs_api_key"))}
 
@@ -711,8 +833,11 @@ def _waba_positional_params(template: Dict[str, Any], params: Dict[str, Any]) ->
 
 
 async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dict[str, Any],
-                                limit: int, campaign_id: Optional[str] = None):
-    """Background worker: pulls audience, dispatches messages, updates job state."""
+                                limit: int, campaign_id: Optional[str] = None,
+                                coupon_batch_id: Optional[str] = None):
+    """Background worker: pulls audience, dispatches messages, updates job state.
+    Campaign SMS goes out via the BULK Karix account (fundle_campaign). If coupon_batch_id is set,
+    each recipient's own unique coupon code is injected as {{coupon_code}}."""
     started = datetime.now(timezone.utc).isoformat()
     ctx = {"campaign_id": campaign_id, "bulk_job_id": job_id, "source": "campaign_bulk"}
     await bulk_jobs_col.update_one(
@@ -740,13 +865,29 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
                 recipients = [c for c in recipients if norm10(c.get("mobile")) not in bl]
         except Exception:  # noqa: BLE001
             pass
+        # Per-recipient unique coupon codes (mobile -> code) when a unique batch is attached.
+        coupon_map: Dict[str, str] = {}
+        if coupon_batch_id:
+            try:
+                from routes.blacklist_util import norm10 as _n10
+                unique_coupons_col = db["unique_coupons"]
+                async for uc in unique_coupons_col.find(
+                        {"batch_id": coupon_batch_id}, {"_id": 0, "mobile": 1, "code": 1}):
+                    coupon_map[_n10(uc.get("mobile"))] = uc.get("code")
+            except Exception:  # noqa: BLE001
+                coupon_map = {}
         sent, failed, processed = 0, 0, 0
         for c in recipients:
             processed += 1
             params = _params_for_customer(c)
+            if coupon_map:
+                from routes.blacklist_util import norm10 as _n10
+                code = coupon_map.get(_n10(c.get("mobile")))
+                if code:
+                    params["coupon_code"] = code
             try:
                 if t["channel"] == "sms":
-                    res = await send_sms_karix(c["mobile"], _render(t["body"], params),
+                    res = await send_sms_campaign_karix(c["mobile"], _render(t["body"], params),
                                                  template_id=t["id"], event_trigger="campaign_bulk", context=ctx)
                 elif t["channel"] in {"whatsapp", "rcs"} and t.get("waba_template_id"):
                     res = await send_whatsapp_karix(c["mobile"], t["waba_template_id"],

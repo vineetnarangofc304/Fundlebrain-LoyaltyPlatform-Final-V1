@@ -19,6 +19,17 @@ const SECTIONS = [
     ],
   },
   {
+    title: "SMS — Campaign / Bulk (Karix 'fundle_campaign')",
+    accent: "burgundy",
+    fields: [
+      { key: "sms_campaign_endpoint", label: "Bulk Endpoint URL (JSON API)", placeholder: "https://japi.instaalerts.zone/httpapi/JsonReceiver" },
+      { key: "sms_campaign_api_key", label: "Bulk API Key", secret: true },
+      { key: "sms_campaign_sender_id", label: "Bulk Sender ID (promotional header)", placeholder: "KAZOFN" },
+      { key: "sms_campaign_entity_id", label: "DLT Entity ID (PE ID) for bulk account" },
+      { key: "sms_campaign_account", label: "Account name (reference)", placeholder: "fundle_campaign" },
+    ],
+  },
+  {
     title: "WhatsApp (Karix WABA)",
     accent: "emerald",
     fields: [

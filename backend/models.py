@@ -280,6 +280,7 @@ class CampaignBase(BaseModel):
     message_template: str = ""  # free-text fallback / preview (only used when no template_id)
     template_id: Optional[str] = None  # link to a comms Template for real Karix sends
     coupon_code: Optional[str] = None
+    coupon_batch_id: Optional[str] = None  # unique-coupon batch → per-recipient {{coupon_code}}
     schedule_at: Optional[datetime] = None
     status: str = "draft"  # draft | scheduled | running | completed | cancelled
     send_limit: int = 50000  # safety cap per launch

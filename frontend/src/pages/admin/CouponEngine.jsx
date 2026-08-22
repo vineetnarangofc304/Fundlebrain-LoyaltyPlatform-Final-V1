@@ -3,7 +3,8 @@ import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
 import { toast } from "sonner";
 import { fmtDate, fmtNum } from "@/lib/format";
-import { Plus } from "lucide-react";
+import { Plus, Ticket, Tag } from "lucide-react";
+import UniqueCouponsPanel from "./coupons/UniqueCouponsPanel";
 
 const COUPON_TYPES = ["flat", "percentage", "sku", "category", "store", "city", "referral", "birthday", "anniversary", "winback", "new_customer", "festival", "vip"];
 
@@ -11,6 +12,7 @@ export default function CouponEngine() {
   const [coupons, setCoupons] = useState([]);
   const [issuances, setIssuances] = useState([]);
   const [period, setPeriod] = useState(0);
+  const [tab, setTab] = useState("static");
   const [show, setShow] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm());
@@ -87,8 +89,9 @@ export default function CouponEngine() {
     <div data-testid="coupon-engine">
       <PageHeader
         title="Coupon Engine"
-        subtitle="DYNAMIC COUPON BUILDER"
+        subtitle="DYNAMIC COUPON BUILDER · UNIQUE PER-MOBILE COUPONS"
         actions={
+          tab === "static" ? (
           <>
             <select className="k-input !w-auto !py-1.5" value={period} onChange={(e) => setPeriod(parseInt(e.target.value))} data-testid="cp-period">
               <option value={0}>All time</option>
@@ -99,9 +102,21 @@ export default function CouponEngine() {
             </select>
             <button className="k-btn kazo-bg-burgundy" onClick={() => { setEditingId(null); setForm(emptyForm()); setShow(true); }} data-testid="new-coupon-btn"><Plus className="w-4 h-4" /> New coupon</button>
           </>
+          ) : null
         }
       />
 
+      <div className="px-8 pt-6">
+        <div className="flex gap-2">
+          <button onClick={() => setTab("static")} className={`pill flex items-center gap-1 ${tab === "static" ? "kazo-bg-burgundy text-white" : "pill-neutral"}`} data-testid="coupon-tab-static"><Tag className="w-3 h-3" /> Static coupons</button>
+          <button onClick={() => setTab("unique")} className={`pill flex items-center gap-1 ${tab === "unique" ? "kazo-bg-burgundy text-white" : "pill-neutral"}`} data-testid="coupon-tab-unique"><Ticket className="w-3 h-3" /> Unique coupons</button>
+        </div>
+      </div>
+
+      {tab === "unique" ? (
+        <div className="p-8"><UniqueCouponsPanel /></div>
+      ) : (
+      <>
       <div className="p-8">
         <div className="bg-white border border-black/10 overflow-x-auto">
           <table className="data-table">
@@ -187,6 +202,8 @@ export default function CouponEngine() {
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

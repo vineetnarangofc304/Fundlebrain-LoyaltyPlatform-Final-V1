@@ -42,6 +42,7 @@ const SECTIONS = [
     label: "MARKETING",
     items: [
       { to: "/admin/segments", icon: Filter, label: "Segment Builder", testid: "nav-segments" },
+      { to: "/admin/marketing-database", icon: Database, label: "Marketing Database", testid: "nav-marketing-db" },
       { to: "/admin/campaigns", icon: Send, label: "Campaigns", testid: "nav-campaigns" },
       { to: "/admin/auto-campaigns", icon: Cake, label: "Auto Campaigns", testid: "nav-auto-campaigns" },
       { to: "/admin/coupons", icon: Ticket, label: "Coupons", testid: "nav-coupons" },

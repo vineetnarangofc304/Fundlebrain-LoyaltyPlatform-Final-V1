@@ -1872,7 +1872,7 @@ async def _is_campaign_cancelled(cid: str) -> bool:
 
 
 async def _run_mb_campaign(cid: str) -> None:
-    from routes.communications_routes import send_sms_karix, _render
+    from routes.communications_routes import send_sms_campaign_karix, _render
     from database import templates_col
     camp = await master_campaigns_col.find_one({"id": cid}, {"_id": 0})
     if not camp:
@@ -1889,7 +1889,7 @@ async def _run_mb_campaign(cid: str) -> None:
         async def _dispatch(mobile, params):
             nonlocal sent, failed
             text = _render(body or "", params)
-            res = await send_sms_karix(mobile, text, template_id=camp.get("template_id"),
+            res = await send_sms_campaign_karix(mobile, text, template_id=camp.get("template_id"),
                                        event_trigger="campaign_bulk",
                                        context={"source": f"master_campaign:{cid}", "campaign_id": cid})
             if res.get("ok"):

@@ -52,6 +52,7 @@ from database import (
     pos_points_ledger_col as points_ledger_col,
     pos_coupons_col as coupons_col,
     pos_coupon_redemptions_col as coupon_redemptions_col,
+    pos_unique_coupons_col as unique_coupons_col,
     pos_loyalty_config_col as loyalty_config_col,
     api_logs_col,
 )
@@ -1960,6 +1961,33 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
     return resp
 
 
+async def _lookup_pos_coupon(code: str, mobile: str = ""):
+    """Resolve a POS coupon by code. Static coupons come from coupons_col; per-mobile UNIQUE
+    coupons come from unique_coupons_col and are LOCKED to their allocated mobile (single-use).
+    Returns (coupon_like, unique_doc_or_None, error_or_None)."""
+    c = await coupons_col.find_one({"code": code}, {"_id": 0})
+    if c:
+        return c, None, None
+    u = await unique_coupons_col.find_one({"code": code}, {"_id": 0})
+    if not u:
+        return None, None, "Invalid code"
+    m10 = (re.sub(r"\D", "", str(mobile or ""))[-10:]) if mobile else ""
+    if u.get("mobile") and m10 and u["mobile"] != m10:
+        return None, u, "This coupon is not valid for this mobile number"
+    if u.get("status") == "redeemed":
+        return None, u, "Maximum Redemption Limit set for this Coupon has been exhausted."
+    coupon_like = {
+        "id": u.get("id"), "code": u.get("code"), "name": u.get("name"),
+        "description": u.get("name"),
+        "coupon_type": u.get("coupon_type", "flat"), "discount_value": u.get("discount_value"),
+        "min_bill_amount": u.get("min_bill_amount") or 0, "max_discount": u.get("max_discount"),
+        "valid_from": u.get("valid_from"), "valid_to": u.get("valid_to"),
+        "usage_limit": 1, "times_used": 1 if u.get("status") == "redeemed" else 0,
+    }
+    return coupon_like, u, None
+
+
+
 # ---------------- Endpoint 10 — Verify Coupon ----------------
 @router.post("/posCouponDetails")
 async def pos_coupon_details(payload: Dict[str, Any], request: Request,
@@ -1982,9 +2010,9 @@ async def pos_coupon_details(payload: Dict[str, Any], request: Request,
                        ms=int((time.time() - t0) * 1000), payload=payload, response=resp)
         return resp
 
-    c = await coupons_col.find_one({"code": code}, {"_id": 0})
-    if not c:
-        resp = _err(400, "Invalid code")
+    c, _uq, _err_msg = await _lookup_pos_coupon(code, _norm_mobile(payload.get("customer_mobile")))
+    if _err_msg:
+        resp = _err(400, _err_msg)
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), payload=payload, response=resp,
                        api_key_label=cred.get("label"))
@@ -2064,9 +2092,9 @@ async def pos_redeem_coupon(payload: Dict[str, Any], request: Request,
     txn = payload.get("transaction") or {}
     bill_number = (txn.get("number") or txn.get("id") or "").strip()
 
-    c = await coupons_col.find_one({"code": code}, {"_id": 0})
-    if not c:
-        resp = _err(400, "Invalid code")
+    c, _uq, _err_msg = await _lookup_pos_coupon(code, mobile)
+    if _err_msg:
+        resp = _err(400, _err_msg)
         await _log_api(endpoint=endpoint, method="POST", status=400,
                        ms=int((time.time() - t0) * 1000), customer_mobile=mobile,
                        bill_number=bill_number, payload=payload, response=resp,
@@ -2104,7 +2132,17 @@ async def pos_redeem_coupon(payload: Dict[str, Any], request: Request,
     else:
         applicable = discount_value
 
-    await coupons_col.update_one({"id": c["id"]}, {"$inc": {"times_used": 1}})
+    if _uq is not None:
+        # UNIQUE coupon — mark this per-mobile code redeemed (single-use) + bump its batch counter.
+        await unique_coupons_col.update_one(
+            {"code": code},
+            {"$set": {"status": "redeemed", "redeemed_at": _now_iso(),
+                      "bill_number": bill_number, "discount": round(applicable, 2)}})
+        from database import db as _rootdb
+        await _rootdb["coupon_batches"].update_one(
+            {"id": _uq.get("batch_id")}, {"$inc": {"redeemed": 1}})
+    else:
+        await coupons_col.update_one({"id": c["id"]}, {"$inc": {"times_used": 1}})
     await coupon_redemptions_col.insert_one({
         "id": uuid.uuid4().hex,
         "coupon_id": c["id"],
@@ -2113,6 +2151,7 @@ async def pos_redeem_coupon(payload: Dict[str, Any], request: Request,
         "bill_number": bill_number,
         "discount_amount": round(applicable, 2),
         "source": "pos_ewards",
+        "unique": _uq is not None,
         "created_at": _now_iso(),
     })
 

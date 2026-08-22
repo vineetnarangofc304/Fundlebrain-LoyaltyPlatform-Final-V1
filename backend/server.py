@@ -30,6 +30,7 @@ from routes.customers_routes import router as customers_router
 from routes.loyalty_routes import router as loyalty_router
 from routes.coupons_routes import router as coupons_router
 from routes.campaigns_routes import router as campaigns_router
+from routes.marketing_db_routes import router as marketing_db_router
 from routes.ai_routes import router as ai_router
 from routes.api_monitor_routes import router as api_monitor_router
 from routes.stores_routes import router as stores_router, pos_router
@@ -93,6 +94,7 @@ api_router.include_router(customers_router)
 api_router.include_router(loyalty_router)
 api_router.include_router(coupons_router)
 api_router.include_router(campaigns_router)
+api_router.include_router(marketing_db_router)
 api_router.include_router(ai_router)
 api_router.include_router(api_monitor_router)
 api_router.include_router(stores_router)
@@ -541,6 +543,17 @@ async def ensure_indexes():
         created += 1
     except Exception as e:
         logger.warning(f"mobile lookup index warn: {e}")
+    # Campaign Manager add-ons: unique coupon codes must be globally unique (POS looks up by code);
+    # plus lookup indexes for unique coupons + marketing databases + coupon batches.
+    try:
+        await db["unique_coupons"].create_index([("code", 1)], unique=True, name="uniq_unique_coupon_code")
+        await db["unique_coupons"].create_index([("batch_id", 1)], name="ix_unique_batch")
+        await db["unique_coupons"].create_index([("mobile", 1)], name="ix_unique_mobile")
+        await db["coupon_batches"].create_index([("id", 1)], unique=True, name="uniq_coupon_batch_id")
+        await db["marketing_databases"].create_index([("id", 1)], unique=True, name="uniq_marketing_db_id")
+        created += 5
+    except Exception as e:
+        logger.warning(f"campaign add-on index warn: {e}")
     logger.info(f"ensure_indexes complete — {created} indexes ensured")
 
 

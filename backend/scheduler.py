@@ -134,6 +134,17 @@ def start_scheduler():
                    coalesce=True,
                    misfire_grace_time=3600)
 
+    # Scheduled Campaigns — fire any campaign whose scheduled time has arrived, automatically
+    # (no user action). Runs every minute.
+    from routes.campaigns_routes import run_due_campaigns
+    sched.add_job(run_due_campaigns,
+                   IntervalTrigger(seconds=60),
+                   id="due_campaigns",
+                   replace_existing=True,
+                   max_instances=1,
+                   coalesce=True,
+                   misfire_grace_time=300)
+
     sched.start()
     _scheduler = sched
     logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST | RFM breakpoints refresh every 30m | data-health daily 07:30 IST | reco daily pull %02d:%02d IST (enabled=%s)",

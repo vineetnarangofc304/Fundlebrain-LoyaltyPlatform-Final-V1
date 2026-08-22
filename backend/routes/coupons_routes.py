@@ -2,10 +2,13 @@
 from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
-from database import coupons_col, coupon_redemptions_col, customers_col
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from database import coupons_col, coupon_redemptions_col, customers_col, db
 from auth import get_current_user, require_roles, log_audit, MANAGEMENT_ROLES
 from models import CouponCreate, Coupon
 import uuid
+import re
 import random
 import string
 
@@ -203,3 +206,159 @@ async def redeem_coupon(coupon_id: str, customer_mobile: str, bill_number: str, 
     await coupons_col.update_one({"id": coupon_id}, {"$inc": {"times_used": 1}})
     await log_audit(user, "redeem_coupon", "coupon", coupon_id, {"code": c["code"], "customer": customer_mobile})
     return {"success": True, "discount": discount, "code": c["code"]}
+
+
+# ═══════════════════════ Unique (per-mobile) coupons ═══════════════════════
+# A "batch" defines an offer once; one UNIQUE code is generated per mobile and locked to that
+# mobile (single-use, redeemable only by that number at POS). Sending is done separately (via a
+# campaign that references the batch, or by Master Brain).
+unique_coupons_col = db["unique_coupons"]
+coupon_batches_col = db["coupon_batches"]
+
+
+def _gen_unique_code(prefix: str) -> str:
+    return f"{prefix}{''.join(random.choices(string.ascii_uppercase + string.digits, k=8))}"
+
+
+def _norm10(m) -> str:
+    d = re.sub(r"\D", "", str(m or ""))
+    return d[-10:] if len(d) >= 10 else d
+
+
+class UniqueAudience(BaseModel):
+    source: str  # segment | marketing_db | mobiles
+    segment_id: Optional[str] = None
+    marketing_db_id: Optional[str] = None
+    mobiles: Optional[List[str]] = None
+
+
+class UniqueAllocateIn(BaseModel):
+    name: str
+    coupon_type: str = "flat"  # flat | percentage
+    discount_value: float
+    min_bill_amount: float = 0.0
+    max_discount: Optional[float] = None
+    valid_from: datetime
+    valid_to: datetime
+    prefix: str = "KAZO"
+    audience: UniqueAudience
+
+
+async def _resolve_unique_audience(a: UniqueAudience) -> List[str]:
+    if a.source == "mobiles":
+        raw = a.mobiles or []
+    elif a.source == "marketing_db":
+        mdb = await db["marketing_databases"].find_one({"id": a.marketing_db_id}, {"_id": 0, "mobiles": 1})
+        if not mdb:
+            raise HTTPException(404, "Marketing database not found")
+        raw = mdb.get("mobiles") or []
+    elif a.source == "segment":
+        seg = await db["segments"].find_one({"id": a.segment_id}, {"_id": 0, "tree": 1})
+        if not seg:
+            raise HTTPException(404, "Segment not found")
+        from routes.segments_routes import compile_tree
+        fil = await compile_tree(seg["tree"])
+        raw = await customers_col.distinct("mobile", fil)
+    else:
+        raise HTTPException(400, "Invalid audience source (use segment | marketing_db | mobiles)")
+    return sorted({_norm10(m) for m in raw if len(_norm10(m)) == 10})
+
+
+@router.post("/unique/allocate")
+async def allocate_unique(body: UniqueAllocateIn, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    mobiles = await _resolve_unique_audience(body.audience)
+    if not mobiles:
+        raise HTTPException(400, "No valid recipients resolved for this audience")
+    if len(mobiles) > 200000:
+        raise HTTPException(400, "Too many recipients (max 200000)")
+    batch_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    vf = body.valid_from.isoformat() if isinstance(body.valid_from, datetime) else body.valid_from
+    vt = body.valid_to.isoformat() if isinstance(body.valid_to, datetime) else body.valid_to
+    prefix = (re.sub(r"[^A-Za-z0-9]", "", body.prefix or "KAZO")[:10] or "KAZO").upper()
+    used, docs = set(), []
+    for m in mobiles:
+        code = _gen_unique_code(prefix)
+        while code in used:
+            code = _gen_unique_code(prefix)
+        used.add(code)
+        docs.append({
+            "id": uuid.uuid4().hex, "code": code, "mobile": m, "batch_id": batch_id,
+            "status": "allocated", "created_at": now, "redeemed_at": None,
+            "bill_number": None, "discount": None, "name": body.name,
+            "coupon_type": body.coupon_type, "discount_value": body.discount_value,
+            "min_bill_amount": body.min_bill_amount, "max_discount": body.max_discount,
+            "valid_from": vf, "valid_to": vt,
+        })
+    for i in range(0, len(docs), 5000):
+        await unique_coupons_col.insert_many(docs[i:i + 5000], ordered=False)
+    batch = {
+        "id": batch_id, "name": body.name, "coupon_type": body.coupon_type,
+        "discount_value": body.discount_value, "min_bill_amount": body.min_bill_amount,
+        "max_discount": body.max_discount, "valid_from": vf, "valid_to": vt, "prefix": prefix,
+        "source": body.audience.source,
+        "source_ref": body.audience.marketing_db_id or body.audience.segment_id,
+        "total": len(docs), "redeemed": 0, "created_at": now,
+        "created_by": user["id"], "created_by_email": user.get("email"),
+    }
+    await coupon_batches_col.insert_one(batch)
+    await log_audit(user, "allocate_unique_coupons", "coupon_batch", batch_id,
+                    {"name": body.name, "total": len(docs)})
+    batch.pop("_id", None)
+    return batch
+
+
+@router.get("/unique/batches")
+async def list_unique_batches(user: dict = Depends(get_current_user)):
+    rows = await coupon_batches_col.find({}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    return {"rows": rows, "total": len(rows)}
+
+
+@router.get("/unique/batches/{batch_id}")
+async def get_unique_batch(batch_id: str, page: int = 1, page_size: int = 50,
+                           status: Optional[str] = None, q: Optional[str] = None,
+                           user: dict = Depends(get_current_user)):
+    b = await coupon_batches_col.find_one({"id": batch_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(404, "Batch not found")
+    fil: dict = {"batch_id": batch_id}
+    if status in ("allocated", "redeemed"):
+        fil["status"] = status
+    if q:
+        needle = _norm10(q) or re.sub(r"\D", "", q)
+        fil["$or"] = [{"mobile": {"$regex": needle}}, {"code": {"$regex": q.upper()}}]
+    total = await unique_coupons_col.count_documents(fil)
+    redeemed = await unique_coupons_col.count_documents({"batch_id": batch_id, "status": "redeemed"})
+    rows = await unique_coupons_col.find(
+        fil, {"_id": 0, "code": 1, "mobile": 1, "status": 1, "redeemed_at": 1,
+              "bill_number": 1, "discount": 1}).skip(max(0, (page - 1) * page_size)).limit(page_size).to_list(page_size)
+    return {"batch": b, "rows": rows, "total": total, "redeemed": redeemed,
+            "allocated": b.get("total", 0) - redeemed, "page": page, "page_size": page_size}
+
+
+@router.get("/unique/batches/{batch_id}/export")
+async def export_unique_batch(batch_id: str, user: dict = Depends(get_current_user)):
+    b = await coupon_batches_col.find_one({"id": batch_id}, {"_id": 0, "name": 1})
+    if not b:
+        raise HTTPException(404, "Batch not found")
+    import io
+    import csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["code", "mobile", "status", "redeemed_at", "bill_number", "discount"])
+    async for u in unique_coupons_col.find({"batch_id": batch_id}, {"_id": 0}):
+        w.writerow([u.get("code"), u.get("mobile"), u.get("status"), u.get("redeemed_at") or "",
+                    u.get("bill_number") or "", u.get("discount") if u.get("discount") is not None else ""])
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="unique_coupons_{batch_id}.csv"'})
+
+
+@router.delete("/unique/batches/{batch_id}")
+async def delete_unique_batch(batch_id: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    res = await coupon_batches_col.delete_one({"id": batch_id})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Batch not found")
+    await unique_coupons_col.delete_many({"batch_id": batch_id})
+    await log_audit(user, "delete_unique_batch", "coupon_batch", batch_id, {})
+    return {"ok": True}

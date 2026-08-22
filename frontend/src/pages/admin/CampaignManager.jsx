@@ -37,10 +37,12 @@ export default function CampaignManager() {
   };
   useEffect(() => { load(); }, []);
 
-  // Prefill from Segment Builder → open the wizard pre-seeded
+  // Prefill from Segment Builder / Marketing Database → open the wizard pre-seeded
   useEffect(() => {
     const segmentId = searchParams.get("segment_id");
     const segmentName = searchParams.get("segment_name");
+    const mdbId = searchParams.get("marketing_db_id");
+    const mdbName = searchParams.get("marketing_db_name");
     if (segmentId) {
       setWizardPrefill({
         name: segmentName ? `Campaign · ${segmentName}` : "",
@@ -50,6 +52,15 @@ export default function CampaignManager() {
       setShowWizard(true);
       setSearchParams({}, { replace: true });
       toast.info(`Campaign prefilled with segment "${segmentName || segmentId}"`);
+    } else if (mdbId) {
+      setWizardPrefill({
+        name: mdbName ? `Campaign · ${mdbName}` : "",
+        audience_type: "marketing_db",
+        audience_filter: { marketing_db_id: mdbId, marketing_db_name: mdbName },
+      });
+      setShowWizard(true);
+      setSearchParams({}, { replace: true });
+      toast.info(`Campaign prefilled with marketing database "${mdbName || mdbId}"`);
     }
   }, [searchParams, setSearchParams]);
 
@@ -105,6 +116,16 @@ export default function CampaignManager() {
     }
   };
 
+  const unschedule = async (c) => {
+    try {
+      await api.post(`/campaigns/${c.id}/unschedule`);
+      toast.success("Schedule cancelled — moved back to draft");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to unschedule");
+    }
+  };
+
   return (
     <div data-testid="campaign-manager">
       <PageHeader title="Campaign Manager" subtitle="GUIDED WORKFLOW · REAL ROI · KARIX DELIVERY"
@@ -134,6 +155,9 @@ export default function CampaignManager() {
                         {c.name}
                       </div>
                       <div className="text-xs text-neutral-500">{fmtDate(c.created_at)}{c.bulk_job_id ? ` · job ${c.bulk_job_id.slice(0, 8)}` : ""}</div>
+                      {c.status === "scheduled" && c.schedule_at && (
+                        <div className="text-[11px] text-indigo-600 mt-0.5" data-testid={`sched-time-${c.id}`}>⏱ Fires {new Date(c.schedule_at).toLocaleString()}</div>
+                      )}
                     </td>
                     <td><div className="flex gap-1 flex-wrap">{c.channels?.map((ch) => <span key={ch} className="pill pill-neutral">{ch}</span>)}</div></td>
                     <td><span className="pill pill-info">{c.audience_type}</span></td>
@@ -166,6 +190,14 @@ export default function CampaignManager() {
                             {launching === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
                             {launching === c.id ? "Launching…" : "Launch"}
                           </button>
+                        )}
+                        {c.status === "scheduled" && (
+                          <>
+                            <button className="k-btn k-btn-sm kazo-bg-burgundy disabled:opacity-50" onClick={() => launch(c.id)} disabled={launching === c.id} data-testid={`launch-now-${c.id}`}>
+                              {launching === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />} Launch now
+                            </button>
+                            <button className="k-btn k-btn-sm k-btn-ghost" onClick={() => unschedule(c)} data-testid={`unschedule-${c.id}`}>Unschedule</button>
+                          </>
                         )}
                         {canReport && (
                           <>
