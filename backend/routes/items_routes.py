@@ -51,6 +51,16 @@ async def delete_category(cid: str, user: dict = Depends(require_roles(*MANAGEME
 
 
 # ---------- Items / SKUs ----------
+@router.get("/facets")
+async def item_facets(user: dict = Depends(get_current_user)):
+    """Category -> subcategories map + flat category list, for the campaign SKU targeter."""
+    pipe = [{"$group": {"_id": "$category", "subs": {"$addToSet": "$subcategory"}}}]
+    rows = await items_col.aggregate(pipe).to_list(2000)
+    cat_map = {r["_id"]: sorted([s for s in (r.get("subs") or []) if s])
+               for r in rows if r.get("_id")}
+    return {"categories": sorted(cat_map.keys()), "subcategories_by_category": cat_map}
+
+
 @router.get("")
 async def list_items(
     q: Optional[str] = None, category: Optional[str] = None, is_active: Optional[bool] = None,

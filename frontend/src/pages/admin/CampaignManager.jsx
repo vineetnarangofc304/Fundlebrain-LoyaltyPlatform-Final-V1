@@ -4,7 +4,9 @@ import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
 import { toast } from "sonner";
 import { fmtMoney2, fmtNum, fmtDate } from "@/lib/format";
-import { Plus, Play, Sparkles, Send, MessageSquare, Mail, Smartphone, Loader2 } from "lucide-react";
+import { Plus, Play, Sparkles, Send, MessageSquare, Mail, Smartphone, Loader2, TrendingUp } from "lucide-react";
+import CampaignObjective from "./campaigns/CampaignObjective";
+import CampaignRoiModal from "./campaigns/CampaignRoiModal";
 
 const CHANNELS = ["whatsapp", "sms", "email", "push", "in_app"];
 
@@ -22,10 +24,12 @@ export default function CampaignManager() {
   const [coupons, setCoupons] = useState([]);
   const [searchParams, setSearchParams] = useSearchParams();
   const [launching, setLaunching] = useState(null);  // campaign id being launched
+  const [roiCampaign, setRoiCampaign] = useState(null);  // campaign whose ROI modal is open
   const [form, setForm] = useState({
     name: "", description: "", channels: ["whatsapp"], audience_type: "all",
     audience_filter: {}, message_template: "", template_id: "",
     coupon_code: "", status: "draft", send_limit: 50000,
+    objective: "generic", objective_params: {}, roi_window: "7d",
   });
   const pollRef = useRef(null);
 
@@ -97,7 +101,7 @@ export default function CampaignManager() {
       await api.post("/campaigns", payload);
       toast.success("Campaign created");
       setShow(false);
-      setForm({ name: "", description: "", channels: ["whatsapp"], audience_type: "all", audience_filter: {}, message_template: "", template_id: "", coupon_code: "", status: "draft", send_limit: 50000 });
+      setForm({ name: "", description: "", channels: ["whatsapp"], audience_type: "all", audience_filter: {}, message_template: "", template_id: "", coupon_code: "", status: "draft", send_limit: 50000, objective: "generic", objective_params: {}, roi_window: "7d" });
       load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed");
@@ -182,6 +186,15 @@ export default function CampaignManager() {
                           {launching === c.id ? "Launching…" : "Launch"}
                         </button>
                       )}
+                      {(c.launched_at || c.status === "running" || c.status === "completed") && (
+                        <button
+                          className="k-btn k-btn-sm k-btn-ghost"
+                          onClick={() => setRoiCampaign(c)}
+                          data-testid={`roi-${c.id}`}
+                        >
+                          <TrendingUp className="w-3 h-3" /> ROI
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -199,6 +212,9 @@ export default function CampaignManager() {
             <div className="space-y-3">
               <input className="k-input" placeholder="Campaign name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="campaign-name-input" />
               <textarea className="k-input" placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+
+              <CampaignObjective form={form} setForm={setForm} />
+
               <div>
                 <label className="text-[10px] uppercase tracking-widest text-neutral-500 mb-2 block">Channels</label>
                 <div className="flex gap-2 flex-wrap">
@@ -296,6 +312,8 @@ export default function CampaignManager() {
           </div>
         </div>
       )}
+
+      {roiCampaign && <CampaignRoiModal campaign={roiCampaign} onClose={() => setRoiCampaign(null)} />}
     </div>
   );
 }

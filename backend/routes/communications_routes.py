@@ -298,6 +298,8 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
         "status": status,
         "mobile": mobile,
         "template_id": template_id,
+        "campaign_id": ctx.get("campaign_id"),
+        "bulk_job_id": ctx.get("bulk_job_id"),
         "event_trigger": event_trigger,
         "bill_number": ctx.get("bill_number"),
         "trigger_source": ctx.get("source"),
@@ -386,10 +388,11 @@ async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = No
 async def send_whatsapp_karix(mobile: str, template_id_external: str,
                                 parameter_values: Dict[str, str],
                                 template_id: Optional[str] = None,
-                                event_trigger: Optional[str] = None) -> Dict[str, Any]:
+                                event_trigger: Optional[str] = None,
+                                context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = await _get_config()
     if not cfg.get("whatsapp_endpoint") or not cfg.get("whatsapp_from_number"):
-        await _log("whatsapp", "config_missing", mobile, {}, None, template_id, event_trigger)
+        await _log("whatsapp", "config_missing", mobile, {}, None, template_id, event_trigger, context)
         return {"ok": False, "error": "WhatsApp provider not configured"}
     mob = _normalize_mobile(mobile)
     payload = {
@@ -421,10 +424,10 @@ async def send_whatsapp_karix(mobile: str, template_id_external: str,
             r = await c.post(cfg["whatsapp_endpoint"], json=payload, headers=headers)
         ok = r.status_code in (200, 201, 202)
         await _log("whatsapp", "ok" if ok else f"http_{r.status_code}", mob, payload,
-                    r.text, template_id, event_trigger)
+                    r.text, template_id, event_trigger, context)
         return {"ok": ok, "status_code": r.status_code, "response": r.text}
     except Exception as e:
-        await _log("whatsapp", "exception", mob, payload, str(e), template_id, event_trigger)
+        await _log("whatsapp", "exception", mob, payload, str(e), template_id, event_trigger, context)
         return {"ok": False, "error": str(e)}
 
 
@@ -663,9 +666,10 @@ def _waba_positional_params(template: Dict[str, Any], params: Dict[str, Any]) ->
 
 
 async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dict[str, Any],
-                                limit: int):
+                                limit: int, campaign_id: Optional[str] = None):
     """Background worker: pulls audience, dispatches messages, updates job state."""
     started = datetime.now(timezone.utc).isoformat()
+    ctx = {"campaign_id": campaign_id, "bulk_job_id": job_id, "source": "campaign_bulk"}
     await bulk_jobs_col.update_one(
         {"id": job_id},
         {"$set": {"status": "running", "started_at": started}},
@@ -690,12 +694,12 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
             try:
                 if t["channel"] == "sms":
                     res = await send_sms_karix(c["mobile"], _render(t["body"], params),
-                                                 template_id=t["id"], event_trigger="campaign_bulk")
+                                                 template_id=t["id"], event_trigger="campaign_bulk", context=ctx)
                 elif t["channel"] in {"whatsapp", "rcs"} and t.get("waba_template_id"):
                     res = await send_whatsapp_karix(c["mobile"], t["waba_template_id"],
                                                      _waba_positional_params(t, params),
                                                      template_id=t["id"],
-                                                     event_trigger="campaign_bulk")
+                                                     event_trigger="campaign_bulk", context=ctx)
                 else:
                     res = {"ok": False, "error": "unsupported"}
                 if res.get("ok"):
@@ -705,7 +709,7 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
             except Exception as e:
                 failed += 1
                 await _log(t["channel"], "bulk_exception", c.get("mobile", ""), {},
-                            str(e), t["id"], "campaign_bulk")
+                            str(e), t["id"], "campaign_bulk", ctx)
             # Heartbeat every 25 processed
             if processed % 25 == 0:
                 await bulk_jobs_col.update_one({"id": job_id},

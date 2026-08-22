@@ -1,15 +1,23 @@
 """Campaign manager."""
 import asyncio
 import random
+import re
 import uuid
-from datetime import datetime, timezone
-from typing import Optional, List
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Dict, Any
+import pymongo
 from fastapi import APIRouter, Depends, HTTPException
-from database import campaigns_col, customers_col
+from database import (
+    campaigns_col, customers_col, transactions_col, coupon_redemptions_col, db,
+)
+from routes._money import NET_EXPR
 from auth import get_current_user, require_roles, log_audit, MANAGEMENT_ROLES
 from models import CampaignCreate, Campaign
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+
+campaign_datasets_col = db["campaign_datasets"]   # frozen targeted-mobile snapshot per campaign
+items_col = db["items"]                            # SKU master (sku, category, subcategory)
 
 
 @router.get("")
@@ -98,6 +106,32 @@ async def _audience_filter_async(c: dict) -> dict:
     return _audience_filter(c)
 
 
+def _parse_window(w: Optional[str]) -> timedelta:
+    """'72h' | '3d' | '5d' | '7d' | '30d' | '<n>h' | '<n>d' -> timedelta (default 7 days)."""
+    m = re.fullmatch(r"\s*(\d+)\s*([hd])\s*", (w or "7d").lower())
+    if not m:
+        return timedelta(days=7)
+    n, unit = int(m.group(1)), m.group(2)
+    return timedelta(hours=n) if unit == "h" else timedelta(days=n)
+
+
+async def _freeze_dataset(campaign_id: str, fil: dict, limit: int, t0: str) -> int:
+    """Snapshot the exact targeted mobiles at launch so ROI is measured against a fixed
+    dataset (not a live/moving filter). Capped at the send limit (max 50k, matching the
+    bulk-send worker)."""
+    cap = min(int(limit or 50000), 50000)
+    with pymongo.timeout(120):
+        rows = await customers_col.find(
+            fil or {}, {"_id": 0, "mobile": 1}).limit(cap).to_list(cap)
+    mobiles = sorted({(r.get("mobile") or "").strip() for r in rows if (r.get("mobile") or "").strip()})
+    await campaign_datasets_col.replace_one(
+        {"campaign_id": campaign_id},
+        {"campaign_id": campaign_id, "mobiles": mobiles, "size": len(mobiles),
+         "t0": t0, "frozen_at": datetime.now(timezone.utc).isoformat()},
+        upsert=True)
+    return len(mobiles)
+
+
 @router.post("/{campaign_id}/launch")
 async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
     """Launch a campaign.
@@ -114,8 +148,11 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
     if c["status"] not in ("draft", "scheduled"):
         raise HTTPException(400, f"Campaign already {c['status']}")
 
+    launched_at = datetime.now(timezone.utc).isoformat()
     fil = await _audience_filter_async(c)
     audience_size = await customers_col.count_documents(fil)
+    send_limit = int(c.get("send_limit") or 50000)
+    dataset_size = await _freeze_dataset(campaign_id, fil, send_limit, launched_at)
 
     template_id = c.get("template_id")
     if template_id:
@@ -136,7 +173,7 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
             if t.get("waba_approval_status") != "approved":
                 raise HTTPException(400, "WhatsApp/RCS template must be approved before launch")
 
-        limit = int(c.get("send_limit") or 50000)
+        limit = send_limit
         job_id = uuid.uuid4().hex
         job_doc = {
             "id": job_id,
@@ -156,13 +193,14 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
         await bulk_jobs_col.insert_one(job_doc)
 
         # Fire-and-forget background task
-        asyncio.create_task(_run_bulk_send_job(job_id, template_id, fil, limit))
+        asyncio.create_task(_run_bulk_send_job(job_id, template_id, fil, limit, campaign_id))
 
         await campaigns_col.update_one(
             {"id": campaign_id},
             {"$set": {
                 "status": "running",
-                "launched_at": datetime.now(timezone.utc).isoformat(),
+                "launched_at": launched_at,
+                "dataset_size": dataset_size,
                 "bulk_job_id": job_id,
                 "send_mode": "karix",
                 "sent": 0, "delivered": 0, "opened": 0, "clicked": 0,
@@ -185,7 +223,8 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
         {"id": campaign_id},
         {"$set": {
             "status": "running",
-            "launched_at": datetime.now(timezone.utc).isoformat(),
+            "launched_at": launched_at,
+            "dataset_size": dataset_size,
             "send_mode": "simulated",
             "sent": sent, "delivered": delivered, "opened": opened, "clicked": clicked,
             "redeemed": redeemed, "revenue_generated": float(revenue),
@@ -203,3 +242,143 @@ async def update_campaign(campaign_id: str, updates: dict, user: dict = Depends(
     await campaigns_col.update_one({"id": campaign_id}, {"$set": updates})
     await log_audit(user, "update_campaign", "campaign", campaign_id, updates)
     return await campaigns_col.find_one({"id": campaign_id}, {"_id": 0})
+
+
+ROI_WINDOWS = ["72h", "3d", "5d", "7d", "14d", "30d"]
+
+
+@router.get("/{campaign_id}/roi")
+async def campaign_roi_detail(campaign_id: str, window: Optional[str] = None,
+                              user: dict = Depends(get_current_user)):
+    """Real ROI attribution for one campaign: of the FROZEN targeted dataset, who made a
+    real bill within `window` of launch — with universal + objective-specific breakdowns
+    (store-wise / coupon redemptions / target-SKU units & value)."""
+    c = await campaigns_col.find_one({"id": campaign_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    ds = await campaign_datasets_col.find_one({"campaign_id": campaign_id}, {"_id": 0})
+    t0 = c.get("launched_at") or (ds or {}).get("t0")
+    if not ds or not t0:
+        raise HTTPException(400, "Launch the campaign first — ROI is measured against the dataset frozen at launch")
+
+    win = window or c.get("roi_window") or "7d"
+    delta = _parse_window(win)
+    t0_dt = datetime.fromisoformat(t0.replace("Z", "+00:00"))
+    end_dt = t0_dt + delta
+    t0_iso, end_iso = t0_dt.isoformat(), end_dt.isoformat()
+
+    mobiles = ds.get("mobiles") or []
+    size = len(mobiles)
+    base_match = {
+        "customer_mobile": {"$in": mobiles},
+        "is_return": {"$ne": True},
+        "bill_date": {"$gte": t0_iso, "$lte": end_iso},
+    }
+
+    # ---- Universal ROI: who came back and shopped ----
+    urows = await transactions_col.aggregate([
+        {"$match": base_match},
+        {"$group": {"_id": "$customer_mobile", "rev": {"$sum": NET_EXPR}, "bills": {"$sum": 1}}},
+    ], allowDiskUse=True, maxTimeMS=30000).to_list(200000)
+    converters = len(urows)
+    revenue = round(sum((r.get("rev") or 0) for r in urows), 2)
+    bills = sum((r.get("bills") or 0) for r in urows)
+    cost = c.get("cost")
+    roi_pct = round((revenue - cost) / cost * 100, 1) if cost else None
+
+    out: Dict[str, Any] = {
+        "campaign_id": campaign_id, "name": c.get("name"),
+        "objective": c.get("objective", "generic"),
+        "window": win, "windows": ROI_WINDOWS, "t0": t0_iso, "window_end": end_iso,
+        "dataset_size": size, "sent": c.get("sent") or size,
+        "universal": {
+            "converters": converters,
+            "conversion_rate_pct": round(converters / size * 100, 2) if size else 0.0,
+            "attributed_bills": bills,
+            "attributed_net_revenue": revenue,
+            "revenue_per_recipient": round(revenue / size, 2) if size else 0.0,
+            "cost": cost, "roi_pct": roi_pct,
+        },
+    }
+
+    params = c.get("objective_params") or {}
+
+    # ---- Store-wise breakdown (always computed; highlighted for store campaigns) ----
+    srows = await transactions_col.aggregate([
+        {"$match": base_match},
+        {"$group": {"_id": {"code": "$store_code", "name": "$store_name"},
+                    "rev": {"$sum": NET_EXPR}, "customers": {"$addToSet": "$customer_mobile"}}},
+        {"$project": {"_id": 0, "store_code": "$_id.code", "store_name": "$_id.name",
+                      "revenue": {"$round": ["$rev", 2]}, "converters": {"$size": "$customers"}}},
+        {"$sort": {"revenue": -1}}, {"$limit": 100},
+    ], allowDiskUse=True, maxTimeMS=30000).to_list(100)
+    if c.get("objective") == "store":
+        tcodes = set(params.get("store_codes") or [])
+        tgt = [s for s in srows if s.get("store_code") in tcodes]
+        out["store"] = {
+            "target_store_codes": list(tcodes),
+            "target_converters": sum(s["converters"] for s in tgt),
+            "target_revenue": round(sum(s["revenue"] for s in tgt), 2),
+            "breakdown": srows,
+        }
+    else:
+        out["store_breakdown"] = srows[:10]
+
+    # ---- Coupon redemptions ----
+    codes = params.get("coupon_codes") or ([c["coupon_code"]] if c.get("coupon_code") else [])
+    if codes:
+        crows = await coupon_redemptions_col.aggregate([
+            {"$match": {"coupon_code": {"$in": codes}, "customer_mobile": {"$in": mobiles},
+                        "created_at": {"$gte": t0_iso, "$lte": end_iso}}},
+            {"$group": {"_id": None, "redemptions": {"$sum": 1},
+                        "discount": {"$sum": {"$ifNull": ["$discount_amount", 0]}},
+                        "customers": {"$addToSet": "$customer_mobile"}}},
+        ], maxTimeMS=20000).to_list(1)
+        cr = crows[0] if crows else {}
+        out["coupon"] = {
+            "coupon_codes": codes,
+            "redemptions": cr.get("redemptions", 0),
+            "redeemers": len(cr.get("customers") or []),
+            "discount_given": round(cr.get("discount") or 0, 2),
+        }
+
+    # ---- Target-SKU units & value (resolve category/subcategory -> SKUs via master) ----
+    if c.get("objective") == "sku" or params.get("skus") or params.get("categories") or params.get("subcategories"):
+        target_skus = set(params.get("skus") or [])
+        cats = params.get("categories") or []
+        subs = params.get("subcategories") or []
+        if cats or subs:
+            m: Dict[str, Any] = {}
+            if cats:
+                m["category"] = {"$in": cats}
+            if subs:
+                m["subcategory"] = {"$in": subs}
+            target_skus |= set(await items_col.distinct("sku", m))
+        item_or = []
+        if target_skus:
+            item_or.append({"items.sku": {"$in": list(target_skus)}})
+        if cats:
+            item_or.append({"items.category": {"$in": cats}})
+        sk: Dict[str, Any] = {}
+        if item_or:
+            skrows = await transactions_col.aggregate([
+                {"$match": base_match},
+                {"$unwind": "$items"},
+                {"$match": {"$or": item_or}},
+                {"$group": {"_id": None,
+                            "units": {"$sum": {"$ifNull": ["$items.quantity", 1]}},
+                            "value": {"$sum": {"$ifNull": ["$items.subtotal",
+                                     {"$multiply": [{"$ifNull": ["$items.unit_price", 0]},
+                                                    {"$ifNull": ["$items.quantity", 1]}]}]}},
+                            "customers": {"$addToSet": "$customer_mobile"}}},
+            ], allowDiskUse=True, maxTimeMS=30000).to_list(1)
+            sk = skrows[0] if skrows else {}
+        out["sku"] = {
+            "target_sku_count": len(target_skus),
+            "categories": cats, "subcategories": subs,
+            "units_sold": sk.get("units", 0),
+            "value_sold": round(sk.get("value") or 0, 2),
+            "buyers": len(sk.get("customers") or []),
+        }
+
+    return out

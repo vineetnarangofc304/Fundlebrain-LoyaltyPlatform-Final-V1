@@ -283,6 +283,10 @@ class CampaignBase(BaseModel):
     schedule_at: Optional[datetime] = None
     status: str = "draft"  # draft | scheduled | running | completed | cancelled
     send_limit: int = 50000  # safety cap per launch
+    objective: str = "generic"  # generic | store | coupon | sku — what the campaign is trying to drive
+    objective_params: Dict[str, Any] = {}  # store:{store_codes,store_ids} · coupon:{coupon_codes} · sku:{categories,subcategories,skus}
+    roi_window: str = "7d"  # default attribution window (72h | 3d | 5d | 7d | 30d)
+    cost: Optional[float] = None  # campaign spend, for ROI %
 
 
 class CampaignCreate(CampaignBase):
