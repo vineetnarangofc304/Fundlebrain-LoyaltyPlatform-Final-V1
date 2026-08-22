@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 101 — Campaign Manager Phases 2/3/4 (guided wizard, Karix DLR delivery reports, auto-blacklist engine). Backend: 11/11 pytest cases PASS (audience-preview, blacklist CRUD + invalid-input 400, auto-blacklist at exactly 3 consecutive DLR failures, 'delivered' resets the counter, SIMULATED campaign create->launch->delivery->roi->list). Frontend: full 4-step wizard flow, draft creation, SIMULATED launch, ROI modal (incl. window switch), Delivery modal, and Blacklist add/remove all verified end-to-end in the real preview UI. SAFETY honoured: template dropdown left at 'Simulated metrics only' (no active SMS templates existed, so the dropdown rendered its empty state), send_mode confirmed 'Simulated' before every launch; no real SMS dispatched. All test artefacts cleaned up (2 test campaigns + campaign_datasets + blacklist rows + dlr_mobile_stats).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/campaigns/audience-preview", "issue": "audience_type='city' (also 'tier'/'cohort') with an EMPTY audience_filter silently falls back to matching the ENTIRE base (returns 800,067). The wizard therefore shows the full-base number while the user has not yet picked a city/tier, which is misleading. Suggest returning 0 (or a needs_filter flag) when the required filter key is missing."},
+      {"endpoint": "POST /api/campaigns/{id}/launch (simulated path)", "issue": "sent = audience_size and IGNORES send_limit, while _freeze_dataset correctly caps at send_limit. Result: campaign row shows 'Sent 52,865' but the ROI modal shows 'Targeted 50,000' for the same campaign. Use min(audience_size, send_limit) (line ~324 campaigns_routes.py)."},
+      {"endpoint": "DELETE /api/campaigns/{id}", "issue": "No delete endpoint (and no UI delete) exists — test/obsolete campaigns can only be removed via direct Mongo access. campaign_datasets also orphan. Consider adding a delete that also drops the frozen dataset."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Campaign Wizard step 2 — live audience count", "issue": "Race condition: previewAudience() has no request-sequencing/abort guard. Changing audience_type then typing a city fires overlapping /campaigns/audience-preview calls and the slower earlier response can overwrite the newer one. Reproduced once (count stuck at 8,00,067 for city=Mumbai and the stale value was then shown in review-audience); correct on retry (52,865). Fix with a request-id/AbortController guard + debounce on the city input.", "affected_selectors": ["[data-testid=\"audience-count\"]", "[data-testid=\"review-audience\"]"]},
+      {"flow": "Launch from campaign table", "issue": "One transient 502 was observed on POST /campaigns/{id}/launch during the first UI run (status stayed 'draft', so ROI/Delivery buttons never appeared and the user got a red 'Launch failed' toast). Re-verified via curl: the same launch completes in 0.3s / HTTP 200, and a second UI run launched fine — most likely a backend hot-reload triggered by my test-file writes. Not reproducible; flagged only for awareness (no retry/backoff on launch).", "affected_selectors": ["[data-testid=\"launch-{id}\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "Campaign Manager table + ROI modal (simulated campaigns)", "issues": ["Simulated campaigns show fabricated Delivered 49,693 / Redeemed 939 / Revenue Rs.25,71,921 in the table while the ROI modal for the SAME campaign correctly reports 0 converters, Rs.0 attributed sales and ROI -100%. Two contradicting numbers on one screen; consider suppressing/greying the fake table metrics (or labelling them 'demo') when send_mode == 'simulated'."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/iteration101_campaign_phases234_test.py",
+    "/app/backend/tests/_cleanup_i101.py",
+    "/app/test_reports/pytest/i101.xml"
+  ],
+  "action_items": [
+    "Cap simulated `sent` at send_limit in launch_campaign (sent vs dataset_size mismatch: 52,865 vs 50,000).",
+    "Add a request-sequencing/abort guard + debounce to CampaignWizard.previewAudience() to stop stale audience counts overwriting fresh ones.",
+    "Make audience-preview return 0 (not the whole base) when audience_type requires a filter key that is still empty.",
+    "Optional: hide/label the fabricated table metrics for send_mode='simulated' so they don't contradict the real ROI modal; and add a campaign delete endpoint that also removes campaign_datasets."
+  ],
+  "critical_code_review_comments": [
+    "blacklist/audience-preview routes are correctly declared BEFORE /{campaign_id} — verified, no route shadowing (GET /campaigns/blacklist returns the blacklist, not a 404 campaign).",
+    "_freeze_dataset stores the whole mobile list in ONE document; the wizard allows send_limit up to 500,000 (~6MB+ of mobiles) which flirts with the 16MB BSON doc limit. Consider chunking the dataset or storing one doc per mobile batch.",
+    "record_dlr_status/blacklist helpers are fully async and never raise (wrapped) — good; remove_from_blacklist also resets consecutive_failures so a stale counter can't instantly re-blacklist (verified by the 'delivered resets counter' test).",
+    "All Mongo reads use projection {_id:0}; verified no ObjectId leaks in campaigns, blacklist rows, delivery or ROI payloads.",
+    "Auth playbook spot-check: password_hash is bcrypt $2b$12$ (OK); CORS uses explicit origins + regex with allow_credentials=True, not '*' (OK). NOTE (pre-existing, outside this task): auth uses a Bearer token, there are NO httpOnly cookies and NO brute-force lockout after N failed logins."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iteration101_campaign_phases234_test.py",
+    "/app/backend/tests/_cleanup_i101.py"
+  ],
+  "success_rate": {"backend": "100% (11/11 pytest)", "frontend": "100% of flows verified; 1 intermittent stale-count race + 1 transient 502 on launch"},
+  "seed_data_creation": "Created and then DELETED: campaigns TEST_QA_sim_campaign_i101 + TEST_QA_wizard_ui_i101 (both simulated) with their campaign_datasets; blacklist entries 9812345670 / 9877000555 / 9877000556 / 9877000581 and their dlr_mobile_stats rows. Final state verified: 0 TEST_QA campaigns, sms_blacklist empty.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (from /app/memory/test_credentials.md) — worked for CRM login and all campaign endpoints",
+  "context_for_next_testing_agent": "Regression suite for Campaign Phases 2/3/4 lives at /app/backend/tests/iteration101_campaign_phases234_test.py (run with -p no:randomly; ~7s). Cleanup helper: python /app/backend/tests/_cleanup_i101.py (deletes TEST_QA* campaigns + datasets + QA blacklist mobiles). NEVER launch a campaign with a template_id linked (real Karix SMS). Preview has no active SMS templates today, so the wizard's template dropdown renders its empty state and every launch is simulated. Mumbai city audience = 52,865; whole base = 800,067. Known non-blocking findings: simulated `sent` ignores send_limit, audience-preview treats an empty required filter as 'all', and the wizard audience count has a stale-response race.",
+  "rca_of_the_issue": "(1) sent/dataset mismatch: campaigns_routes.py launch_campaign simulated path sets sent = audience_size (line ~324) while _freeze_dataset caps at send_limit, so the table and ROI modal disagree. (2) Stale audience count: CampaignWizard.previewAudience() is fired from a useEffect on [step, audience_type, audience_filter] with no in-flight cancellation or sequence token, so an earlier (broader, slower) count can resolve after the narrower one and overwrite state. (3) audience-preview 'all' fallback: _audience_filter_async adds no Mongo predicate when the audience_type's required filter key is absent, so the count degenerates to count_documents({})."
+}

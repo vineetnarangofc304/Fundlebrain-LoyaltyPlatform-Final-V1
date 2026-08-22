@@ -4,33 +4,25 @@ import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
 import { toast } from "sonner";
 import { fmtMoney2, fmtNum, fmtDate } from "@/lib/format";
-import { Plus, Play, Sparkles, Send, MessageSquare, Mail, Smartphone, Loader2, TrendingUp } from "lucide-react";
-import CampaignObjective from "./campaigns/CampaignObjective";
+import { Plus, Play, Send, MessageSquare, Mail, Smartphone, Loader2, TrendingUp, Truck, ShieldBan, Bot, Trash2 } from "lucide-react";
 import CampaignRoiModal from "./campaigns/CampaignRoiModal";
+import CampaignWizard from "./campaigns/CampaignWizard";
+import CampaignDeliveryModal from "./campaigns/CampaignDeliveryModal";
+import CampaignBlacklistModal from "./campaigns/CampaignBlacklistModal";
 
-const CHANNELS = ["whatsapp", "sms", "email", "push", "in_app"];
-
-const CHANNEL_ICON = {
-  whatsapp: MessageSquare,
-  sms: Smartphone,
-  rcs: MessageSquare,
-  email: Mail,
-};
+const CHANNEL_ICON = { whatsapp: MessageSquare, sms: Smartphone, rcs: MessageSquare, email: Mail };
 
 export default function CampaignManager() {
   const [items, setItems] = useState([]);
   const [templates, setTemplates] = useState([]);
-  const [show, setShow] = useState(false);
   const [coupons, setCoupons] = useState([]);
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardPrefill, setWizardPrefill] = useState(null);
+  const [showBlacklist, setShowBlacklist] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
-  const [launching, setLaunching] = useState(null);  // campaign id being launched
-  const [roiCampaign, setRoiCampaign] = useState(null);  // campaign whose ROI modal is open
-  const [form, setForm] = useState({
-    name: "", description: "", channels: ["whatsapp"], audience_type: "all",
-    audience_filter: {}, message_template: "", template_id: "",
-    coupon_code: "", status: "draft", send_limit: 50000,
-    objective: "generic", objective_params: {}, roi_window: "7d",
-  });
+  const [launching, setLaunching] = useState(null);
+  const [roiCampaign, setRoiCampaign] = useState(null);
+  const [deliveryCampaign, setDeliveryCampaign] = useState(null);
   const pollRef = useRef(null);
 
   const load = async () => {
@@ -45,24 +37,23 @@ export default function CampaignManager() {
   };
   useEffect(() => { load(); }, []);
 
-  // Prefill from Segment Builder
+  // Prefill from Segment Builder → open the wizard pre-seeded
   useEffect(() => {
     const segmentId = searchParams.get("segment_id");
     const segmentName = searchParams.get("segment_name");
     if (segmentId) {
-      setForm((f) => ({
-        ...f,
-        name: segmentName ? `Campaign · ${segmentName}` : f.name,
+      setWizardPrefill({
+        name: segmentName ? `Campaign · ${segmentName}` : "",
         audience_type: "segment",
         audience_filter: { segment_id: segmentId, segment_name: segmentName },
-      }));
-      setShow(true);
+      });
+      setShowWizard(true);
       setSearchParams({}, { replace: true });
       toast.info(`Campaign prefilled with segment "${segmentName || segmentId}"`);
     }
   }, [searchParams, setSearchParams]);
 
-  // Poll any running campaigns that have a bulk_job_id for progress updates
+  // Poll running campaigns with a bulk_job_id for live progress
   useEffect(() => {
     const runningWithJob = items.filter((c) => c.status === "running" && c.bulk_job_id);
     if (runningWithJob.length === 0) {
@@ -87,53 +78,42 @@ export default function CampaignManager() {
     tick();
     pollRef.current = setInterval(tick, 4000);
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
-  }, [items.map((c) => c.id + ":" + c.status).join("|")]); // re-arm when statuses change
-
-  const toggleChannel = (ch) => {
-    setForm((f) => ({ ...f, channels: f.channels.includes(ch) ? f.channels.filter(x => x !== ch) : [...f.channels, ch] }));
-  };
-
-  const create = async () => {
-    try {
-      const payload = { ...form };
-      if (!payload.template_id) delete payload.template_id;
-      if (!payload.message_template && !payload.template_id) payload.message_template = "(no body)";
-      await api.post("/campaigns", payload);
-      toast.success("Campaign created");
-      setShow(false);
-      setForm({ name: "", description: "", channels: ["whatsapp"], audience_type: "all", audience_filter: {}, message_template: "", template_id: "", coupon_code: "", status: "draft", send_limit: 50000, objective: "generic", objective_params: {}, roi_window: "7d" });
-      load();
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed");
-    }
-  };
+  }, [items.map((c) => c.id + ":" + c.status).join("|")]);
 
   const launch = async (id) => {
     setLaunching(id);
     try {
       const r = await api.post(`/campaigns/${id}/launch`);
-      if (r.data.mode === "karix") {
-        toast.success(`Real send via ${r.data.channel.toUpperCase()} queued · audience ${fmtNum(r.data.audience)}`);
-      } else {
-        toast.success(`Simulated metrics generated · audience ${fmtNum(r.data.audience)} (link a template for real send)`);
-      }
+      if (r.data.mode === "karix") toast.success(`Real send via ${r.data.channel.toUpperCase()} queued · audience ${fmtNum(r.data.audience)}`);
+      else toast.success(`Simulated metrics generated · audience ${fmtNum(r.data.audience)} (link a template for real send)`);
       load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Launch failed");
-    } finally {
-      setLaunching(null);
+    } finally { setLaunching(null); }
+  };
+
+  const openWizard = () => { setWizardPrefill(null); setShowWizard(true); };
+
+  const del = async (c) => {
+    if (!window.confirm(`Delete campaign "${c.name}"? This also removes its frozen ROI dataset.`)) return;
+    try {
+      await api.delete(`/campaigns/${c.id}`);
+      toast.success("Campaign deleted");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Delete failed");
     }
   };
 
-  // Filter templates by selected channels so users only pick compatible ones
-  const compatibleTemplates = templates.filter((t) =>
-    form.channels.length === 0 || form.channels.includes(t.channel) || (t.channel === "rcs" && form.channels.includes("whatsapp"))
-  );
-
   return (
     <div data-testid="campaign-manager">
-      <PageHeader title="Campaign Manager" subtitle="MULTI-CHANNEL ORCHESTRATION · KARIX-POWERED"
-        actions={<button className="k-btn kazo-bg-burgundy" onClick={() => setShow(true)} data-testid="new-campaign-btn"><Plus className="w-4 h-4" /> New campaign</button>} />
+      <PageHeader title="Campaign Manager" subtitle="GUIDED WORKFLOW · REAL ROI · KARIX DELIVERY"
+        actions={
+          <div className="flex gap-2">
+            <button className="k-btn k-btn-ghost" onClick={() => setShowBlacklist(true)} data-testid="open-blacklist-btn"><ShieldBan className="w-4 h-4" /> Blacklist</button>
+            <button className="k-btn kazo-bg-burgundy" onClick={openWizard} data-testid="new-campaign-btn"><Plus className="w-4 h-4" /> New campaign</button>
+          </div>
+        } />
       <div className="p-8">
         <div className="bg-white border border-black/10 overflow-x-auto">
           <table className="data-table">
@@ -142,11 +122,18 @@ export default function CampaignManager() {
               {items.map((c) => {
                 const job = c._job;
                 const ChannelIcon = CHANNEL_ICON[c.channels?.[0]] || MessageSquare;
+                const canReport = c.launched_at || c.status === "running" || c.status === "completed";
+                const sim = c.send_mode === "simulated";
+                const simCls = sim ? "text-neutral-300" : "";
+                const simTitle = sim ? "Simulated demo metric — see the ROI modal for real attribution" : undefined;
                 return (
                   <tr key={c.id} data-testid={`campaign-row-${c.id}`}>
                     <td>
-                      <div className="font-medium">{c.name}</div>
-                      <div className="text-xs text-neutral-500">{fmtDate(c.created_at)}{c.bulk_job_id ? ` · job ${c.bulk_job_id.slice(0,8)}` : ""}</div>
+                      <div className="font-medium flex items-center gap-1.5">
+                        {c.source === "master_brain" && <span className="pill pill-info flex items-center gap-1" data-testid={`mb-pill-${c.id}`}><Bot className="w-3 h-3" /> MB</span>}
+                        {c.name}
+                      </div>
+                      <div className="text-xs text-neutral-500">{fmtDate(c.created_at)}{c.bulk_job_id ? ` · job ${c.bulk_job_id.slice(0, 8)}` : ""}</div>
                     </td>
                     <td><div className="flex gap-1 flex-wrap">{c.channels?.map((ch) => <span key={ch} className="pill pill-neutral">{ch}</span>)}</div></td>
                     <td><span className="pill pill-info">{c.audience_type}</span></td>
@@ -163,157 +150,53 @@ export default function CampaignManager() {
                     </td>
                     <td className="text-right font-mono">
                       {fmtNum(c.sent)}
-                      {job && job.status === "running" && (
-                        <div className="text-[10px] text-neutral-400">{job.processed || 0}/{job.audience_size_total || "?"}</div>
-                      )}
+                      {job && job.status === "running" && <div className="text-[10px] text-neutral-400">{job.processed || 0}/{job.audience_size_total || "?"}</div>}
                     </td>
-                    <td className="text-right font-mono">{fmtNum(c.delivered)}</td>
-                    <td className="text-right font-mono">{fmtNum(c.redeemed)}</td>
-                    <td className="text-right font-mono">{fmtMoney2(c.revenue_generated)}</td>
+                    <td className={`text-right font-mono ${simCls}`} title={simTitle}>{fmtNum(c.delivered)}</td>
+                    <td className={`text-right font-mono ${simCls}`} title={simTitle}>{fmtNum(c.redeemed)}</td>
+                    <td className={`text-right font-mono ${simCls}`} title={simTitle}>{fmtMoney2(c.revenue_generated)}</td>
                     <td>
                       <StatusPill status={c.status} />
                       {job && job.failed > 0 && <div className="text-[10px] text-rose-600 mt-0.5">{job.failed} failed</div>}
                     </td>
                     <td>
-                      {c.status === "draft" && (
-                        <button
-                          className="k-btn k-btn-sm kazo-bg-burgundy disabled:opacity-50"
-                          onClick={() => launch(c.id)}
-                          disabled={launching === c.id}
-                          data-testid={`launch-${c.id}`}
-                        >
-                          {launching === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                          {launching === c.id ? "Launching…" : "Launch"}
-                        </button>
-                      )}
-                      {(c.launched_at || c.status === "running" || c.status === "completed") && (
-                        <button
-                          className="k-btn k-btn-sm k-btn-ghost"
-                          onClick={() => setRoiCampaign(c)}
-                          data-testid={`roi-${c.id}`}
-                        >
-                          <TrendingUp className="w-3 h-3" /> ROI
-                        </button>
-                      )}
+                      <div className="flex gap-1 justify-end">
+                        {c.status === "draft" && (
+                          <button className="k-btn k-btn-sm kazo-bg-burgundy disabled:opacity-50" onClick={() => launch(c.id)} disabled={launching === c.id} data-testid={`launch-${c.id}`}>
+                            {launching === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                            {launching === c.id ? "Launching…" : "Launch"}
+                          </button>
+                        )}
+                        {canReport && (
+                          <>
+                            <button className="k-btn k-btn-sm k-btn-ghost" onClick={() => setRoiCampaign(c)} data-testid={`roi-${c.id}`}><TrendingUp className="w-3 h-3" /> ROI</button>
+                            <button className="k-btn k-btn-sm k-btn-ghost" onClick={() => setDeliveryCampaign(c)} data-testid={`delivery-${c.id}`}><Truck className="w-3 h-3" /> Delivery</button>
+                          </>
+                        )}
+                        {c.status !== "running" && (
+                          <button className="k-btn k-btn-sm k-btn-ghost text-rose-600" onClick={() => del(c)} data-testid={`delete-${c.id}`} title="Delete campaign"><Trash2 className="w-3 h-3" /></button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
               })}
-              {items.length === 0 && <tr><td colSpan={10} className="text-center py-10 text-neutral-500">No campaigns yet</td></tr>}
+              {items.length === 0 && <tr><td colSpan={10} className="text-center py-10 text-neutral-500">No campaigns yet — click “New campaign” to start the guided wizard</td></tr>}
             </tbody>
           </table>
         </div>
       </div>
 
-      {show && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShow(false)}>
-          <div className="bg-white p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()} data-testid="new-campaign-modal">
-            <h3 className="font-display text-2xl mb-4">New Campaign</h3>
-            <div className="space-y-3">
-              <input className="k-input" placeholder="Campaign name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="campaign-name-input" />
-              <textarea className="k-input" placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-
-              <CampaignObjective form={form} setForm={setForm} />
-
-              <div>
-                <label className="text-[10px] uppercase tracking-widest text-neutral-500 mb-2 block">Channels</label>
-                <div className="flex gap-2 flex-wrap">
-                  {CHANNELS.map((ch) => (
-                    <button key={ch} type="button" onClick={() => toggleChannel(ch)} className={`pill ${form.channels.includes(ch) ? "kazo-bg-burgundy text-white" : "pill-neutral"}`} data-testid={`channel-${ch}`}>{ch}</button>
-                  ))}
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <select className="k-input" value={form.audience_type} onChange={(e) => setForm({ ...form, audience_type: e.target.value, audience_filter: {} })} data-testid="audience-type-select">
-                  <option value="all">Entire base</option>
-                  <option value="segment">From Segment Builder</option>
-                  <option value="tier">By tier</option>
-                  <option value="city">By city</option>
-                  <option value="cohort">By cohort</option>
-                </select>
-                {form.audience_type === "segment" && (
-                  <div className="k-input flex items-center gap-2 bg-amber-50 border-amber-300">
-                    <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                    <span className="text-xs font-medium">{form.audience_filter?.segment_name || form.audience_filter?.segment_id || "No segment selected"}</span>
-                  </div>
-                )}
-                {form.audience_type === "tier" && (
-                  <select className="k-input" value={form.audience_filter?.tier || ""} onChange={(e) => setForm({ ...form, audience_filter: { tier: e.target.value } })}>
-                    <option value="">Select tier</option>
-                    <option value="silver">Silver</option><option value="gold">Gold</option><option value="platinum">Platinum</option><option value="diamond">Diamond</option>
-                  </select>
-                )}
-                {form.audience_type === "city" && (
-                  <input className="k-input" placeholder="City" value={form.audience_filter?.city || ""} onChange={(e) => setForm({ ...form, audience_filter: { city: e.target.value } })} />
-                )}
-                {form.audience_type === "cohort" && (
-                  <select className="k-input" value={form.audience_filter?.cohort || ""} onChange={(e) => setForm({ ...form, audience_filter: { cohort: e.target.value } })}>
-                    <option value="">Select cohort</option>
-                    <option value="high_value">High-value</option><option value="churn_risk">Churn risk</option><option value="new">New customers</option><option value="vip">VIP (Platinum/Diamond)</option>
-                  </select>
-                )}
-              </div>
-
-              {/* Karix Template picker for real sends */}
-              <div className="border border-neutral-200 rounded p-3 bg-neutral-50" data-testid="campaign-template-select">
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-[10px] uppercase tracking-widest text-neutral-700 font-medium flex items-center gap-1">
-                    <Send className="w-3 h-3" /> Send via Karix template (real send)
-                  </label>
-                  {form.template_id && (
-                    <button type="button" onClick={() => setForm({ ...form, template_id: "" })} className="text-[10px] text-rose-600 hover:underline">Clear</button>
-                  )}
-                </div>
-                {compatibleTemplates.length === 0 ? (
-                  <div className="text-xs text-neutral-500" data-testid="campaign-template-empty">
-                    No active templates for selected channels — create one in <a href="/admin/communications/templates" className="underline text-burgundy">Templates</a>. Without a template the campaign will only generate simulated metrics.
-                  </div>
-                ) : (
-                  <select className="k-input" value={form.template_id} onChange={(e) => setForm({ ...form, template_id: e.target.value })} data-testid="campaign-template-dropdown">
-                    <option value="">— Simulated metrics only (no real send) —</option>
-                    {compatibleTemplates.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {`${t.name} · ${t.channel.toUpperCase()}${t.channel !== "sms" ? ` · WABA ${t.waba_approval_status || "pending"}` : ""}`}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                {form.template_id && (
-                  <div className="text-[10px] text-emerald-700 mt-1">
-                    ✓ This campaign will actually send messages via Karix when launched.
-                  </div>
-                )}
-              </div>
-
-              <textarea className="k-input" placeholder="Optional preview / fallback body (only used if no Karix template above)" value={form.message_template} onChange={(e) => setForm({ ...form, message_template: e.target.value })} data-testid="message-template-input" />
-
-              <div className="grid grid-cols-2 gap-3">
-                <select className="k-input" value={form.coupon_code} onChange={(e) => setForm({ ...form, coupon_code: e.target.value })} data-testid="coupon-select">
-                  <option value="">No coupon</option>
-                  {coupons.map((c) => <option key={c.id} value={c.code}>{`${c.code} · ${c.name}`}</option>)}
-                </select>
-                <input
-                  className="k-input"
-                  type="number"
-                  min="1"
-                  max="500000"
-                  placeholder="Send limit (safety cap)"
-                  value={form.send_limit}
-                  onChange={(e) => setForm({ ...form, send_limit: parseInt(e.target.value, 10) || 50000 })}
-                  data-testid="send-limit-input"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 mt-2">
-                <button className="k-btn k-btn-ghost" onClick={() => setShow(false)}>Cancel</button>
-                <button className="k-btn kazo-bg-burgundy" onClick={create} data-testid="campaign-create-btn">Create as draft</button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {showWizard && (
+        <CampaignWizard
+          templates={templates} coupons={coupons} prefill={wizardPrefill}
+          onClose={() => setShowWizard(false)}
+          onDone={() => { setShowWizard(false); load(); }}
+        />
       )}
-
       {roiCampaign && <CampaignRoiModal campaign={roiCampaign} onClose={() => setRoiCampaign(null)} />}
+      {deliveryCampaign && <CampaignDeliveryModal campaign={deliveryCampaign} onClose={() => setDeliveryCampaign(null)} />}
+      {showBlacklist && <CampaignBlacklistModal onClose={() => setShowBlacklist(false)} />}
     </div>
   );
 }

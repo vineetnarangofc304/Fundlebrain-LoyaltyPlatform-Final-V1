@@ -7,8 +7,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 import pymongo
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from database import (
-    campaigns_col, customers_col, transactions_col, coupon_redemptions_col, db,
+    campaigns_col, customers_col, transactions_col, coupon_redemptions_col,
+    message_log_col, db,
 )
 from routes._money import NET_EXPR
 from auth import get_current_user, require_roles, log_audit, MANAGEMENT_ROLES
@@ -47,6 +49,65 @@ async def create_campaign(payload: CampaignCreate, user: dict = Depends(require_
     await log_audit(user, "create_campaign", "campaign", doc["id"], {"name": doc["name"]})
     doc.pop("_id", None)
     return doc
+
+
+class AudiencePreviewIn(BaseModel):
+    audience_type: str = "all"
+    audience_filter: Dict[str, Any] = {}
+
+
+@router.post("/audience-preview")
+async def audience_preview(body: AudiencePreviewIn, user: dict = Depends(get_current_user)):
+    """Ad-hoc audience size + sample for the Campaign Wizard (before a campaign is created)."""
+    af = body.audience_filter or {}
+    at = body.audience_type or "all"
+    # Guard: an audience type that REQUIRES a filter key but has none must not degenerate to the
+    # whole base (which is misleading in the wizard) — report needs_filter with a 0 count instead.
+    required = {"tier": "tier", "city": "city", "cohort": "cohort", "segment": "segment_id"}
+    if at in required and not af.get(required[at]):
+        from routes.blacklist_util import blacklist_col
+        return {"total_audience": 0, "sample": [], "needs_filter": True,
+                "blacklisted_total": await blacklist_col.count_documents({})}
+    fake = {"audience_type": at, "audience_filter": af}
+    fil = await _audience_filter_async(fake)
+    total = await customers_col.count_documents(fil)
+    sample = await customers_col.find(
+        fil, {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1}).limit(10).to_list(10)
+    from routes.blacklist_util import blacklist_col
+    blacklisted = await blacklist_col.count_documents({})
+    return {"total_audience": total, "sample": sample, "blacklisted_total": blacklisted}
+
+
+# ─────────────────────────── Blacklist (Phase 4) ───────────────────────────
+class BlacklistAddIn(BaseModel):
+    mobile: str
+    reason: str = "manual"
+
+
+@router.get("/blacklist")
+async def get_blacklist(q: Optional[str] = None, limit: int = 500,
+                        user: dict = Depends(get_current_user)):
+    from routes.blacklist_util import list_blacklist
+    return await list_blacklist(limit=limit, q=q)
+
+
+@router.post("/blacklist")
+async def add_blacklist(body: BlacklistAddIn, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    from routes.blacklist_util import add_to_blacklist
+    ok = await add_to_blacklist(body.mobile, reason=body.reason or "manual",
+                                source="manual", by=user.get("email"))
+    if not ok:
+        raise HTTPException(400, "Invalid mobile — need at least 10 digits")
+    await log_audit(user, "blacklist_add", "blacklist", body.mobile, {"reason": body.reason})
+    return {"ok": True, "mobile": body.mobile}
+
+
+@router.delete("/blacklist/{mobile}")
+async def delete_blacklist(mobile: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    from routes.blacklist_util import remove_from_blacklist
+    n = await remove_from_blacklist(mobile)
+    await log_audit(user, "blacklist_remove", "blacklist", mobile, {"removed": n})
+    return {"ok": True, "removed": n}
 
 
 @router.get("/{campaign_id}")
@@ -124,12 +185,68 @@ async def _freeze_dataset(campaign_id: str, fil: dict, limit: int, t0: str) -> i
         rows = await customers_col.find(
             fil or {}, {"_id": 0, "mobile": 1}).limit(cap).to_list(cap)
     mobiles = sorted({(r.get("mobile") or "").strip() for r in rows if (r.get("mobile") or "").strip()})
+    # Phase 4 — never freeze blacklisted numbers into a campaign dataset.
+    try:
+        from routes.blacklist_util import blacklisted_set, norm10
+        bl = await blacklisted_set()
+        if bl:
+            mobiles = [m for m in mobiles if norm10(m) not in bl]
+    except Exception:  # noqa: BLE001
+        pass
     await campaign_datasets_col.replace_one(
         {"campaign_id": campaign_id},
         {"campaign_id": campaign_id, "mobiles": mobiles, "size": len(mobiles),
          "t0": t0, "frozen_at": datetime.now(timezone.utc).isoformat()},
         upsert=True)
     return len(mobiles)
+
+
+async def _freeze_dataset_from_mobiles(campaign_id: str, mobiles: List[str], t0: str) -> int:
+    """Freeze an explicit mobile list (Master-Brain 'mobiles'/'report' audiences) as the ROI
+    dataset, minus blacklisted numbers."""
+    ms = sorted({(m or "").strip() for m in (mobiles or []) if (m or "").strip()})
+    try:
+        from routes.blacklist_util import blacklisted_set, norm10
+        bl = await blacklisted_set()
+        if bl:
+            ms = [m for m in ms if norm10(m) not in bl]
+    except Exception:  # noqa: BLE001
+        pass
+    await campaign_datasets_col.replace_one(
+        {"campaign_id": campaign_id},
+        {"campaign_id": campaign_id, "mobiles": ms, "size": len(ms),
+         "t0": t0, "frozen_at": datetime.now(timezone.utc).isoformat()},
+        upsert=True)
+    return len(ms)
+
+
+async def register_mb_campaign(*, cid: str, name: str, spec: dict, count: int, t0: str,
+                               created_by: str, template_id: Optional[str] = None,
+                               message: Optional[str] = None, audience_type: str = "all",
+                               audience_label: str = "", objective: str = "generic",
+                               objective_params: Optional[dict] = None, roi_window: str = "7d",
+                               cost: Optional[float] = None) -> int:
+    """Register a Master-Brain SMS campaign in the CORE campaigns_col + freeze its dataset so it
+    gets the same real ROI + delivery tracking as UI-launched campaigns (unified pipeline)."""
+    if (spec or {}).get("mode") == "mobiles":
+        frozen = await _freeze_dataset_from_mobiles(cid, spec.get("mobiles") or [], t0)
+    else:
+        frozen = await _freeze_dataset(cid, (spec or {}).get("filter") or {}, count or 50000, t0)
+    core = {
+        "id": cid, "name": name,
+        "description": f"Executed by Master Brain · {audience_label}".strip(" ·"),
+        "channels": ["sms"], "audience_type": audience_type or "all",
+        "audience_filter": {"label": audience_label},
+        "message_template": message, "template_id": template_id, "coupon_code": "",
+        "status": "running",
+        "objective": objective or "generic", "objective_params": objective_params or {},
+        "roi_window": roi_window or "7d", "cost": cost, "send_limit": count,
+        "sent": 0, "delivered": 0, "opened": 0, "clicked": 0, "redeemed": 0, "revenue_generated": 0.0,
+        "created_at": datetime.now(timezone.utc).isoformat(), "created_by": created_by,
+        "launched_at": t0, "dataset_size": frozen, "send_mode": "karix", "source": "master_brain",
+    }
+    await campaigns_col.replace_one({"id": cid}, core, upsert=True)
+    return frozen
 
 
 @router.post("/{campaign_id}/launch")
@@ -213,7 +330,7 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
                  "mode": "karix", "channel": t["channel"]}
 
     # ---------- SIMULATED metrics path (fallback) ----------
-    sent = audience_size
+    sent = min(audience_size, send_limit)
     delivered = int(sent * 0.94)
     opened = int(delivered * 0.42)
     clicked = int(opened * 0.18)
@@ -222,8 +339,9 @@ async def launch_campaign(campaign_id: str, user: dict = Depends(require_roles(*
     await campaigns_col.update_one(
         {"id": campaign_id},
         {"$set": {
-            "status": "running",
+            "status": "completed",
             "launched_at": launched_at,
+            "completed_at": launched_at,
             "dataset_size": dataset_size,
             "send_mode": "simulated",
             "sent": sent, "delivered": delivered, "opened": opened, "clicked": clicked,
@@ -242,6 +360,20 @@ async def update_campaign(campaign_id: str, updates: dict, user: dict = Depends(
     await campaigns_col.update_one({"id": campaign_id}, {"$set": updates})
     await log_audit(user, "update_campaign", "campaign", campaign_id, updates)
     return await campaigns_col.find_one({"id": campaign_id}, {"_id": 0})
+
+
+@router.delete("/{campaign_id}")
+async def delete_campaign(campaign_id: str, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    """Delete a campaign and its frozen ROI dataset. Running campaigns cannot be deleted."""
+    c = await campaigns_col.find_one({"id": campaign_id}, {"_id": 0, "status": 1})
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    if c.get("status") == "running":
+        raise HTTPException(400, "Cannot delete a running campaign — cancel/complete it first")
+    await campaigns_col.delete_one({"id": campaign_id})
+    await campaign_datasets_col.delete_one({"campaign_id": campaign_id})
+    await log_audit(user, "delete_campaign", "campaign", campaign_id, {})
+    return {"ok": True}
 
 
 ROI_WINDOWS = ["72h", "3d", "5d", "7d", "14d", "30d"]
@@ -382,3 +514,39 @@ async def campaign_roi_detail(campaign_id: str, window: Optional[str] = None,
         }
 
     return out
+
+
+@router.get("/{campaign_id}/delivery")
+async def campaign_delivery(campaign_id: str, user: dict = Depends(get_current_user)):
+    """Delivery report for a campaign — sent / delivered / undelivered / failed / pending
+    from message_log (updated by Karix DLRs), with a delivery rate and failure samples."""
+    c = await campaigns_col.find_one({"id": campaign_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    rows = await message_log_col.aggregate([
+        {"$match": {"campaign_id": campaign_id}},
+        {"$group": {"_id": "$delivery_status", "n": {"$sum": 1}}},
+    ]).to_list(50)
+    by = {(r["_id"] or "unknown"): r["n"] for r in rows}
+    total = sum(by.values())
+    delivered = by.get("delivered", 0)
+    counts = {
+        "submitted": by.get("submitted", 0),
+        "delivered": delivered,
+        "undelivered": by.get("undelivered", 0) + by.get("expired", 0),
+        "failed": by.get("failed", 0) + by.get("rejected", 0),
+        "pending": by.get("submitted", 0),
+    }
+    fails = await message_log_col.find(
+        {"campaign_id": campaign_id,
+         "delivery_status": {"$in": ["failed", "undelivered", "expired", "rejected"]}},
+        {"_id": 0, "mobile": 1, "delivery_status": 1, "response": 1, "timestamp": 1},
+    ).sort("timestamp", -1).limit(20).to_list(20)
+    return {
+        "campaign_id": campaign_id, "total": total,
+        "counts": counts, "by_status": by,
+        "delivery_rate_pct": round(delivered / total * 100, 1) if total else 0.0,
+        "failure_rate_pct": round((counts["failed"] + counts["undelivered"]) / total * 100, 1) if total else 0.0,
+        "failures_sample": fails,
+        "webhook_url": "/api/communications/dlr/karix",
+    }

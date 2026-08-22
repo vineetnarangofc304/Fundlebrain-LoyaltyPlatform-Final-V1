@@ -14,7 +14,7 @@ import pymongo
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Body, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Body, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from database import (
@@ -71,6 +71,7 @@ class ProviderConfigIn(BaseModel):
     rcs_endpoint: Optional[str] = None
     rcs_api_key: Optional[str] = None
     rcs_from_number: Optional[str] = None
+    dlr_pull_endpoint: Optional[str] = None  # optional Karix DLR pull API (account-specific); DLRs normally arrive by webhook
 
 
 DEFAULT_CONFIG = {
@@ -292,6 +293,12 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
                 event_trigger: Optional[str] = None,
                 context: Optional[Dict[str, Any]] = None):
     ctx = context or {}
+    resp_str = str(response)[:500] if response else None
+    # Capture the Karix message-id (MID) from the accept response so we can reconcile the
+    # delivery report (DLR) later. Initial delivery_status: 'submitted' (accepted, awaiting
+    # DLR) on ok, else 'failed' (rejected at submit).
+    mid = _parse_provider_mid(resp_str) if status == "ok" else None
+    delivery_status = "submitted" if status == "ok" else "failed"
     await message_log_col.insert_one({
         "id": uuid.uuid4().hex,
         "channel": channel,
@@ -307,9 +314,47 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
         "dlt_template_id": (payload or {}).get("dlt_template_id"),
         "payload_summary": {k: (v if k not in {"key", "apikey"} else "•••")
                               for k, v in (payload or {}).items()},
-        "response": str(response)[:500] if response else None,
+        "response": resp_str,
+        "provider_mid": mid,
+        "delivery_status": delivery_status,
+        "delivered_at": None,
+        "dlr": None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
+
+
+# Karix MID commonly appears in the accept body as e.g. "1701|91XXXXXXXXXX:<mid>" or a bare
+# token; grab the last long alphanumeric run as a best-effort message id.
+_MID_RE = re.compile(r"([A-Za-z0-9\-]{8,})\s*$")
+
+
+def _parse_provider_mid(resp: Optional[str]) -> Optional[str]:
+    if not resp:
+        return None
+    tail = resp.split("·")[0].strip()          # drop our "delivered on attempt" suffix
+    tok = tail.split(":")[-1].split("|")[-1].strip()
+    m = _MID_RE.search(tok) or _MID_RE.search(tail)
+    return m.group(1) if m else None
+
+
+def _norm_dlr_status(raw: Optional[str]) -> str:
+    """Normalise a Karix DLR status code (DELIVRD / UNDELIV / EXPIRED / REJECTD / ACCEPTD…)."""
+    s = (raw or "").strip().upper()
+    if not s:
+        return "unknown"
+    if "UNDEL" in s:
+        return "undelivered"
+    if "DELIV" in s or s in {"DELIVRD", "DELIVERED", "SUCCESS", "0", "000"}:
+        return "delivered"
+    if "EXPIR" in s:
+        return "expired"
+    if "REJEC" in s or "REJECTD" in s:
+        return "rejected"
+    if "FAIL" in s:
+        return "failed"
+    if "ACCEP" in s or "SUBMIT" in s or "BUFFER" in s or "ENROUTE" in s:
+        return "submitted"
+    return s.lower()
 
 
 async def send_sms_karix(mobile: str, text: str, template_id: Optional[str] = None,
@@ -687,6 +732,14 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
                 audience_filter or {},
                 {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
                  "points_balance": 1, "city": 1}).limit(min(limit, 50000)).to_list(min(limit, 50000))
+        # Phase 4 — exclude blacklisted numbers from the send (never fatal).
+        try:
+            from routes.blacklist_util import blacklisted_set, norm10
+            bl = await blacklisted_set()
+            if bl:
+                recipients = [c for c in recipients if norm10(c.get("mobile")) not in bl]
+        except Exception:  # noqa: BLE001
+            pass
         sent, failed, processed = 0, 0, 0
         for c in recipients:
             processed += 1
@@ -794,3 +847,105 @@ async def get_bulk_job(job_id: str, user: dict = Depends(get_current_user)):
     if not j:
         raise HTTPException(404, "Job not found")
     return j
+
+
+
+# ─────────────────────────── Delivery Reports (DLR) ───────────────────────────
+async def _ingest_dlr(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Ingest a single Karix DLR record → update the matching message_log row's delivery_status."""
+    mid = (data.get("mid") or data.get("MID") or data.get("messageId") or data.get("id")
+           or data.get("msgid") or data.get("smscId") or "")
+    dest = (data.get("dest") or data.get("msisdn") or data.get("to") or data.get("mobile") or "")
+    raw_status = (data.get("status") or data.get("dlrstatus") or data.get("dlrStatus")
+                  or data.get("stat") or data.get("state") or "")
+    ns = _norm_dlr_status(raw_status)
+    dtime = data.get("dtime") or data.get("deliveryTime") or data.get("dlr_time")
+    if not mid and not dest:
+        return {"ok": False, "error": "DLR missing both mid and dest"}
+    upd = {
+        "delivery_status": ns,
+        "dlr": data,
+        "dlr_at": datetime.now(timezone.utc).isoformat(),
+        "delivered_at": (dtime or datetime.now(timezone.utc).isoformat()) if ns == "delivered" else None,
+    }
+    matched_mobile = str(dest) if dest else None
+    if mid:
+        # Fetch the mobile first so the failure tracker can key on it, then bulk-update status.
+        pre = await message_log_col.find_one({"provider_mid": str(mid)}, {"_id": 0, "mobile": 1})
+        res = await message_log_col.update_many({"provider_mid": str(mid)}, {"$set": upd})
+        matched = res.matched_count
+        matched_mobile = (pre or {}).get("mobile") or matched_mobile
+    else:
+        doc = await message_log_col.find_one(
+            {"mobile": {"$regex": re.escape(str(dest)[-10:]) + "$"}, "channel": "sms"},
+            sort=[("timestamp", -1)])
+        matched = 0
+        if doc:
+            await message_log_col.update_one({"id": doc["id"]}, {"$set": upd})
+            matched = 1
+            matched_mobile = doc.get("mobile") or matched_mobile
+    # Phase 4 — per-mobile failure tracking + auto-blacklist (never fatal to DLR ingest).
+    bl = None
+    try:
+        from routes.blacklist_util import record_dlr_status
+        bl = await record_dlr_status(matched_mobile, ns)
+    except Exception:  # noqa: BLE001
+        bl = None
+    return {"ok": True, "matched": matched, "status": ns, "mid": mid or None,
+            "auto_blacklisted": bool(bl and bl.get("blacklisted"))}
+
+
+@router.api_route("/communications/dlr/karix", methods=["GET", "POST"])
+async def karix_dlr_webhook(request: Request):
+    """Public Karix DLR callback. Register this URL with Karix (provisioning@karix.com):
+        {BACKEND}/api/communications/dlr/karix
+    Accepts query-string (GET) or JSON/form (POST) with fields mid, status, dest, dtime."""
+    data = dict(request.query_params)
+    if not data:
+        try:
+            data = await request.json()
+        except Exception:
+            try:
+                data = dict(await request.form())
+            except Exception:
+                data = {}
+    # Some accounts batch multiple DLRs; accept a list under 'reports'/'dlrs'
+    batch = data.get("reports") or data.get("dlrs")
+    if isinstance(batch, list):
+        results = [await _ingest_dlr(x) for x in batch if isinstance(x, dict)]
+        return {"ok": True, "ingested": len(results)}
+    return await _ingest_dlr(data)
+
+
+@router.post("/communications/dlr/pull")
+async def karix_dlr_pull(payload: Dict[str, Any] = Body(default={}),
+                          user: dict = Depends(get_current_user)):
+    """Reconcile delivery reports for a sender ID / date range from Karix's pull API, if the
+    account exposes one (set dlr_pull_endpoint in Provider Settings). Karix's default delivery
+    mechanism is a WEBHOOK push (see /communications/dlr/karix)."""
+    cfg = await _get_config()
+    endpoint = cfg.get("dlr_pull_endpoint")
+    if not endpoint:
+        return {"ok": False, "configured": False,
+                "message": ("Karix delivers DLRs by WEBHOOK. Register your callback URL "
+                            "(…/api/communications/dlr/karix) with Karix support. If your account "
+                            "also exposes a DLR pull API, set 'dlr_pull_endpoint' in Provider Settings.")}
+    params = {"send": payload.get("sender_id") or cfg.get("sms_sender_id"),
+              "key": cfg.get("sms_api_key")}
+    if payload.get("from"):
+        params["from"] = payload["from"]
+    if payload.get("to"):
+        params["to"] = payload["to"]
+    ingested = 0
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.get(endpoint, params=params)
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        rows = body.get("reports") or body.get("dlrs") or body if isinstance(body, list) else body.get("data", [])
+        for row in (rows or []):
+            if isinstance(row, dict):
+                await _ingest_dlr(row)
+                ingested += 1
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "configured": True, "error": str(e)}
+    return {"ok": True, "configured": True, "ingested": ingested}

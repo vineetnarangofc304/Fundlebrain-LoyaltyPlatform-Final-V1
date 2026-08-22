@@ -345,3 +345,108 @@ agent_communication:
         Seed throwaway customers (e.g. 9700000101/102) with customers + points_ledger rows and CLEAN UP after.
         Backend-only. Prior passing iterations: 93 (return ledger), 94 (neg-balance true value), 95 (BOPS wave1).
 
+
+# ==== Campaign Manager Phase 2/3/4 (Guided Wizard + DLR delivery + Blacklist + MB unified ROI) ====
+backend:
+  - task: "Blacklist CRUD + auto-blacklist on 3 successive DLR failures + exclude from datasets"
+    implemented: true
+    working: true
+    file: "routes/blacklist_util.py, routes/campaigns_routes.py, routes/communications_routes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Phase 4. New routes/blacklist_util.py (sms_blacklist + dlr_mobile_stats collections).
+            _ingest_dlr now resolves the mobile + calls record_dlr_status -> a per-mobile consecutive
+            failure counter (reset on 'delivered'); at 3 failures the number is auto-added to the blacklist.
+            _freeze_dataset + _freeze_dataset_from_mobiles + _run_bulk_send_job all exclude blacklisted mobiles.
+            Endpoints (declared BEFORE /{campaign_id} to avoid path shadowing): GET/POST /api/campaigns/blacklist,
+            DELETE /api/campaigns/blacklist/{mobile}. Self-verified via curl: 2 failure DLRs -> not blacklisted,
+            3rd -> auto-blacklisted; manual add/list/delete OK; freeze excludes blacklisted (test_mb_unified_roi.py).
+  - task: "Ad-hoc audience preview for the wizard + campaign delivery report"
+    implemented: true
+    working: true
+    file: "routes/campaigns_routes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            POST /api/campaigns/audience-preview (audience_type + audience_filter -> total + sample + blacklist total).
+            GET /api/campaigns/{id}/delivery already existed (counts from message_log DLR statuses). Self-verified via curl.
+  - task: "Master Brain campaigns unified into core ROI pipeline"
+    implemented: true
+    working: true
+    file: "routes/master_brain_tools.py, routes/campaigns_routes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Phase 2. _tool_send_campaign now accepts objective/objective_params/roi_window/cost and calls
+            register_mb_campaign() -> creates a CORE campaigns_col doc (source=master_brain) + freezes the
+            dataset (campaign_datasets_col, blacklist-excluded) so MB campaigns show in Campaign Manager with
+            real ROI + delivery. _run_mb_campaign tags message_log with campaign_id and syncs core status/sent.
+            send_campaign tool schema extended (cohort/segment audiences + objective params). Verified via
+            tests/test_mb_unified_roi.py (PASS: core doc + frozen dataset, blacklisted number excluded).
+
+frontend:
+  - task: "Guided Campaign Wizard (Objective -> Audience -> Message -> Review & Launch) + Delivery modal + Blacklist manager"
+    implemented: true
+    working: "NA"
+    file: "pages/admin/CampaignManager.jsx, pages/admin/campaigns/CampaignWizard.jsx, CampaignDeliveryModal.jsx, CampaignBlacklistModal.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Phase 2/3/4 frontend. Replaced the single-page modal with a 4-step CampaignWizard (stepper,
+            per-step validation, live audience preview, review summary, Save-draft / Create-&-Launch).
+            Added a Delivery button per launched campaign -> CampaignDeliveryModal (counts, delivery/failure
+            rate, failures table, Pull DLRs) and a header Blacklist button -> CampaignBlacklistModal (add/search/
+            remove, auto vs manual). MB campaigns show a "MB" pill. Smoke-tested via screenshots (wizard steps,
+            delivery modal, blacklist modal all render).
+
+metadata:
+  created_by: "main_agent"
+  version: "1.2"
+  test_sequence: 101
+
+test_plan:
+  current_focus:
+    - "Guided Campaign Wizard (Objective -> Audience -> Message -> Review & Launch) + Delivery modal + Blacklist manager"
+    - "Blacklist CRUD + auto-blacklist on 3 successive DLR failures + exclude from datasets"
+    - "Ad-hoc audience preview for the wizard + campaign delivery report"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Test Campaign Manager Phases 2/3/4 (login superadmin@fundle.io / Fundle@2026 at /crm/login).
+        IMPORTANT: do NOT launch campaigns that have a Karix template linked (would send real SMS to real
+        customers). Only test SIMULATED campaigns (no template selected) and use throwaway mobiles for blacklist.
+        BACKEND: 1) POST /api/campaigns/audience-preview {audience_type,audience_filter} -> total_audience+sample.
+        2) Blacklist: POST /api/campaigns/blacklist {mobile,reason}; GET /api/campaigns/blacklist; DELETE
+        /api/campaigns/blacklist/{mobile}. 3) Auto-blacklist: hit GET /api/communications/dlr/karix?dest=<10digit>&status=UNDELIV
+        THREE times -> the 3rd returns auto_blacklisted:true and it appears in GET /api/campaigns/blacklist; clean up after.
+        4) Create a SIMULATED campaign (no template_id) via POST /api/campaigns, launch it POST /api/campaigns/{id}/launch,
+        then GET /api/campaigns/{id}/delivery and GET /api/campaigns/{id}/roi?window=7d. Clean up test campaigns.
+        FRONTEND: open /admin/campaigns -> New campaign opens the WIZARD. Step through Objective (name + objective +
+        ROI window) -> Next -> Audience (shows a live count) -> Next -> Message (channels/coupon/cost) -> Next ->
+        Review (summary) -> Save draft creates a row. Launch a simulated draft, open its ROI + Delivery modals.
+        Header "Blacklist" button opens the manager: add a throwaway number, see it listed, remove it. testids:
+        new-campaign-btn, campaign-wizard, wizard-step-*, campaign-name-input, objective-generic, wizard-next,
+        audience-count, wizard-create-draft, wizard-create-launch, launch-{id}, roi-{id}, delivery-{id},
+        campaign-delivery-modal, open-blacklist-btn, campaign-blacklist-modal, blacklist-mobile-input,
+        blacklist-add-btn, blacklist-remove-{mobile}.

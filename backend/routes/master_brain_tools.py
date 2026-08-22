@@ -1822,7 +1822,48 @@ async def _resolve_audience(audience_type, audience_value, attachment_id, mobile
                 "label": f"city={audience_value}"}, None
     if at == "all":
         return {"mode": "db", "filter": {"mobile": {"$nin": [None, ""]}}, "label": "all customers"}, None
-    return None, f"Unknown audience_type '{audience_type}'. Use all, tier, city, report or mobiles."
+    if at == "cohort" and audience_value:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        now = _dt.now(_tz.utc)
+        def _ago(days):
+            return (now - _td(days=days)).isoformat()
+        key, _, arg = (audience_value or "").partition(":")
+        key = key.strip().lower()
+        base = {"mobile": {"$nin": [None, ""]}}
+        if key in {"one_timer", "one_timers", "onetimer", "onetimers"}:
+            f = {**base, "visit_count": 1}
+            months = int(arg) if arg.strip().isdigit() else None
+            if months:
+                f["last_visit_at"] = {"$gte": _ago(30 * months)}
+            return {"mode": "db", "filter": f,
+                    "label": f"one-timers{f' (last {months}mo)' if months else ''}"}, None
+        if key == "lapsed":
+            return {"mode": "db", "filter": {**base, "last_visit_at": {"$lt": _ago(365)}},
+                    "label": "lapsed (12m+)"}, None
+        if key == "dormant":
+            return {"mode": "db", "filter": {**base, "last_visit_at": {"$gte": _ago(365), "$lt": _ago(182)}},
+                    "label": "dormant (6-12m)"}, None
+        if key in {"inactive_90", "inactive90", "inactive"}:
+            return {"mode": "db", "filter": {**base, "last_visit_at": {"$lt": _ago(90)}},
+                    "label": "inactive 90d+"}, None
+        if key in {"high_value", "highvalue", "vip"}:
+            return {"mode": "db", "filter": {**base, "tier": {"$in": ["Gold", "Platinum", "Elite"]}},
+                    "label": "high-value (Gold/Platinum/Elite)"}, None
+        return None, (f"Unknown cohort '{audience_value}'. Try one_timers[:months], lapsed, dormant, "
+                      f"inactive_90 or high_value.")
+    if at == "segment" and audience_value:
+        try:
+            from routes.segments_routes import compile_tree
+            from database import segments_col
+            seg = await segments_col.find_one({"id": audience_value}, {"_id": 0})
+            if not seg:
+                return None, f"Segment '{audience_value}' not found."
+            f = await compile_tree(seg.get("tree") or {})
+            return {"mode": "db", "filter": f, "label": f"segment:{seg.get('name', audience_value)}"}, None
+        except Exception as e:  # noqa: BLE001
+            return None, f"Could not resolve segment: {e}"
+    return None, (f"Unknown audience_type '{audience_type}'. Use all, tier, city, cohort, segment, "
+                  f"report or mobiles.")
 
 
 async def _is_campaign_cancelled(cid: str) -> bool:
@@ -1850,7 +1891,7 @@ async def _run_mb_campaign(cid: str) -> None:
             text = _render(body or "", params)
             res = await send_sms_karix(mobile, text, template_id=camp.get("template_id"),
                                        event_trigger="campaign_bulk",
-                                       context={"source": f"master_campaign:{cid}"})
+                                       context={"source": f"master_campaign:{cid}", "campaign_id": cid})
             if res.get("ok"):
                 sent += 1
             else:
@@ -1883,15 +1924,28 @@ async def _run_mb_campaign(cid: str) -> None:
         await master_campaigns_col.update_one({"id": cid}, {"$set": {
             "status": "cancelled" if cancelled else "completed",
             "processed": processed, "sent": sent, "failed": failed, "completed_at": _now_iso()}})
+        try:
+            from database import campaigns_col as _core
+            await _core.update_one({"id": cid}, {"$set": {
+                "status": "cancelled" if cancelled else "completed", "sent": sent}})
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as e:  # noqa: BLE001
         await master_campaigns_col.update_one({"id": cid}, {"$set": {
             "status": "failed", "error": str(e), "processed": processed,
             "sent": sent, "failed": failed, "completed_at": _now_iso()}})
+        try:
+            from database import campaigns_col as _core
+            await _core.update_one({"id": cid}, {"$set": {"status": "failed", "sent": sent}})
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def _tool_send_campaign(message: Optional[str] = None, template_id: Optional[str] = None,
                               audience_type: str = "all", audience_value: Optional[str] = None,
                               attachment_id: Optional[str] = None, mobiles: Optional[List[str]] = None,
+                              objective: str = "generic", objective_params: Optional[Dict[str, Any]] = None,
+                              roi_window: str = "7d", cost: Optional[float] = None,
                               reason: str = "", confirm: bool = False, user=None) -> Dict[str, Any]:
     err = _require_master(user)
     if err:
@@ -1947,6 +2001,21 @@ async def _tool_send_campaign(message: Optional[str] = None, template_id: Option
             "reason": reason, "created_by": user.get("email"), "created_by_name": user.get("name"),
             "created_at": _now_iso(), "cancel_requested": False}
     await master_campaigns_col.insert_one(camp)
+    # Phase 2 — register in the CORE campaigns pipeline so this MB campaign gets unified
+    # real ROI + delivery tracking (dataset frozen at t0 = created_at). Never fatal.
+    try:
+        from routes.campaigns_routes import register_mb_campaign
+        await register_mb_campaign(
+            cid=cid,
+            name=f"[Master Brain] {tpl.get('name') if tpl else (reason[:40] or 'SMS campaign')}",
+            spec=spec, count=count, t0=camp["created_at"],
+            created_by=(user.get("id") or user.get("email")),
+            template_id=template_id, message=(None if tpl else message),
+            audience_type=(audience_type or "all"), audience_label=spec.get("label") or "",
+            objective=objective or "generic", objective_params=objective_params or {},
+            roi_window=roi_window or "7d", cost=cost)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MB campaign core-register failed for %s: %s", cid, e)
     audit_id = await _log_master(user, "send_campaign", "campaign", cid, reason,
                                  {"recipients": count, "channel": "sms", "audience": spec.get("label"),
                                   "template": tpl.get("name") if tpl else "raw_text"})
@@ -3777,17 +3846,26 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "description": "MUTATION (Master Admin). Send a BULK SMS CAMPAIGN via the Karix Bulk SMS API. Provide either "
                        "a raw `message` (mustache vars {{name}}/{{tier}}/{{city}}/{{points_balance}} are filled per "
                        "customer) OR an existing SMS `template_id`. Audience: audience_type='all' | 'tier' (audience_value=tier slug) "
-                       "| 'city' (audience_value=city) | 'report' (the uploaded report's mobiles, optional attachment_id) "
-                       "| 'mobiles' (explicit mobiles list). ALWAYS confirm=false first to preview the recipient count + "
-                       "the message + a sample; then after the user approves + gives a reason, confirm=true + reason. "
-                       "Sending runs in the background; audit-logged; track/cancel via list_campaigns / cancel_campaign.",
+                       "| 'city' (audience_value=city) | 'cohort' (audience_value=one_timers[:months]|lapsed|dormant|inactive_90|high_value) "
+                       "| 'segment' (audience_value=segment_id) | 'report' (the uploaded report's mobiles, optional attachment_id) "
+                       "| 'mobiles' (explicit mobiles list). OPTIONALLY set an `objective` so the campaign gets real ROI tracking in the "
+                       "Campaign Manager: 'generic' (default — anyone who shops again), 'store' (objective_params={store_codes:[...]}), "
+                       "'coupon' (objective_params={coupon_codes:[...]}), 'sku' (objective_params={categories/subcategories/skus:[...]}). "
+                       "`roi_window` is the attribution window (72h|3d|5d|7d|14d|30d, default 7d) and `cost` is optional spend for ROI%. "
+                       "ALWAYS confirm=false first to preview the recipient count + the message + a sample; then after the user approves + gives a reason, confirm=true + reason. "
+                       "Sending runs in the background; audit-logged; track ROI/delivery in the Campaigns tab; cancel via cancel_campaign.",
         "parameters": {"type": "object", "properties": {
             "message": {"type": "string", "description": "Raw SMS text (omit if using template_id)"},
             "template_id": {"type": "string", "description": "Existing SMS template id (omit if using message)"},
-            "audience_type": {"type": "string", "enum": ["all", "tier", "city", "report", "mobiles"], "default": "all"},
-            "audience_value": {"type": "string", "description": "tier slug or city when audience_type is tier/city"},
+            "audience_type": {"type": "string", "enum": ["all", "tier", "city", "cohort", "segment", "report", "mobiles"], "default": "all"},
+            "audience_value": {"type": "string", "description": "tier slug / city / cohort key / segment_id depending on audience_type"},
             "attachment_id": {"type": "string", "description": "uploaded report id when audience_type='report'"},
             "mobiles": {"type": "array", "items": {"type": "string"}, "description": "explicit mobiles when audience_type='mobiles'"},
+            "objective": {"type": "string", "enum": ["generic", "store", "coupon", "sku"], "default": "generic",
+                          "description": "What the campaign drives — defines the ROI breakdown"},
+            "objective_params": {"type": "object", "description": "store:{store_codes:[]} · coupon:{coupon_codes:[]} · sku:{categories/subcategories/skus:[]}"},
+            "roi_window": {"type": "string", "enum": ["72h", "3d", "5d", "7d", "14d", "30d"], "default": "7d"},
+            "cost": {"type": "number", "description": "Optional campaign spend for ROI%"},
             "reason": {"type": "string"},
             "confirm": {"type": "boolean", "default": False},
         }}}},
