@@ -32,6 +32,10 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### ✅ New key + IP whitelist WORKING on production (Jun 2026)
+User whitelisted both egress IPs at Karix. Result:
+- **PRODUCTION** (IP `34.55.174.138`, stable 8/8): test-send now returns `{"ackid":"4833257244416949300","status":{"code":"200","desc":"Request accepted"}}` — the `-105` is gone; we're authenticated to the correct fundle_campaign account. Awaiting user confirmation of handset delivery + this ackid appearing in the Karix SMS Reports (it should now, unlike the old key).
+- **PREVIEW**: egress IP ROTATED from `34.170.12.145` → `34.16.56.64` (dev pods restart often), so preview still returns `-105`. Production IP is stable for now. ⚠️ If production IP ever rotates (redeploy/scaling), `-105` returns → re-whitelist via `GET /api/provider-connectivity`, or ask Karix for an IP range / provision static egress. Recommend testing on production, not preview.
 ### 🔑 New campaign key + IP whitelisting is the real blocker (Jun 2026)
 User provided a new bulk key `ygWwfw23pF25BPjubopGuQ==`. Applied it to code DEFAULT_CONFIG + preview DB + production DB (runtime config via PATCH /api/provider-config — no redeploy needed for the key). Test-send with the new key returns **`{"status":{"code":"-105","desc":"Invalid source IP"}}`** → this account enforces **IP whitelisting**, and our server egress IP is not on Karix's allow-list. (The OLD key `ZxQ5…` accepted from any IP but never delivered → likely the wrong/looser account; the new key's IP security suggests it's the correct bulk account.)
 - **Egress IPs (give Karix to whitelist for this account):** PRODUCTION = `34.55.174.138` (stable across checks; the one that matters for live sends). PREVIEW = `34.170.12.145` (for testing).
