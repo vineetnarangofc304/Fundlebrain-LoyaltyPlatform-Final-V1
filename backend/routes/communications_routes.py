@@ -544,8 +544,7 @@ async def send_sms_campaign_karix(mobile: str, text: str, template_id: Optional[
                 entity_id = str(tpl["dlt_entity_id"]).strip()
             if tpl.get("dlt_template_id"):
                 dlt_template_id = str(tpl["dlt_template_id"]).strip()
-    digits = re.sub(r"\D", "", mobile or "")
-    dest = digits[-10:] if len(digits) >= 10 else digits   # Karix fundle_campaign expects a 10-digit dest (per Karix doc)
+    dest = _normalize_mobile(mobile)   # 91XXXXXXXXXX — matches the delivering traffic + transactional pipe
     # Karix fundle_campaign JsonReceiver — {dest,text,send} + dlr_req (to receive DLRs) + explicit DLT
     # binding. We pass dlt_entity_id (the same Principal Entity id the DELIVERING transactional pipe
     # sends) and dlt_template_id so operators/DLT bind the promo to the approved content template
