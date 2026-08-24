@@ -90,7 +90,7 @@ DEFAULT_CONFIG = {
     "sms_dlt_tm_id": "",
     # Campaign / bulk promotional pipe (separate Karix account "fundle_campaign", JSON API).
     # Transactional SMS (new-txn, coupons, OTP) stays on sms_* above; CAMPAIGNS use these.
-    "sms_campaign_api_key": "ZxQ5XriI1uKO9fJfNK0ifQ==",
+    "sms_campaign_api_key": "ygWwfw23pF25BPjubopGuQ==",
     "sms_campaign_endpoint": "https://japi.instaalerts.zone/httpapi/JsonReceiver",
     "sms_campaign_sender_id": "KAZOFN",
     "sms_campaign_entity_id": "1101409540000012086",

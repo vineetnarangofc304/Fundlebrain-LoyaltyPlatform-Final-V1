@@ -32,6 +32,11 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### 🔑 New campaign key + IP whitelisting is the real blocker (Jun 2026)
+User provided a new bulk key `ygWwfw23pF25BPjubopGuQ==`. Applied it to code DEFAULT_CONFIG + preview DB + production DB (runtime config via PATCH /api/provider-config — no redeploy needed for the key). Test-send with the new key returns **`{"status":{"code":"-105","desc":"Invalid source IP"}}`** → this account enforces **IP whitelisting**, and our server egress IP is not on Karix's allow-list. (The OLD key `ZxQ5…` accepted from any IP but never delivered → likely the wrong/looser account; the new key's IP security suggests it's the correct bulk account.)
+- **Egress IPs (give Karix to whitelist for this account):** PRODUCTION = `34.55.174.138` (stable across checks; the one that matters for live sends). PREVIEW = `34.170.12.145` (for testing).
+- **Diagnostic:** `GET /api/provider-connectivity` returns the deployment's egress IP + gateway reachability.
+- ⚠️ Kubernetes egress IP can change on redeploy/scaling (code notes an IP pool). If `-105` recurs after whitelisting, the IP rotated → ask Karix to whitelist a small range or provision a static egress. Once the IP is whitelisted, sends should be accepted (200) and delivered (subject to DLT/DND). No redeploy needed to pick up the key change.
 ### ✅ Karix support confirmed the EXACT payload — reverted to it (Jun 2026)
 Karix support (Vishal, 24-Aug) sent the authoritative working payload for the fundle_campaign account:
 `{"ver":"1.0","key":"ZxQ5…","messages":[{"dest":["9711970669"],"text":"KAZO End of Season Sale…T&C Apply.","send":"KAZOFN"}]}` at `https://japi.instaalerts.zone/httpapi/JsonReceiver`.
