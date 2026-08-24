@@ -32,6 +32,10 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### ✅ DLT registration confirmed correct — remaining blocker is DND + redeploy (Jun 2026)
+User shared the Karix Template ID Configuration: template `1107178315446496099` is registered under Entity `1101409540000012086`, Sender `KAZOFN`, content = "KAZO End of Season Sale is LIVE! Get up to 50% OFF on your favorite styles. Shop now and refresh your wardrobe. T&C Apply." — an EXACT match to our config + template body. So DLT/sender/entity/content are all correct.
+- Code state (preview, verified accepted by Karix 200): campaign pipe sends `send=KAZOFN`, 91-prefixed `dest`, `dlt_entity_id=1101409540000012086`, `dlt_template_id=1107178315446496099`, `dlr_req=1`, exact body.
+- **Conclusion:** the only reasons the user's own-number test showed nothing are (1) production not yet redeployed with the 91-prefix/dlr_req code, and (2) **DND** — the user's personal number (9811123206) is almost certainly on the DLT preference/DND registry (the portal's one Failed row = reason "DLT Preference Filter" = DND). Action: redeploy, then test to a NON-DND number; DLRs will now report Delivered/Failed(reason) in the Message Log.
 ### 🔎 Karix portal evidence — 91-prefix dest + KAZOFN provisioning (Jun 2026)
 User shared the Karix `fundle_campaign` portal (console.instaalerts.zone). Findings: (1) the account DELIVERS fine but the shown traffic is sender **NEWUDB**, not KAZOFN — our KAZO sends aren't visible there → **KAZOFN may not be provisioned/active on this account, or our sends aren't landing**; (2) delivered destinations are **91-prefixed** (`919289645552`) — our transactional (delivering) pipe also uses 91, so 10-digit was wrong; (3) one row failed with reason **"DLT Preference Filter" = DND** (confirms promo SMS are blocked to DND numbers).
 - **Fix:** bulk pipe `dest` switched from 10-digit → `_normalize_mobile` (91XXXXXXXXXX) to match the delivering traffic + transactional pipe. Verified Karix still accepts (200).
