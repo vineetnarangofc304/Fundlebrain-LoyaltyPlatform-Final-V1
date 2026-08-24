@@ -537,11 +537,12 @@ async def send_sms_campaign_karix(mobile: str, text: str, template_id: Optional[
             sender = str(tpl["sender_id"]).strip()
     digits = re.sub(r"\D", "", mobile or "")
     dest = digits[-10:] if len(digits) >= 10 else digits   # Karix fundle_campaign expects a 10-digit dest (per Karix doc)
-    # EXACT format from the Karix fundle_campaign doc — {dest,text,send} only. The account resolves
-    # DLT (PE + content template) by REVERSE-LOOKUP on sender+text, so the body must match a
-    # DLT-approved template verbatim (do NOT add dlt_* / type fields — not part of this account's API).
+    # EXACT format from the Karix fundle_campaign doc — {dest,text,send} + dlr_req to receive DLRs.
+    # The account resolves DLT (PE + content template) by REVERSE-LOOKUP on sender+text, so the body
+    # must match a DLT-approved template verbatim (do NOT add dlt_*/type fields — not part of this API).
+    # dlr_req=1 asks Karix to push a delivery report to the configured callback (…/dlr/karix).
     payload = {"ver": "1.0", "key": key,
-               "messages": [{"dest": [dest], "text": text, "send": sender}]}
+               "messages": [{"dest": [dest], "text": text, "send": sender, "dlr_req": "1"}]}
     log_payload = {"send": sender, "pipe": "campaign", "endpoint": endpoint,
                    "account": cfg.get("sms_campaign_account"), "dest": dest}
     last_err = None
@@ -1083,17 +1084,25 @@ async def _ingest_dlr(data: Dict[str, Any]) -> Dict[str, Any]:
         "delivered_at": (dtime or datetime.now(timezone.utc).isoformat()) if ns == "delivered" else None,
     }
     matched_mobile = str(dest) if dest else None
+    matched = 0
     if mid:
         # Fetch the mobile first so the failure tracker can key on it, then bulk-update status.
         pre = await message_log_col.find_one({"provider_mid": str(mid)}, {"_id": 0, "mobile": 1})
         res = await message_log_col.update_many({"provider_mid": str(mid)}, {"$set": upd})
         matched = res.matched_count
         matched_mobile = (pre or {}).get("mobile") or matched_mobile
-    else:
+    if matched == 0 and dest:
+        # mid absent OR unknown — for the BULK pipe the per-message DLR id often differs from the
+        # batch ackid we stored, so reconcile by destination: prefer the most recent SMS to this
+        # number that is still 'submitted', else the most recent SMS to it.
+        tail = re.escape(str(dest)[-10:])
         doc = await message_log_col.find_one(
-            {"mobile": {"$regex": re.escape(str(dest)[-10:]) + "$"}, "channel": "sms"},
+            {"mobile": {"$regex": tail + "$"}, "channel": "sms", "delivery_status": "submitted"},
             sort=[("timestamp", -1)])
-        matched = 0
+        if not doc:
+            doc = await message_log_col.find_one(
+                {"mobile": {"$regex": tail + "$"}, "channel": "sms"},
+                sort=[("timestamp", -1)])
         if doc:
             await message_log_col.update_one({"id": doc["id"]}, {"$set": upd})
             matched = 1
