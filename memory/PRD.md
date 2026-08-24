@@ -32,6 +32,8 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### 🎉 SMS DELIVERY CONFIRMED (Jun 2026)
+User confirmed the SMS was RECEIVED on 9899533604 (production, ackid 2883257246249495400). Root cause chain fully resolved: (1) wrong/looser campaign key `ZxQ5…` replaced with correct `ygWwfw23pF25BPjubopGuQ==`; (2) that account enforces IP whitelisting — Karix whitelisted production egress `34.55.174.138`; (3) payload = Karix's exact `{ver,key,messages:[{dest(10-digit),text,send:KAZOFN}]}`, body matching the DLT-approved template. Campaign SMS now deliver to non-DND numbers. The user's own number 9811123206 is on DND (blocked — regulatory). Follow-ups: ask Karix to whitelist a /29 range (egress IP can rotate on redeploy → `-105`), and enable DLR push to …/dlr/karix for auto delivery status.
 ### ✅ New key + IP whitelist WORKING on production (Jun 2026)
 User whitelisted both egress IPs at Karix. Result:
 - **PRODUCTION** (IP `34.55.174.138`, stable 8/8): test-send now returns `{"ackid":"4833257244416949300","status":{"code":"200","desc":"Request accepted"}}` — the `-105` is gone; we're authenticated to the correct fundle_campaign account. Awaiting user confirmation of handset delivery + this ackid appearing in the Karix SMS Reports (it should now, unlike the old key).
