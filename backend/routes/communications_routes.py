@@ -527,37 +527,25 @@ async def send_sms_campaign_karix(mobile: str, text: str, template_id: Optional[
     key = (cfg.get("sms_campaign_api_key") or "").strip()
     endpoint = (cfg.get("sms_campaign_endpoint") or "").strip()
     sender = (cfg.get("sms_campaign_sender_id") or "").strip()
-    entity_id = (cfg.get("sms_campaign_entity_id") or "").strip()
-    dlt_template_id = ""
     if not key or not endpoint:
         res = await send_sms_karix(mobile, text, template_id, event_trigger,
                                    {**(context or {}), "pipe": "transactional_fallback"})
         return res
     if template_id:
-        tpl = await templates_col.find_one(
-            {"id": template_id},
-            {"_id": 0, "sender_id": 1, "dlt_entity_id": 1, "dlt_template_id": 1})
-        if tpl:
-            if tpl.get("sender_id"):
-                sender = str(tpl["sender_id"]).strip()
-            if tpl.get("dlt_entity_id"):
-                entity_id = str(tpl["dlt_entity_id"]).strip()
-            if tpl.get("dlt_template_id"):
-                dlt_template_id = str(tpl["dlt_template_id"]).strip()
-    dest = _normalize_mobile(mobile)   # 91XXXXXXXXXX — matches the delivering traffic + transactional pipe
-    # Karix fundle_campaign JsonReceiver — {dest,text,send} + dlr_req (to receive DLRs) + explicit DLT
-    # binding. We pass dlt_entity_id (the same Principal Entity id the DELIVERING transactional pipe
-    # sends) and dlt_template_id so operators/DLT bind the promo to the approved content template
-    # instead of relying on content reverse-lookup. Body must still match the approved template.
-    msg: Dict[str, Any] = {"dest": [dest], "text": text, "send": sender, "dlr_req": "1"}
-    if entity_id:
-        msg["dlt_entity_id"] = entity_id
-    if dlt_template_id:
-        msg["dlt_template_id"] = dlt_template_id
-    payload = {"ver": "1.0", "key": key, "messages": [msg]}
+        tpl = await templates_col.find_one({"id": template_id}, {"_id": 0, "sender_id": 1})
+        if tpl and tpl.get("sender_id"):
+            sender = str(tpl["sender_id"]).strip()
+    digits = re.sub(r"\D", "", mobile or "")
+    dest = digits[-10:] if len(digits) >= 10 else digits   # Karix-confirmed: 10-digit, NO country code
+    # EXACT payload confirmed by Karix support (Vishal, 24-Aug 2026):
+    #   {"ver":"1.0","key":...,"messages":[{"dest":[<10-digit>],"text":...,"send":"KAZOFN"}]}
+    # Karix resolves the DLT Principal Entity + content template by REVERSE-LOOKUP on sender+text,
+    # so the body must match the DLT-approved template verbatim. Do NOT add dlt_*/type/dlr_req —
+    # they are not part of this account's API and cause the send to not match/land.
+    payload = {"ver": "1.0", "key": key,
+               "messages": [{"dest": [dest], "text": text, "send": sender}]}
     log_payload = {"send": sender, "pipe": "campaign", "endpoint": endpoint,
-                   "account": cfg.get("sms_campaign_account"), "dest": dest,
-                   "dlt_entity_id": entity_id or None, "dlt_template_id": dlt_template_id or None}
+                   "account": cfg.get("sms_campaign_account"), "dest": dest}
     last_err = None
     attempts = 4
     for attempt in range(1, attempts + 1):

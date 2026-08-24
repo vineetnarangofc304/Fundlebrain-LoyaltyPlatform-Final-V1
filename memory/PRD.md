@@ -32,6 +32,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### ✅ Karix support confirmed the EXACT payload — reverted to it (Jun 2026)
+Karix support (Vishal, 24-Aug) sent the authoritative working payload for the fundle_campaign account:
+`{"ver":"1.0","key":"ZxQ5…","messages":[{"dest":["9711970669"],"text":"KAZO End of Season Sale…T&C Apply.","send":"KAZOFN"}]}` at `https://japi.instaalerts.zone/httpapi/JsonReceiver`.
+Key facts: **10-digit dest (NO country code)**, and **only `{dest,text,send}`** — no `dlt_entity_id`/`dlt_template_id`/`type`/`dlr_req`. Karix resolves the DLT PE + content template by reverse-lookup on sender+text.
+- **Fix (`send_sms_campaign_karix`):** reverted my earlier deviations (91-prefix, DLT ids, dlr_req) back to Karix's exact format — 10-digit dest, `{dest,text,send}` only. Verified in preview: Karix accepts (200 + ackid); message-log payload_summary shows `dest="9711970669"` and no extra fields. ⚠️ Redeploy required.
+- Launch guard (template must have a DLT template id) + the seeded template are retained — the DLT id is kept on the template for compliance/reference even though it's not sent in the payload. Body must still match the DLT-approved content verbatim. DLR push (delivery_status) now depends on Karix enabling account-level callback (dlr_req removed to match their format).
 ### ✅ DLT registration confirmed correct — remaining blocker is DND + redeploy (Jun 2026)
 User shared the Karix Template ID Configuration: template `1107178315446496099` is registered under Entity `1101409540000012086`, Sender `KAZOFN`, content = "KAZO End of Season Sale is LIVE! Get up to 50% OFF on your favorite styles. Shop now and refresh your wardrobe. T&C Apply." — an EXACT match to our config + template body. So DLT/sender/entity/content are all correct.
 - Code state (preview, verified accepted by Karix 200): campaign pipe sends `send=KAZOFN`, 91-prefixed `dest`, `dlt_entity_id=1101409540000012086`, `dlt_template_id=1107178315446496099`, `dlr_req=1`, exact body.
