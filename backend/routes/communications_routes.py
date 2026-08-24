@@ -527,24 +527,38 @@ async def send_sms_campaign_karix(mobile: str, text: str, template_id: Optional[
     key = (cfg.get("sms_campaign_api_key") or "").strip()
     endpoint = (cfg.get("sms_campaign_endpoint") or "").strip()
     sender = (cfg.get("sms_campaign_sender_id") or "").strip()
+    entity_id = (cfg.get("sms_campaign_entity_id") or "").strip()
+    dlt_template_id = ""
     if not key or not endpoint:
         res = await send_sms_karix(mobile, text, template_id, event_trigger,
                                    {**(context or {}), "pipe": "transactional_fallback"})
         return res
     if template_id:
-        tpl = await templates_col.find_one({"id": template_id}, {"_id": 0, "sender_id": 1})
-        if tpl and tpl.get("sender_id"):
-            sender = str(tpl["sender_id"]).strip()
+        tpl = await templates_col.find_one(
+            {"id": template_id},
+            {"_id": 0, "sender_id": 1, "dlt_entity_id": 1, "dlt_template_id": 1})
+        if tpl:
+            if tpl.get("sender_id"):
+                sender = str(tpl["sender_id"]).strip()
+            if tpl.get("dlt_entity_id"):
+                entity_id = str(tpl["dlt_entity_id"]).strip()
+            if tpl.get("dlt_template_id"):
+                dlt_template_id = str(tpl["dlt_template_id"]).strip()
     digits = re.sub(r"\D", "", mobile or "")
     dest = digits[-10:] if len(digits) >= 10 else digits   # Karix fundle_campaign expects a 10-digit dest (per Karix doc)
-    # EXACT format from the Karix fundle_campaign doc — {dest,text,send} + dlr_req to receive DLRs.
-    # The account resolves DLT (PE + content template) by REVERSE-LOOKUP on sender+text, so the body
-    # must match a DLT-approved template verbatim (do NOT add dlt_*/type fields — not part of this API).
-    # dlr_req=1 asks Karix to push a delivery report to the configured callback (…/dlr/karix).
-    payload = {"ver": "1.0", "key": key,
-               "messages": [{"dest": [dest], "text": text, "send": sender, "dlr_req": "1"}]}
+    # Karix fundle_campaign JsonReceiver — {dest,text,send} + dlr_req (to receive DLRs) + explicit DLT
+    # binding. We pass dlt_entity_id (the same Principal Entity id the DELIVERING transactional pipe
+    # sends) and dlt_template_id so operators/DLT bind the promo to the approved content template
+    # instead of relying on content reverse-lookup. Body must still match the approved template.
+    msg: Dict[str, Any] = {"dest": [dest], "text": text, "send": sender, "dlr_req": "1"}
+    if entity_id:
+        msg["dlt_entity_id"] = entity_id
+    if dlt_template_id:
+        msg["dlt_template_id"] = dlt_template_id
+    payload = {"ver": "1.0", "key": key, "messages": [msg]}
     log_payload = {"send": sender, "pipe": "campaign", "endpoint": endpoint,
-                   "account": cfg.get("sms_campaign_account"), "dest": dest}
+                   "account": cfg.get("sms_campaign_account"), "dest": dest,
+                   "dlt_entity_id": entity_id or None, "dlt_template_id": dlt_template_id or None}
     last_err = None
     attempts = 4
     for attempt in range(1, attempts + 1):

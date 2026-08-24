@@ -32,6 +32,10 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
 
+### 🧾 Bulk SMS DLT compliance — pass entity + template IDs explicitly (Jun 2026)
+Production test via the Templates "Send test now" button: Karix accepted (200 + ackid) but no delivery and no DLR. Diagnosis (read prod): template body is pure-ASCII and matches the approved DLT content verbatim (not a content issue); the gap was that the bulk pipe passed **no DLT identifiers** and relied on Karix content reverse-lookup, whereas the DELIVERING transactional pipe (`send_sms_karix`) explicitly sends `dlt_entity_id`.
+- **Fix (`send_sms_campaign_karix`):** the bulk JsonReceiver message now includes `dlt_entity_id` (template → config `sms_campaign_entity_id`) AND `dlt_template_id` (from the template), alongside `dlr_req:"1"` and the 10-digit `dest`. Mirrors the transactional pipe's DLT binding so operators bind the promo to the approved PE + content template deterministically. Verified in preview: Karix still returns status.code=200; message-log payload_summary shows entity+template attached.
+- ⚠️ **Redeploy required.** After deploy, re-test via the template button; the requested DLR will now report the real disposition. If still undelivered, prime suspects are (a) the test number on **DND** for promotional (PM route), or (b) Karix expecting different JSON DLT field names for this account (get the DLT-inclusive JsonReceiver sample from Karix). Look up the ackid in the Karix fundle_campaign portal for ground truth.
 ### 📬 Campaign SMS delivery closeout — DLR receipts + dlr_req + auto-seed template (Jun 2026)
 Follow-up to the "no hits at Karix" fix. Karix confirmed the DLR callback is configured (POST) for the `fundle_campaign` account → `https://kazo-loyalty-hub.emergent.host/api/communications/dlr/karix`.
 - **`dlr_req:"1"` added** to the bulk JsonReceiver message (`send_sms_campaign_karix`) — required by the Karix JSON API to actually push a delivery report; verified Karix still accepts (status.code=200).
