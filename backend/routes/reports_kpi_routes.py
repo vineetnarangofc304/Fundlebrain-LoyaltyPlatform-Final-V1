@@ -111,6 +111,7 @@ def _store_group_stage() -> Dict[str, Any]:
             "mapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _HAS_MOBILE]}, 1, 0]}},
             "mapped_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _HAS_MOBILE]}, PAID_EXPR, 0]}},
             "unmapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, {"$not": [_HAS_MOBILE]}]}, 1, 0]}},
+            "unmapped_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, {"$not": [_HAS_MOBILE]}]}, PAID_EXPR, 0]}},
             "customers": addset({"$and": [_NE_RETURN, _HAS_MOBILE]}),
             "new_customers": addset({"$and": [_NE_RETURN, _IS_NEW, _HAS_MOBILE]}),
             "existing_customers": addset({"$and": [_NE_RETURN, _IS_EXISTING, _HAS_MOBILE]}),
@@ -138,6 +139,16 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
     repeat_value = round(g.get("repeat_value", 0) or 0, 2)
     new_value = round(mapped_value - repeat_value, 2)
 
+    # ── Sales reconciliation (KAZO doc Point 5): New Cust sale + Repeat Cust sale did
+    # not tie to Total (Overall) Sales because Overall Sales ALSO includes the value of
+    # UNMAPPED / walk-in fresh bills and RETURN bills. Surfacing Unmapped Value + Return
+    # Value makes the identity hold exactly:
+    #     Overall Sales == New Value + Repeat Value + Unmapped Value + Return Value
+    # unmapped_value is derived as the residual so the four parts always sum to Overall.
+    overall_sales = round(g.get("overall_sales", 0) or 0, 2)
+    return_value = round(g.get("return_value", 0) or 0, 2)
+    unmapped_value = round(overall_sales - return_value - new_value - repeat_value, 2)
+
     # ── Customer reconciliation (exact partition): New + Existing == Overall ──
     # `new_customers` (first-ever bill lands in range) is a subset of `customers`; any
     # returning/untagged customer is Existing. Forcing Existing = Overall − New removes
@@ -161,7 +172,7 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
         "fresh_bills": fresh_bills,
         "fresh_value": round(g.get("fresh_value", 0) or 0, 2),
         "return_bills": int(g.get("return_bills", 0) or 0),
-        "return_value": round(g.get("return_value", 0) or 0, 2),
+        "return_value": return_value,
         "new_txn": new_txn,
         "new_value": new_value,
         "new_atv": atv(new_value, new_txn),
@@ -170,6 +181,7 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
         "repeat_atv": atv(repeat_value, repeat_txn),
         "mapped_txn": mapped_txn,
         "unmapped_txn": unmapped_txn,
+        "unmapped_value": unmapped_value,
         "overall_customers": overall_cust,
         "new_customer_count": new_cust,
         "existing_customers": existing_cust,
@@ -216,7 +228,7 @@ STORE_SORT_FIELDS = {
     "store_name", "store_code", "store_class", "zone", "city",
     "overall_sales", "total_discount", "fresh_bills", "fresh_value",
     "return_bills", "return_value", "new_txn", "repeat_txn", "mapped_txn",
-    "unmapped_txn", "overall_customers", "new_customer_count",
+    "unmapped_txn", "unmapped_value", "overall_customers", "new_customer_count",
     "existing_customers", "overall_atv", "new_atv", "repeat_atv",
 }
 
@@ -229,7 +241,7 @@ STORE_COLUMNS: List[Tuple[str, str]] = [
     ("return_bills", "Return Bills"), ("return_value", "Return Bill Value"),
     ("new_txn", "New Cust Txns"), ("new_value", "New Cust Value"), ("new_atv", "New ATV"),
     ("repeat_txn", "Repeat Cust Txns"), ("repeat_value", "Repeat Cust Value"), ("repeat_atv", "Repeat ATV"),
-    ("mapped_txn", "Mapped Txns"), ("unmapped_txn", "Unmapped Txns"),
+    ("mapped_txn", "Mapped Txns"), ("unmapped_txn", "Unmapped Txns"), ("unmapped_value", "Unmapped Value"),
     ("overall_customers", "Overall Customers"), ("new_customer_count", "New Customers"),
     ("existing_customers", "Existing Customers"), ("overall_atv", "Overall ATV"),
 ]
@@ -292,11 +304,13 @@ async def store_kpi(
         "overall_sales", "total_discount", "net_before_tax", "total_tax",
         "fresh_bills", "fresh_value", "return_bills", "return_value",
         "new_txn", "repeat_txn", "mapped_txn", "unmapped_txn",
+        "new_value", "repeat_value", "unmapped_value",
         "overall_customers", "new_customer_count", "existing_customers")}
     for r in rows:
         for k in totals:
             totals[k] += r.get(k, 0) or 0
-    for k in ("overall_sales", "total_discount", "net_before_tax", "total_tax", "fresh_value", "return_value"):
+    for k in ("overall_sales", "total_discount", "net_before_tax", "total_tax",
+              "fresh_value", "return_value", "new_value", "repeat_value", "unmapped_value"):
         totals[k] = round(totals[k], 2)
 
     return {"rows": rows, "totals": totals, "count": len(rows), "compare": compare,
@@ -338,6 +352,7 @@ async def store_kpi_export(
 # ── CRM Customer Report ───────────────────────────────────────────────────────
 CRM_COLUMNS: List[Tuple[str, str]] = [
     ("mobile", "Mobile"), ("name", "Name"), ("city", "City"), ("state", "State"),
+    ("home_store", "Home Store"),
     ("tier", "Tier"), ("card_validity", "Card Validity"),
     ("points_balance", "Point Balance"), ("lifetime_points_redeemed", "Redeem Points"),
     ("lifetime_spend", "Total Billing"), ("total_purchase", "Total Purchase (incl. Tax)"),
@@ -358,7 +373,8 @@ CRM_SORT_FIELDS = {
 
 
 def _crm_filter(q, city, state, tier, card_validity, recency,
-                min_visits, max_visits, min_points, max_points, min_billing) -> Dict[str, Any]:
+                min_visits, max_visits, min_points, max_points, min_billing,
+                store_id=None) -> Dict[str, Any]:
     flt: Dict[str, Any] = {}
     if q:
         flt["$or"] = [{"mobile": {"$regex": _esc(q)}},
@@ -367,6 +383,11 @@ def _crm_filter(q, city, state, tier, card_validity, recency,
         flt["city"] = city
     if state:
         flt["state"] = state
+    if store_id:
+        # Home store = the store of the customer's FIRST bill (R2 rule) — the canonical
+        # customer↔store link used across the platform. Lets you view a store's customer
+        # base (KAZO doc Point 4 — Jasola/K00119 was invisible with no store dimension).
+        flt["home_store_id"] = store_id
     if tier:
         flt["tier"] = tier
     if card_validity:
@@ -398,7 +419,22 @@ def _crm_filter(q, city, state, tier, card_validity, recency,
 
 _CRM_PROJECT = {"_id": 0, "password_hash": 0}
 # Minimal projection (only report columns) — keeps streamed export rows small.
-_CRM_FIELDS = {"_id": 0, **{k: 1 for k, _ in CRM_COLUMNS}}
+# home_store is DERIVED from home_store_id (resolved to a store label), so project the id.
+_CRM_FIELDS = {"_id": 0, "home_store_id": 1, **{k: 1 for k, _ in CRM_COLUMNS if k != "home_store"}}
+
+
+async def _store_label_map(store_ids: List[Optional[str]]) -> Dict[str, str]:
+    """id → 'CODE · Name' for the given home_store_ids (bounded batch lookup)."""
+    from database import stores_col
+    ids = list({x for x in store_ids if x})
+    if not ids:
+        return {}
+    out: Dict[str, str] = {}
+    async for s in stores_col.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "code": 1, "name": 1}):
+        code = (s.get("code") or "").strip()
+        name = (s.get("name") or "").strip()
+        out[s["id"]] = f"{code} · {name}" if code and name else (code or name)
+    return out
 
 
 @router.get("/crm-customers")
@@ -414,6 +450,7 @@ async def crm_customers(
     min_points: Optional[int] = None,
     max_points: Optional[int] = None,
     min_billing: Optional[float] = None,
+    store_id: Optional[str] = None,
     sort_by: str = "lifetime_spend",
     sort_dir: str = "desc",
     skip: int = 0,
@@ -421,7 +458,8 @@ async def crm_customers(
     user=Depends(get_current_user),
 ):
     flt = _crm_filter(q, city, state, tier, card_validity, recency,
-                      min_visits, max_visits, min_points, max_points, min_billing)
+                      min_visits, max_visits, min_points, max_points, min_billing,
+                      store_id=store_id)
     sf = sort_by if sort_by in CRM_SORT_FIELDS else "lifetime_spend"
     direction = pymongo.ASCENDING if sort_dir == "asc" else pymongo.DESCENDING
 
@@ -429,6 +467,9 @@ async def crm_customers(
     cur = (customers_col.find(flt, _CRM_PROJECT)
            .sort(sf, direction).skip(max(0, skip)).limit(limit))
     rows = await cur.to_list(limit)
+    smap = await _store_label_map([r.get("home_store_id") for r in rows])
+    for r in rows:
+        r["home_store"] = smap.get(r.get("home_store_id"), "")
     return {"total": total, "rows": rows, "skip": skip, "limit": limit,
             "has_more": skip + len(rows) < total,
             "columns": [{"key": k, "label": l} for k, l in CRM_COLUMNS]}
@@ -447,16 +488,24 @@ async def crm_customers_export(
     min_points: Optional[int] = None,
     max_points: Optional[int] = None,
     min_billing: Optional[float] = None,
+    store_id: Optional[str] = None,
     sort_by: str = "lifetime_spend",
     sort_dir: str = "desc",
     user=Depends(get_current_user),
 ):
     flt = _crm_filter(q, city, state, tier, card_validity, recency,
-                      min_visits, max_visits, min_points, max_points, min_billing)
+                      min_visits, max_visits, min_points, max_points, min_billing,
+                      store_id=store_id)
     sf = sort_by if sort_by in CRM_SORT_FIELDS else "lifetime_spend"
     direction = pymongo.ASCENDING if sort_dir == "asc" else pymongo.DESCENDING
 
     async def gen():
+        from database import stores_col
+        smap: Dict[str, str] = {}
+        async for s in stores_col.find({}, {"_id": 0, "id": 1, "code": 1, "name": 1}):
+            code = (s.get("code") or "").strip()
+            name = (s.get("name") or "").strip()
+            smap[s["id"]] = f"{code} · {name}" if code and name else (code or name)
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow([l for _, l in CRM_COLUMNS])
@@ -465,7 +514,8 @@ async def crm_customers_export(
         with pymongo.timeout(900):
             cur = customers_col.find(flt, _CRM_FIELDS).sort(sf, direction).allow_disk_use(True)
             async for c in cur:
-                w.writerow([c.get(k, "") for k, _ in CRM_COLUMNS])
+                w.writerow([smap.get(c.get("home_store_id"), "") if k == "home_store"
+                            else c.get(k, "") for k, _ in CRM_COLUMNS])
                 yield buf.getvalue(); buf.seek(0); buf.truncate(0)
                 sent += 1
                 if sent >= EXPORT_MAX_ROWS:
@@ -662,15 +712,18 @@ async def crm_summary(
     min_points: Optional[int] = None,
     max_points: Optional[int] = None,
     min_billing: Optional[float] = None,
+    store_id: Optional[str] = None,
     refresh: bool = False,
     user=Depends(get_current_user),
 ):
     flt = _crm_filter(q, city, state, tier, card_validity, recency,
-                      min_visits, max_visits, min_points, max_points, min_billing)
+                      min_visits, max_visits, min_points, max_points, min_billing,
+                      store_id=store_id)
     key = "crm-summary|" + json.dumps({
         "q": q, "city": city, "state": state, "tier": tier, "card_validity": card_validity,
         "recency": recency, "min_visits": min_visits, "max_visits": max_visits,
         "min_points": min_points, "max_points": max_points, "min_billing": min_billing,
+        "store_id": store_id,
     }, sort_keys=True, default=str)
 
     if not refresh:

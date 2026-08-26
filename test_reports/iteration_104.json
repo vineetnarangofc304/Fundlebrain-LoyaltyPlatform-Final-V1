@@ -1,0 +1,30 @@
+{
+  "summary": "Frontend-only verification of the 3 report bug fixes (Points 3/4/5) via Playwright on the public preview URL, logged in as superadmin@fundle.io at /crm/login. ALL THREE features verified working. (1) Store KPI (/admin/reports/store-kpi): skpi-recon now renders THREE lines; first line is 'Overall Sales New ₹63,870.33 + Repeat ₹23,460.35 + Unmapped ₹12,500.00 + Returns -₹5,457.63 = ₹94,373.05' with a green CheckCircle (emerald svg present, no amber warning) — identity ties exactly. 'Unmapped Value' option exists in skpi-cols picker; enabling it added the 'Unmapped Value' money column to the table (row0 K00055 => ₹12,000.00). (2) CRM Customer Report (/admin/reports/crm-customers): 'Home Store' select (crm-store) present with 67 options, first 'All stores'; 'Home Store' column visible by default showing 'K00055 · City Centre Mall, Guwahati' style values; selecting a store + Apply sent store_id to /api/kpi-reports/crm-customers and /crm-summary (both 200) and narrowed results (e.g. 1 of 1 for KAJENTERP, 3 of 3 for K00055) with all rows sharing the selected home store; KPI cards + charts recompute for the filtered store. (3) Shopper Bill Report (/admin/reports/shopper-bills): no 'sbr-th-second_last_visit' header, no '2nd Last Visit' text anywhere, and no such option in the column picker; 'Cust Type' shows derived New / New Repeat / Existing (and '—' for unmapped/walk-in bills); with range 2020-01-01→2026-08-26, cust-type='new' auto-refetched 46 rows containing only {New, New Repeat}, cust-type='existing' returned 16 rows containing only {Existing}. No blank screens, no error banners (skpi-error/crm-error/sbr-error all absent).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "CRM Customer Report (/admin/reports/crm-customers)", "issues": ["Initial unfiltered /kpi-reports/crm-summary over 800k customers takes ~15-25s; during that time the 5 KPI cards show 'N/A' and the 3 charts render empty axes with no skeleton/loading indicator — looks like a broken page. Suggest a loading state (spinner/skeleton) for the summary block."]},
+      {"screen": "Store KPI Report charts", "issues": ["'Overall Sales (Top 10)' X-axis tickFormatter divides by 100000, so with preview-scale data every tick renders as '₹0L' (all identical). Consider an adaptive formatter (K/L/Cr)."]},
+      {"screen": "Console (CRM report page)", "issues": ["React DOM warning logged as console error: 'In HTML, <span> cannot be a child of <option>. This will cause a hydration error.' Traced to AdminLayout-level render; no visible breakage but noisy — worth locating the offending select/option markup."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Optional: add loading skeleton for CRM report summary KPI cards/charts (currently 'N/A' for up to ~25s on unfiltered load).",
+    "Optional: fix Store KPI top-stores X-axis tick formatter (all ticks show ₹0L).",
+    "Optional: resolve React '<span> cannot be a child of <option>' hydration warning."
+  ],
+  "critical_code_review_comments": [
+    "useColumns persists visible columns in localStorage; existing users who already have 'kazo-storekpi-cols' saved will NOT see the new 'Unmapped Value' column until they hit Reset — consider versioning the storage key when BASE_COLS changes."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (frontend-only run)", "frontend": "100% (3/3 features verified)"},
+  "seed_data_creation": "None — used existing preview seed data.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 at /crm/login",
+  "context_for_next_testing_agent": "All 3 report pages render and expose the new features. Note: Store KPI/Shopper Bill default date ranges (current month) return 0 rows in preview seed data — always widen start date to 2020-01-01 before asserting table content. Store column values in CRM crm-store select are store UUIDs; labels are 'Name (CODE)'. CRM summary is slow (~15-25s) unfiltered, so wait >=25s before asserting KPI card numbers.",
+  "rca_of_the_issue": "N/A — no functional defects found this run."
+}

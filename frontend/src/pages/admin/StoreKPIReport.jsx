@@ -37,6 +37,7 @@ const BASE_COLS = [
   { key: "repeat_atv", label: "Repeat ATV", money: true, sort: "repeat_atv", default: false },
   { key: "mapped_txn", label: "Mapped Txns", num: true, sort: "mapped_txn", default: false },
   { key: "unmapped_txn", label: "Unmapped Txns", num: true, sort: "unmapped_txn", default: false },
+  { key: "unmapped_value", label: "Unmapped Value", money: true, sort: "unmapped_value", default: false },
   { key: "overall_customers", label: "Customers", num: true, sort: "overall_customers" },
   { key: "new_customer_count", label: "New Cust", num: true, sort: "new_customer_count" },
   { key: "existing_customers", label: "Existing Cust", num: true, sort: "existing_customers" },
@@ -49,19 +50,20 @@ const COMPARE_COLS = [
   { key: "growth_customers", label: "Cust Growth", render: GrowthCell },
 ];
 
-const ReconLine = ({ label, parts, total }) => {
+const ReconLine = ({ label, parts, total, money }) => {
+  const fmt = money ? fmtMoney2 : fmtNum;
   const sum = parts.reduce((a, [, v]) => a + (Number(v) || 0), 0);
-  const ok = sum === (Number(total) || 0);
+  const ok = Math.abs(sum - (Number(total) || 0)) < (money ? 1 : 0.001);
   return (
     <span className="inline-flex items-center gap-1.5" data-testid={`skpi-recon-${label.replace(/\s+/g, "-").toLowerCase()}`}>
       {ok ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> : <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />}
       <span className="text-neutral-600">
         <span className="font-medium">{label}</span>{" "}
         {parts.map(([n, v], i) => (
-          <span key={n}>{i > 0 ? " + " : ""}{n} <b>{fmtNum(v)}</b></span>
+          <span key={n}>{i > 0 ? " + " : ""}{n} <b>{fmt(v)}</b></span>
         ))}{" = "}
-        <b className={ok ? "text-emerald-700" : "text-amber-700"}>{fmtNum(total)}</b>
-        {!ok && <span className="text-amber-700"> (Σ {fmtNum(sum)})</span>}
+        <b className={ok ? "text-emerald-700" : "text-amber-700"}>{fmt(total)}</b>
+        {!ok && <span className="text-amber-700"> (Σ {fmt(sum)})</span>}
       </span>
     </span>
   );
@@ -198,10 +200,12 @@ export default function StoreKPIReport() {
           <KPICard label="New Customers" value={fmtNum(t.new_customer_count)} accent="emerald" testid="skpi-kpi-new" />
         </div>
 
-        {/* Reconciliation — the sub-totals add up exactly to the headline counts */}
+        {/* Reconciliation — the sub-totals add up exactly to the headline sales & counts */}
         <div className="chart-card p-4" data-testid="skpi-recon">
           <div className="flex flex-wrap items-center gap-x-10 gap-y-2 text-sm">
             <span className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">Reconciliation</span>
+            <ReconLine label="Overall Sales" money total={t.overall_sales}
+              parts={[["New", t.new_value], ["Repeat", t.repeat_value], ["Unmapped", t.unmapped_value], ["Returns", t.return_value]]} />
             <ReconLine label="Fresh Bills" total={t.fresh_bills}
               parts={[["New", t.new_txn], ["Repeat", t.repeat_txn], ["Unmapped", t.unmapped_txn]]} />
             <ReconLine label="Customers" total={t.overall_customers}

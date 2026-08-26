@@ -26,7 +26,6 @@ const COLS = [
   { key: "customer_type", label: "Cust Type" },
   { key: "recency", label: "Recency" },
   { key: "last_visit", label: "Last Visit", mono: true },
-  { key: "second_last_visit", label: "2nd Last Visit", mono: true },
   { key: "total_visits", label: "Total Visits", num: true },
   { key: "zone", label: "Zone" },
   { key: "store_class", label: "Store Class" },
@@ -272,7 +271,7 @@ export default function ShopperBillReport() {
         <div className="chart-card p-5 overflow-x-auto" data-accent="indigo" data-testid="sbr-table-card">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h3 className="font-display text-xl">
-              {rows.length} <span className="text-sm font-normal text-neutral-500">{total != null ? `of ${total.toLocaleString()} bills` : "bills (recency-filtered)"}</span>
+              {rows.length} <span className="text-sm font-normal text-neutral-500">{total != null ? `of ${total.toLocaleString()} bills` : "bills (filtered)"}</span>
             </h3>
             <button onClick={() => fetchReport(page)} className="text-xs px-2 py-1 border border-neutral-300 hover:bg-neutral-50 flex items-center gap-1">
               <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh

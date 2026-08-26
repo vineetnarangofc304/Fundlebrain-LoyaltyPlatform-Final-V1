@@ -17,6 +17,7 @@ const COLS = [
   { key: "name", label: "Name", sort: "name" },
   { key: "city", label: "City", sort: "city" },
   { key: "state", label: "State", sort: "state", default: false },
+  { key: "home_store", label: "Home Store" },
   { key: "tier", label: "Tier", sort: "tier" },
   { key: "card_validity", label: "Card Validity", default: false },
   { key: "points_balance", label: "Point Balance", num: true, sort: "points_balance" },
@@ -38,7 +39,7 @@ const PAGE_SIZES = [50, 100, 200];
 
 export default function CRMCustomerReport() {
   const [params, setParams] = useState({
-    q: "", city: "", state: "", tier: "", card_validity: "", recency: "",
+    q: "", city: "", state: "", tier: "", card_validity: "", recency: "", store_id: "",
     min_visits: "", max_visits: "", min_points: "", min_billing: "",
     sort_by: "lifetime_spend", sort_dir: "desc",
   });
@@ -49,6 +50,7 @@ export default function CRMCustomerReport() {
   const [pageSize, setPageSize] = useState(50);
   const [summary, setSummary] = useState(null);
   const [opts, setOpts] = useState({ cities: [], tiers: [], card_validities: [], states: [] });
+  const [stores, setStores] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -81,6 +83,7 @@ export default function CRMCustomerReport() {
 
   useEffect(() => {
     api.get("/kpi-reports/filter-options").then((r) => setOpts(r.data)).catch(() => {});
+    api.get("/stores").then((r) => setStores(r.data || [])).catch(() => {});
   }, []);
   useEffect(() => { fetchData(1); fetchSummary(); /* eslint-disable-next-line */ }, [params.sort_by, params.sort_dir, pageSize]);
 
@@ -135,6 +138,11 @@ export default function CRMCustomerReport() {
             <div><label className={lblCls}>State</label>
               <select value={params.state} onChange={(e) => set("state", e.target.value)} className={selCls} data-testid="crm-state">
                 <option value="">All</option>{opts.states.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select></div>
+            <div><label className={lblCls}>Home Store</label>
+              <select value={params.store_id} onChange={(e) => set("store_id", e.target.value)} className={selCls} data-testid="crm-store">
+                <option value="">All stores</option>
+                {stores.map((s) => <option key={s.id} value={s.id}>{(s.name || s.code) + (s.code && s.name ? ` (${s.code})` : "")}</option>)}
               </select></div>
             <div><label className={lblCls}>Tier</label>
               <select value={params.tier} onChange={(e) => set("tier", e.target.value)} className={selCls} data-testid="crm-tier">

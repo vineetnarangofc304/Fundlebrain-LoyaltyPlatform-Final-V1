@@ -79,7 +79,6 @@ COLUMNS: List[Tuple[str, str]] = [
     ("customer_type", "Customer Type"),
     ("recency", "Recency"),
     ("last_visit", "Last Visit"),
-    ("second_last_visit", "2nd Last Visit"),
     ("total_visits", "Total Visits"),
     ("zone", "Zone"),
     ("store_class", "Store Class"),
@@ -147,6 +146,40 @@ def _recency_bucket(label: str) -> str:
             else "lapsed" if "Lapsed" in label else "unknown")
 
 
+def _customer_type_from_history(bill_day: Optional[str], prev_day: Optional[str],
+                                days_asc: List[str], stored_tag: Optional[str]) -> str:
+    """Customer Type for THIS bill, derived from the shopper's visit history (KAZO doc Point 3):
+        * the customer's FIRST-EVER visit month == this bill's month:
+            - no earlier visit day (their first bill)         → 'New'
+            - a same-month earlier visit exists (2nd+ bill)    → 'New Repeat'
+        * their first-ever visit was an EARLIER month          → 'Existing'
+    So a shopper acquired this month stays 'New'/'New Repeat' across all their bills that
+    month (never flips to Existing on the 2nd bill), and a shopper whose previous purchase
+    was a prior year/month is correctly 'Existing' (not 'New') even if the recency reads
+    Lapsed. Falls back to the stored new_or_existing tag when history is unavailable."""
+    if not days_asc or not bill_day:
+        return (stored_tag or "").strip().title() or ""
+    first_month = (days_asc[0] or "")[:7]
+    bill_month = (bill_day or "")[:7]
+    if first_month and bill_month and bill_month > first_month:
+        return "Existing"
+    if prev_day is None:
+        return "New"
+    return "New Repeat"
+
+
+def _passes_derived(fr: Dict[str, Any], recency_f: str, ctype_f: str) -> bool:
+    """Row passes the DERIVED recency and/or customer-type filters (both are computed
+    per-bill in _fmt_row, so they can't be pushed into the Mongo match)."""
+    if recency_f in {"active", "dormant", "lapsed"} and _recency_bucket(fr.get("recency", "")) != recency_f:
+        return False
+    if ctype_f == "new" and fr.get("customer_type") not in ("New", "New Repeat"):
+        return False
+    if ctype_f == "existing" and fr.get("customer_type") != "Existing":
+        return False
+    return True
+
+
 def _recency_from_gap(bill_day: Optional[str], prev_day: Optional[str]) -> str:
     """Recency the shopper was in JUST BEFORE this bill = the gap (in days) between
     this bill's day and the customer's immediately-preceding visit day. Per the KAZO
@@ -189,10 +222,9 @@ def _build_match(start_date, end_date, bill_type, customer_type, store_id, zone,
     elif bill_type == "regular":
         m["is_return"] = {"$ne": True}
 
-    if customer_type == "new":
-        m["new_or_existing"] = {"$regex": "new", "$options": "i"}
-    elif customer_type == "existing":
-        m["new_or_existing"] = {"$regex": "exist", "$options": "i"}
+    # NOTE: customer_type (New/Existing) is DERIVED per-bill from visit history in
+    # _fmt_row (KAZO doc Point 3), so it is NOT pushed into the Mongo match — it is
+    # applied downstream via _passes_derived (streaming), like the recency filter.
 
     if store_id:
         m["store_id"] = store_id
@@ -288,19 +320,19 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
                            (cust or {}).get("home_store_id") or "", {})
 
     bd_date, bd_time = _to_ist_parts(bill_date)
-    # Per-bill recency = the shopper's status BEFORE this transaction. Find the visit
-    # day immediately preceding this bill's day and measure the gap. "Last Visit" /
-    # "2nd Last Visit" are shown RELATIVE to this bill (the previous visit, and the one
-    # before that) so the row is self-consistent with its Recency label.
+    # Per-bill recency = the shopper's status BEFORE this transaction. Find the visit day
+    # immediately preceding this bill's day and measure the gap. "Last Visit" is shown
+    # RELATIVE to this bill (the previous visit) so the row is self-consistent with its
+    # Recency label. Customer Type (New / New Repeat / Existing) is derived from the same
+    # history (KAZO doc Point 3) via _customer_type_from_history.
     days_asc = (visit or {}).get("days_asc") or []
-    prev_day = prev_prev_day = None
+    prev_day = None
     if bd_date and days_asc:
         idx = bisect.bisect_left(days_asc, bd_date)   # days_asc[:idx] are all < bd_date
         if idx >= 1:
             prev_day = days_asc[idx - 1]
-        if idx >= 2:
-            prev_prev_day = days_asc[idx - 2]
     recency = _recency_from_gap(bd_date, prev_day)
+    customer_type = _customer_type_from_history(bd_date, prev_day, days_asc, tx.get("new_or_existing"))
     net_before_tax = round(float(tx.get("net_amount_before_tax") or tx.get("net_amount") or 0), 2)
     total_tax = round(float(tx.get("tax_amount") or 0), 2)
     total_disc = round(float(tx.get("discount_amount") or tx.get("discount") or 0), 2)
@@ -317,10 +349,9 @@ def _fmt_row(tx: Dict[str, Any], cust: Dict[str, Any], visit: Dict[str, Any],
         "trans_store_name": tx.get("store_name") or store.get("name") or "",
         "transaction_id": tx.get("transaction_id") or "",
         "bill_number": tx.get("bill_number") or "",
-        "customer_type": tx.get("new_or_existing") or "",
+        "customer_type": customer_type,
         "recency": recency,
         "last_visit": prev_day or "",
-        "second_last_visit": prev_prev_day or "",
         # Total Visits = number of PURCHASE (non-return) bills, computed live from the
         # bill data so it matches Customer 360 (the stored visit_count counted returns
         # too and could be stale → the "11 vs 12" mismatch).
@@ -373,13 +404,14 @@ async def shopper_bills(
     stores = await _load_stores()
 
     recency = (recency or "").lower()
-    if recency in {"active", "dormant", "lapsed"}:
-        # Per-bill recency (the shopper's status BEFORE the bill) can't be pre-filtered
-        # by a simple index range, so we STREAM the matched bills in sorted order,
-        # enrich them in batches (each batch computes the per-bill recency), keep only
-        # the rows whose computed bucket matches, and stop as soon as the requested page
-        # is filled. The user's date range + store/zone/city filters bound the scan.
-        # Exact total is omitted for this path — pagination uses "has more".
+    ctype_f = (customer_type or "").lower()
+    if recency in {"active", "dormant", "lapsed"} or ctype_f in {"new", "existing"}:
+        # Per-bill recency AND customer-type (New / New Repeat / Existing) are derived
+        # from visit history (they can't be pre-filtered by a simple index range), so we
+        # STREAM the matched bills in sorted order, enrich them in batches (each batch
+        # computes both), keep only the rows whose derived values match, and stop as soon
+        # as the requested page is filled. The user's date range + store/zone/city filters
+        # bound the scan. Exact total is omitted for this path — pagination uses "has more".
         collected: List[Dict[str, Any]] = []
         skipped = 0
         scanned = 0
@@ -389,7 +421,7 @@ async def shopper_bills(
         async def _sift(rows_in: List[Dict[str, Any]]) -> bool:
             nonlocal skipped
             for fr in await _enrich(rows_in, stores, now, timeout_s=30):
-                if _recency_bucket(fr.get("recency", "")) != recency:
+                if not _passes_derived(fr, recency, ctype_f):
                     continue
                 if skipped < offset:
                     skipped += 1
@@ -473,6 +505,8 @@ async def export_csv(
     direction = pymongo.ASCENDING if sort_dir == "asc" else pymongo.DESCENDING
     recency_f = (recency or "").lower()
     keep_recency = recency_f if recency_f in {"active", "dormant", "lapsed"} else None
+    ctype_f = (customer_type or "").lower()
+    keep_ctype = ctype_f if ctype_f in {"new", "existing"} else None
     keys = [k for k, _ in COLUMNS]
 
     async def _gen():
@@ -491,10 +525,8 @@ async def export_csv(
             ww = csv.writer(out)
             formatted = await _enrich(rows, stores, now, timeout_s=30)
             for fr in formatted:
-                if keep_recency:
-                    # Recency label → bucket key; skip rows outside the chosen bucket.
-                    if _recency_bucket(fr.get("recency", "")) != keep_recency:
-                        continue
+                if not _passes_derived(fr, keep_recency or "", keep_ctype or ""):
+                    continue
                 ww.writerow([fr.get(k, "") for k in keys])
                 written += 1
             return out.getvalue()
