@@ -1,0 +1,27 @@
+{
+  "summary": "Frontend-only verification of the 4 requested features via Playwright on the public preview URL. Logged in at /crm/login as superadmin@fundle.io. (1) Marketing Database variables: 'AW26 Variable Test' detail page shows the 'Personalisation variables' chip row (mdb-var-columns => {{expiry}} {{link}} {{name}} {{points}}) and a 'Variables' table column with per-row values (mdb-vars-6000013876 = 'name: Riya Sharma · points: 1896 · expiry: 15 Jul 2026 · link: https://stores.kazo.com/r1', plus Aditya Verma/Walkin Guest rows). New database -> Upload tab hint reads 'Auto-detected columns: mobile (required) · name · points · expiry · link — used to personalise {{name}} {{points}} {{expiry}} {{link}} in the SMS'. (2) Segment Builder points preset: points-preset row present with 100/250/500/1000 + custom input + Apply; clicking 500 set FILTERS rule 'Active points balance ≥ 500' with toast 'Filter set: Active points ≥ 500' and the audience table recomputed to 7,19,700 matched customers with 25 rows (all rows >= 500 points); custom 1500 via points-preset-apply updated header to 'EDITING · Points ≥ 1500' and rule value 1500 (audience refetch 200 OK). NOTE: audience recompute takes ~5s on the 8L base, so tests need >=5s waits. (3) Campaign wizard: campaign-link-input visible; campaign-variables-hint lists {{name}} {{points}} {{expiry}} {{link}} {{coupon_code}} with correct MDB-vs-loyalty explanation; with audience 'All customers' the nb-need-audience hint shows; after switching audience-type-select to marketing_db + AW26 Variable Test (audience-count = 3), the generate mini-form (nb-type/nb-value/nb-prefix/nb-days/nb-generate) appeared. Clicking 'Generate unique codes' succeeded: coupon-batch-select now shows and has selected 'TEST_QA_Var_Coupon codes · 3 codes (3 left)' (value 46e8c161fca74e7face38ede148300f2) with the green 'Each recipient gets THEIR own code' confirmation. (4) Delivery report: delivery-<id> button on 'Delivery Report Test' opens campaign-delivery-modal with Total 4, Delivered 2 (50% delivery), Failed/Undelivered 1 (25% failure), Pending (submitted) 1, 'By raw status' (delivered: 2, failed: 1, submitted: 1) and Recent failures row 9000000003 / failed / REJECTD DND. No console errors and no 4xx/5xx API responses observed on any flow. No campaign was launched (no real SMS triggered).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Campaign wizard - Message step", "issues": ["Cosmetic only: label reads 'Personalisation link ({{link}})' and the hint reads 'the customer profile ({{expiry}} = their own points-expiry date)' — the nested braces inside parentheses look like stray parens at 10px font; consider rendering the token in a <code> chip like the other variables."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Optional cleanup: the QA-generated unique coupon batch 'TEST_QA_Var_Coupon codes' (3 codes, prefix QATEST) is left in the Coupons collection - delete if you don't want it in demo data."
+  ],
+  "critical_code_review_comments": [
+    "SegmentBuilderPage/_audience_table: the audience refetch on a points_balance rule against the 8L-customer base took ~5s with no visible skeleton/spinner in the table area (table simply absent until data arrives) - consider showing the loading state so users don't think the preset did nothing.",
+    "Frontend token syntax is double-brace {{name}} and matches backend _render() regex \\{\\{\\s*([\\w_]+)\\s*\\}\\} - consistent; the request's single-brace {name} wording is just shorthand, no fix needed."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "not tested (frontend-only run)", "frontend": "100%" },
+  "seed_data_creation": "Created one unique coupon batch via UI: 'TEST_QA_Var_Coupon codes' (3 codes, prefix QATEST, 10% off, 30 days) attached to no campaign (wizard closed without saving). No campaign created, no SMS sent.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "All 4 features (MDB variables, Segment Builder points preset, wizard variables/link + inline coupon batch generation, Delivery report modal) verified working in the UI. Gotchas for scripts: audience-type-select options use values all/segment/marketing_db/tier/city/cohort (label is 'From Marketing Database', not 'Marketing Database'); the audience table under Segment Builder needs ~5s after applying a filter before [data-testid=audience-table] exists; toast text disappears fast - assert on coupon-batch-select input_value() instead. Do NOT launch campaigns (real Karix send).",
+  "rca_of_the_issue": "N/A - no defects found. Earlier apparent 'missing audience table' in my first run was a test-timing issue (400ms debounce + ~5s server-side count), not a product bug."
+}

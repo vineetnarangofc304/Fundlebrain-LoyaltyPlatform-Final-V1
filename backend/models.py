@@ -288,6 +288,7 @@ class CampaignBase(BaseModel):
     objective_params: Dict[str, Any] = {}  # store:{store_codes,store_ids} · coupon:{coupon_codes} · sku:{categories,subcategories,skus}
     roi_window: str = "7d"  # default attribution window (72h | 3d | 5d | 7d | 30d)
     cost: Optional[float] = None  # campaign spend, for ROI %
+    link: Optional[str] = None  # optional URL merged into the message as {{link}}
 
 
 class CampaignCreate(CampaignBase):

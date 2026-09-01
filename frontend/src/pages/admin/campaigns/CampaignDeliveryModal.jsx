@@ -78,8 +78,18 @@ export default function CampaignDeliveryModal({ campaign, onClose }) {
 
               {data.total === 0 && (
                 <div className="text-sm text-neutral-500 bg-white border border-black/10 rounded p-4" data-testid="delivery-empty">
-                  No messages logged for this campaign yet. Real delivery statuses arrive as Karix posts DLRs to
-                  <code className="mx-1 px-1 bg-neutral-100 rounded">{data.webhook_url}</code>. Register this callback with Karix support.
+                  <b>No messages logged for this campaign yet.</b>
+                  <div className="mt-1.5">If it was launched as <span className="font-medium">“Simulated metrics only”</span> (no Karix template linked), it never sent a real SMS — relaunch with a DLT-approved template selected in the wizard.</div>
+                  <div className="mt-1.5">Real delivery statuses then arrive as Karix posts DLRs to
+                  <code className="mx-1 px-1 bg-neutral-100 rounded">{data.webhook_url}</code>. Ask Karix support to register this callback for your account.</div>
+                </div>
+              )}
+
+              {data.total > 0 && (c.delivered || 0) === 0 && (c.pending || 0) > 0 && (
+                <div className="text-sm bg-amber-50 border border-amber-200 rounded p-4 text-amber-800" data-testid="delivery-awaiting-dlr">
+                  <b>{fmtNum(c.pending)} message(s) were accepted by Karix but no delivery receipt (DLR) has arrived yet.</b>
+                  <div className="mt-1.5">Karix must POST delivery receipts to
+                  <code className="mx-1 px-1 bg-white rounded border">{data.webhook_url}</code> for “Delivered / Failed” to populate. If this stays at 0 delivered, ask Karix support to enable/register the DLR callback for your sender account.</div>
                 </div>
               )}
 

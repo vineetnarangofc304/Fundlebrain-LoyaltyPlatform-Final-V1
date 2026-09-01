@@ -40,6 +40,45 @@ def _parse_mobiles_text(text: str) -> List[str]:
     return out
 
 
+# Variable columns we can carry per-mobile from an upload and merge into the SMS as
+# {{name}} {{points}} {{expiry}} {{link}} (KAZO Point 1 — variable part in Upload DB).
+_VAR_ALIASES = {
+    "mobile": ("mobile", "phone", "number", "msisdn", "contact", "mob"),
+    "name": ("name", "customer", "first"),
+    "points": ("points", "point", "pts", "balance"),
+    "expiry": ("expiry", "expire", "expires", "valid", "validity"),
+    "link": ("link", "url", "short"),
+}
+
+
+def _detect_columns(fields: List[Any]) -> Dict[str, Optional[str]]:
+    """Map our variable keys → the actual header name found in the file (case-insensitive)."""
+    res: Dict[str, Optional[str]] = {k: None for k in _VAR_ALIASES}
+    for f in fields:
+        fl = str(f).strip().lower()
+        for key, keys in _VAR_ALIASES.items():
+            if res[key] is None and any(k in fl for k in keys):
+                res[key] = f
+    return res
+
+
+def _clean_val(v: Any) -> str:
+    s = str(v).strip() if v is not None else ""
+    return "" if s.lower() in ("", "nan", "none", "null") else s
+
+
+def _rows_to_records(rows: List[Dict[str, Any]], cols: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
+    """Build per-mobile variable records from parsed rows using the detected columns."""
+    recs: List[Dict[str, Any]] = []
+    for row in rows:
+        rec: Dict[str, Any] = {"mobile": row.get(cols["mobile"]) if cols["mobile"] else None}
+        for k in ("name", "points", "expiry", "link"):
+            if cols.get(k) is not None:
+                rec[k] = row.get(cols[k])
+        recs.append(rec)
+    return recs
+
+
 async def _member_stats(mobiles: List[str]) -> Dict[str, Any]:
     """Count how many mobiles exist in the loyalty base (members) vs not, in chunks."""
     member_set = set()
@@ -62,14 +101,28 @@ class MarketingDbIn(BaseModel):
 
 
 async def _create(name: str, description: str, store_code: Optional[str],
-                  raw_mobiles: List[str], source: str, user: dict) -> dict:
+                  records: List[Dict[str, Any]], source: str, user: dict) -> dict:
     if not name or not name.strip():
         raise HTTPException(400, "Dataset name is required")
-    mobiles = sorted({m for m in (norm10(x) for x in raw_mobiles) if len(m) == 10})
+    # Dedup by mobile (last row wins) while collecting its {name, points, expiry, link} vars.
+    seen: Dict[str, Dict[str, str]] = {}
+    for r in records:
+        m = norm10(str(r.get("mobile") or ""))
+        if len(m) != 10:
+            continue
+        vars_ = {k: _clean_val(r.get(k)) for k in ("name", "points", "expiry", "link")}
+        seen[m] = {k: v for k, v in vars_.items() if v}
+    mobiles = sorted(seen.keys())
     if not mobiles:
         raise HTTPException(400, "No valid 10-digit mobile numbers found")
     if len(mobiles) > MAX_MOBILES:
         raise HTTPException(400, f"Too many numbers ({len(mobiles)}). Max {MAX_MOBILES} per dataset.")
+    variables = {m: v for m, v in seen.items() if v}
+    # Guard the 16MB doc limit — cap the embedded per-mobile variable map.
+    VAR_CAP = 120000
+    if len(variables) > VAR_CAP:
+        variables = {m: variables[m] for m in list(variables)[:VAR_CAP]}
+    variable_columns = sorted({k for v in variables.values() for k in v})
     stats = await _member_stats(mobiles)
     doc = {
         "id": uuid.uuid4().hex,
@@ -78,6 +131,9 @@ async def _create(name: str, description: str, store_code: Optional[str],
         "store_code": (store_code or "").strip() or None,
         "source": source,
         "mobiles": mobiles,
+        "variables": variables,
+        "variable_columns": variable_columns,
+        "has_variables": bool(variables),
         "total": len(mobiles),
         "member_count": stats["member_count"],
         "non_member_count": stats["non_member_count"],
@@ -87,16 +143,19 @@ async def _create(name: str, description: str, store_code: Optional[str],
     }
     await marketing_db_col.insert_one(doc)
     await log_audit(user, "create_marketing_db", "marketing_db", doc["id"],
-                    {"name": doc["name"], "total": doc["total"]})
+                    {"name": doc["name"], "total": doc["total"], "vars": variable_columns})
     doc.pop("_id", None)
     doc.pop("mobiles", None)
+    doc.pop("variables", None)
     return doc
 
 
 @router.post("")
 async def create_marketing_db(body: MarketingDbIn, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    # Paste path — free text, mobiles only (no per-row variables).
     raw = list(body.mobiles or []) + _parse_mobiles_text(body.mobiles_text or "")
-    return await _create(body.name, body.description or "", body.store_code, raw, "paste", user)
+    records = [{"mobile": m} for m in raw]
+    return await _create(body.name, body.description or "", body.store_code, records, "paste", user)
 
 
 @router.post("/upload")
@@ -105,48 +164,44 @@ async def upload_marketing_db(file: UploadFile = File(...), name: str = Form(...
                               user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
     raw_bytes = await file.read()
     fname = (file.filename or "").lower()
-    mobiles: List[str] = []
+    records: List[Dict[str, Any]] = []
     if fname.endswith(".xlsx") or fname.endswith(".xls"):
         try:
             import pandas as pd
             xl = pd.read_excel(io.BytesIO(raw_bytes), dtype=str)
-            for col in xl.columns:
-                cl = str(col).lower()
-                if any(k in cl for k in ("mobile", "phone", "number", "msisdn", "contact")):
-                    mobiles += [norm10(str(v)) for v in xl[col].tolist()]
-            if not mobiles:  # no header match — take the first column
-                first = xl.columns[0]
-                mobiles += [norm10(str(v)) for v in xl[first].tolist()]
+            cols = _detect_columns(list(xl.columns))
+            if not cols["mobile"] and len(xl.columns):
+                cols["mobile"] = xl.columns[0]
+            rows = xl.to_dict(orient="records")
+            records = _rows_to_records(rows, cols)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, f"Could not parse Excel: {e}")
     else:
-        # CSV / TXT — try header-aware, fall back to raw digit extraction
+        # CSV / TXT — header-aware (capture variable columns), fall back to raw digit extraction.
         text = raw_bytes.decode("utf-8", errors="ignore")
         try:
             reader = csv.DictReader(io.StringIO(text))
-            fields = [f for f in (reader.fieldnames or [])]
-            mob_field = next((f for f in fields if any(k in f.lower()
-                             for k in ("mobile", "phone", "number", "msisdn", "contact"))), None)
-            if mob_field:
-                for row in reader:
-                    mobiles.append(norm10(str(row.get(mob_field) or "")))
+            fields = list(reader.fieldnames or [])
+            cols = _detect_columns(fields)
+            if cols["mobile"]:
+                records = _rows_to_records(list(reader), cols)
             else:
-                mobiles = _parse_mobiles_text(text)
+                records = [{"mobile": m} for m in _parse_mobiles_text(text)]
         except Exception:  # noqa: BLE001
-            mobiles = _parse_mobiles_text(text)
-    return await _create(name, description, store_code, mobiles, f"upload:{fname}", user)
+            records = [{"mobile": m} for m in _parse_mobiles_text(text)]
+    return await _create(name, description, store_code, records, f"upload:{fname}", user)
 
 
 @router.get("")
 async def list_marketing_db(user: dict = Depends(get_current_user)):
     rows = await marketing_db_col.find(
-        {}, {"_id": 0, "mobiles": 0}).sort("created_at", -1).limit(500).to_list(500)
+        {}, {"_id": 0, "mobiles": 0, "variables": 0}).sort("created_at", -1).limit(500).to_list(500)
     return {"rows": rows, "total": len(rows)}
 
 
 @router.get("/{mdb_id}")
 async def get_marketing_db(mdb_id: str, user: dict = Depends(get_current_user)):
-    d = await marketing_db_col.find_one({"id": mdb_id}, {"_id": 0, "mobiles": 0})
+    d = await marketing_db_col.find_one({"id": mdb_id}, {"_id": 0, "mobiles": 0, "variables": 0})
     if not d:
         raise HTTPException(404, "Marketing database not found")
     return d
@@ -157,10 +212,11 @@ async def marketing_db_customers(mdb_id: str, page: int = 1, page_size: int = 50
                                  member: Optional[str] = None, q: Optional[str] = None,
                                  user: dict = Depends(get_current_user)):
     """Paginated view of the dataset's numbers with a member/non-member flag + name/tier for members."""
-    d = await marketing_db_col.find_one({"id": mdb_id}, {"_id": 0, "mobiles": 1})
+    d = await marketing_db_col.find_one({"id": mdb_id}, {"_id": 0, "mobiles": 1, "variables": 1})
     if not d:
         raise HTTPException(404, "Marketing database not found")
     mobiles = d.get("mobiles") or []
+    var_map = d.get("variables") or {}
     if q:
         needle = norm10(q) or re.sub(r"\D", "", q)
         mobiles = [m for m in mobiles if needle in m]
@@ -173,7 +229,7 @@ async def marketing_db_customers(mdb_id: str, page: int = 1, page_size: int = 50
                 {"mobile": {"$in": chunk}},
                 {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1, "points_balance": 1}):
             member_map[c["mobile"]] = c
-    rows_all = [{"mobile": m, "is_member": m in member_map, **({
+    rows_all = [{"mobile": m, "is_member": m in member_map, "vars": var_map.get(m) or {}, **({
         "name": member_map[m].get("name"), "tier": member_map[m].get("tier"),
         "city": member_map[m].get("city"), "points_balance": member_map[m].get("points_balance"),
     } if m in member_map else {})} for m in mobiles]

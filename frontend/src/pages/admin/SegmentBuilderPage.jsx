@@ -42,6 +42,16 @@ export default function SegmentBuilderPage() {
   const [segmentName, setSegmentName] = useState("");
   const [segmentDescription, setSegmentDescription] = useState("");
   const [activeCohortName, setActiveCohortName] = useState("");
+  const [presetN, setPresetN] = useState(500);
+
+  const applyPointsPreset = (n) => {
+    const v = parseInt(n, 10);
+    if (!v || v < 1) { toast.error("Enter a valid points value"); return; }
+    setRoot({ kind: "group", op: "AND", rules: [{ kind: "rule", field: "points_balance", operator: "gte", value: v }] });
+    setActiveCohortName(`Points ≥ ${v}`);
+    setSegmentName(`Points ≥ ${v}`);
+    toast.success(`Filter set: Active points ≥ ${v}`);
+  };
 
   useEffect(() => {
     api.get("/segments/filter-schema")
@@ -127,6 +137,21 @@ export default function SegmentBuilderPage() {
           <div className="lg:col-span-2 space-y-4">
             <div className="chart-card p-5" data-accent="indigo">
               <SectionHeading eyebrow={activeCohortName ? `EDITING · ${activeCohortName}` : "FILTERS"} title="Build your audience" accent="indigo" />
+              {/* Quick preset — build a points-based audience in one click (KAZO Point 2) */}
+              <div className="mt-3 flex flex-wrap items-center gap-2 p-3 rounded bg-amber-50 border border-amber-200" data-testid="points-preset">
+                <span className="text-[10px] uppercase tracking-widest text-amber-700 font-medium">Quick: Points ≥</span>
+                {[100, 250, 500, 1000].map((n) => (
+                  <button key={n} type="button" onClick={() => applyPointsPreset(n)}
+                    className="text-xs px-2.5 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100 transition"
+                    data-testid={`points-preset-${n}`}>{n}</button>
+                ))}
+                <div className="flex items-center gap-1 ml-1">
+                  <input type="number" min="1" value={presetN} onChange={(e) => setPresetN(e.target.value)}
+                    className="w-24 border border-amber-300 rounded px-2 py-1 text-xs" data-testid="points-preset-input" />
+                  <button type="button" onClick={() => applyPointsPreset(presetN)}
+                    className="text-xs px-2.5 py-1 rounded kazo-bg-burgundy text-white" data-testid="points-preset-apply">Apply</button>
+                </div>
+              </div>
               <div className="mt-4">
                 <FilterGroup group={root} schema={schema} onChange={setRoot} />
               </div>

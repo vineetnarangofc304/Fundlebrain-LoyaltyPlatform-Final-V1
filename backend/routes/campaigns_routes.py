@@ -313,11 +313,13 @@ async def _do_launch(c: dict, user: dict) -> dict:
     # raw mobile list (dedup + blacklist-exclude + cap) and drive the send/freeze from that, NOT the
     # loyalty base (which would silently drop all non-members).
     explicit_mobiles: Optional[List[str]] = None
+    var_map: Optional[Dict[str, Any]] = None
     if c.get("audience_type") == "marketing_db":
         mdb_id = (c.get("audience_filter") or {}).get("marketing_db_id")
         mdb = await db["marketing_databases"].find_one(
-            {"id": mdb_id}, {"_id": 0, "mobiles": 1}) if mdb_id else None
+            {"id": mdb_id}, {"_id": 0, "mobiles": 1, "variables": 1}) if mdb_id else None
         raw = (mdb or {}).get("mobiles") or []
+        var_map = (mdb or {}).get("variables") or None
         seen: set = set()
         ordered: List[str] = []
         for m in raw:
@@ -389,7 +391,8 @@ async def _do_launch(c: dict, user: dict) -> dict:
 
         # Fire-and-forget background task
         asyncio.create_task(_run_bulk_send_job(job_id, template_id, fil, limit, campaign_id,
-                                               c.get("coupon_batch_id"), explicit_mobiles))
+                                               c.get("coupon_batch_id"), explicit_mobiles,
+                                               var_map=var_map, campaign_link=c.get("link")))
 
         await campaigns_col.update_one(
             {"id": campaign_id},

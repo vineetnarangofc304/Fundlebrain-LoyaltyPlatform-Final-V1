@@ -11,9 +11,22 @@ from auth import get_current_user
 
 from routes._db_timeout import db_deadline
 from routes._money import PAID_EXPR, GROSS_EXPR
+from bson import ObjectId
 
 router = APIRouter(prefix="/reports", tags=["reports"], dependencies=[Depends(db_deadline)])
 digest_reports_col = db["digest_reports"]
+
+
+def _jsonable(v):
+    """Recursively coerce ObjectId → str so $group results (whose _id is the group key)
+    are always JSON-serialisable when returned directly."""
+    if isinstance(v, ObjectId):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_jsonable(x) for x in v]
+    return v
 
 
 def _norm_days(period_days: Optional[int]) -> int:
@@ -160,11 +173,11 @@ async def run_custom_report(body: dict, user: dict = Depends(get_current_user)):
         for r in rows:
             if "unique_customers" in r:
                 r["unique_customers"] = len(r["unique_customers"])
-        return {"rows": rows}
+        return {"rows": [_jsonable(r) for r in rows]}
     elif entity == "customers":
         group_id = {d: f"${d}" for d in dim} if dim else None
         group_stage = {"_id": group_id, "count": {"$sum": 1}, "sum_spend": {"$sum": "$lifetime_spend"}, "points_balance": {"$sum": "$points_balance"}}
         pipe = [{"$match": fil}, {"$group": group_stage}, {"$sort": {"sum_spend": -1}}, {"$limit": 500}]
         rows = await customers_col.aggregate(pipe, maxTimeMS=25000).to_list(500)
-        return {"rows": rows}
+        return {"rows": [_jsonable(r) for r in rows]}
     return {"rows": []}

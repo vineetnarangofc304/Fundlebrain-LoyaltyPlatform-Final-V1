@@ -776,6 +776,42 @@ async def _seed_and_bootstrap():
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not seed EOSS template: {e}")
 
+    # DLT-approved AW'26 marketing SMS templates (Bonus-Points reminder + store link). Each is
+    # seeded once, guarded by its own seed_flags marker, so user edits/deletes are never undone.
+    try:
+        from database import templates_col, db as _db
+        seed_flags = _db["seed_flags"]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _aw26 = [
+            ("kazo_bonus_points_1", "KAZO · Bonus Points Reminder", "1177178427171356590",
+             "KAZO: Last chance to redeem your 500 Bonus Points! Shop the new AW'26 Collection "
+             "in-store before your points expire. T&C Apply"),
+            ("kazo_bonus_points_2", "KAZO · Bonus Points Reminder (alt)", "1177178609405771113",
+             "KAZO: Last chance to redeem your 500 Bonus Points! Shop the new AW'26 Collection "
+             "in-store before your points expire. T&C Apply"),
+            ("kazo_aw26_store_link", "KAZO · AW'26 In Stores", "117717860940399780",
+             "Her World. Her Way. KAZO AW'26 is now in stores. Visit your nearest KAZO store: "
+             "https://stores.kazo.com/ T&C Apply"),
+        ]
+        for flag, name, dlt_id, body in _aw26:
+            if await seed_flags.find_one({"_id": flag}):
+                continue
+            await templates_col.insert_one({
+                "id": uuid.uuid4().hex, "name": name, "channel": "sms",
+                "event_trigger": "campaign_bulk", "body": body, "variables": [],
+                "sender_id": "KAZOFN", "dlt_entity_id": "1101409540000012086",
+                "dlt_template_id": dlt_id, "dlt_tm_id": None,
+                "waba_template_id": None, "waba_params_order": [], "waba_language": "en",
+                "waba_category": None, "waba_approval_status": "pending", "waba_approval_note": None,
+                "preview_url": False, "status": "active",
+                "note": "DLT-approved marketing template (seeded). Body must match DLT content verbatim.",
+                "created_at": now_iso, "updated_at": now_iso, "created_by": "system-seed",
+            })
+            await seed_flags.insert_one({"_id": flag, "seeded_at": now_iso})
+            logger.info(f"Seeded DLT-approved SMS template '{name}'")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not seed AW'26 templates: {e}")
+
 
 
 @app.on_event("startup")

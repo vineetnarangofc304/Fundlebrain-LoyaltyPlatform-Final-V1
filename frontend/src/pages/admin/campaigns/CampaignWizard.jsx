@@ -20,7 +20,7 @@ const BLANK = {
   name: "", description: "", channels: ["sms"], audience_type: "all",
   audience_filter: {}, message_template: "", template_id: "",
   coupon_code: "", coupon_batch_id: "", status: "draft", send_limit: 50000,
-  objective: "generic", objective_params: {}, roi_window: "7d", cost: "",
+  objective: "generic", objective_params: {}, roi_window: "7d", cost: "", link: "",
 };
 
 export default function CampaignWizard({ onClose, onDone, templates = [], coupons = [], prefill }) {
@@ -32,6 +32,8 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
   const [mdbs, setMdbs] = useState([]);
   const [batches, setBatches] = useState([]);
   const [scheduleAt, setScheduleAt] = useState("");
+  const [allocating, setAllocating] = useState(false);
+  const [nb, setNb] = useState({ coupon_type: "percentage", discount_value: 10, prefix: "KAZO", valid_days: 30 });
   const reqRef = useRef(0);
 
   useEffect(() => {
@@ -83,6 +85,36 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
     }
     if (k === "message") return form.channels.length > 0;
     return true;
+  };
+
+  // Generate a unique per-recipient coupon batch for THIS campaign's audience (KAZO Point 3 —
+  // coupon campaigns were undoable because no batch could be created). Needs a segment or
+  // marketing-DB audience (those resolve to a mobile list).
+  const generateBatch = async () => {
+    const src = form.audience_type === "segment" && form.audience_filter?.segment_id
+      ? { source: "segment", segment_id: form.audience_filter.segment_id }
+      : form.audience_type === "marketing_db" && form.audience_filter?.marketing_db_id
+        ? { source: "marketing_db", marketing_db_id: form.audience_filter.marketing_db_id }
+        : null;
+    if (!src) { toast.error("Unique codes need a Segment or Marketing-DB audience"); return; }
+    setAllocating(true);
+    try {
+      const now = new Date();
+      const to = new Date(now.getTime() + (parseInt(nb.valid_days, 10) || 30) * 86400000);
+      const r = await api.post("/coupons/unique/allocate", {
+        name: `${form.name || "Campaign"} codes`,
+        coupon_type: nb.coupon_type,
+        discount_value: parseFloat(nb.discount_value) || 0,
+        valid_from: now.toISOString(), valid_to: to.toISOString(),
+        prefix: nb.prefix || "KAZO", audience: src,
+      });
+      toast.success(`Generated ${fmtNum(r.data.total)} unique codes`);
+      const b = await api.get("/coupons/unique/batches");
+      setBatches(b.data.rows || []);
+      setForm((f) => ({ ...f, coupon_batch_id: r.data.id }));
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not generate codes");
+    } finally { setAllocating(false); }
   };
 
   const buildPayload = (mode) => {
@@ -276,6 +308,20 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
 
               <textarea className="k-input" placeholder="Optional preview / fallback body (only used if no Karix template above)" value={form.message_template} onChange={(e) => setForm({ ...form, message_template: e.target.value })} data-testid="message-template-input" />
 
+              <div className="border border-indigo-200 rounded p-3 bg-indigo-50/60">
+                <label className="text-[10px] uppercase tracking-widest text-indigo-700 font-medium flex items-center gap-1 mb-2"><Sparkles className="w-3 h-3" /> Personalisation link — fills <code className="bg-white px-1 rounded border font-mono">{"{{link}}"}</code></label>
+                <input className="k-input" type="url" placeholder="https://stores.kazo.com/" value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} data-testid="campaign-link-input" />
+                <div className="text-[10px] text-neutral-600 mt-2 leading-relaxed" data-testid="campaign-variables-hint">
+                  Variables you can put in the template body:
+                  {" "}<code className="bg-white px-1 rounded border">{"{{name}}"}</code>{" "}
+                  <code className="bg-white px-1 rounded border">{"{{points}}"}</code>{" "}
+                  <code className="bg-white px-1 rounded border">{"{{expiry}}"}</code>{" "}
+                  <code className="bg-white px-1 rounded border">{"{{link}}"}</code>{" "}
+                  <code className="bg-white px-1 rounded border">{"{{coupon_code}}"}</code>.
+                  <br />Loyalty/segment audiences fill these from the customer profile ({"{{expiry}}"} = their own points-expiry date). Uploaded Marketing DBs use your file's <b>name / points / expiry / link</b> columns.
+                </div>
+              </div>
+
               <div className="grid grid-cols-3 gap-3">
                 <select className="k-input" value={form.coupon_code} onChange={(e) => setForm({ ...form, coupon_code: e.target.value })} data-testid="coupon-select">
                   <option value="">No coupon</option>
@@ -292,6 +338,30 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   {batches.map((b) => <option key={b.id} value={b.id}>{`${b.name} · ${b.total} codes (${b.total - (b.redeemed || 0)} left)`}</option>)}
                 </select>
                 {form.coupon_batch_id && <div className="text-[10px] text-emerald-700 mt-1">✓ Each recipient gets THEIR own code — include <code className="bg-neutral-100 px-1">{"{{coupon_code}}"}</code> in the template body.</div>}
+
+                {/* Generate a brand-new unique batch for this audience (Segment / Marketing DB) */}
+                <div className="mt-3 pt-3 border-t border-neutral-200" data-testid="coupon-batch-generate">
+                  <div className="text-[10px] uppercase tracking-widest text-neutral-500 mb-2">…or generate a new batch for this audience</div>
+                  {(form.audience_type === "segment" && form.audience_filter?.segment_id) ||
+                   (form.audience_type === "marketing_db" && form.audience_filter?.marketing_db_id) ? (
+                    <>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <select className="k-input" value={nb.coupon_type} onChange={(e) => setNb({ ...nb, coupon_type: e.target.value })} data-testid="nb-type">
+                          <option value="percentage">% off</option>
+                          <option value="flat">₹ flat</option>
+                        </select>
+                        <input className="k-input" type="number" min="1" placeholder="Value" value={nb.discount_value} onChange={(e) => setNb({ ...nb, discount_value: e.target.value })} data-testid="nb-value" />
+                        <input className="k-input" placeholder="Prefix" value={nb.prefix} onChange={(e) => setNb({ ...nb, prefix: e.target.value })} data-testid="nb-prefix" />
+                        <input className="k-input" type="number" min="1" placeholder="Valid days" value={nb.valid_days} onChange={(e) => setNb({ ...nb, valid_days: e.target.value })} data-testid="nb-days" />
+                      </div>
+                      <button type="button" onClick={generateBatch} disabled={allocating} className="k-btn k-btn-sm kazo-bg-burgundy mt-2 disabled:opacity-50" data-testid="nb-generate">
+                        {allocating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Ticket className="w-3 h-3" />} {allocating ? "Generating…" : "Generate unique codes"}
+                      </button>
+                    </>
+                  ) : (
+                    <div className="text-[10px] text-neutral-500" data-testid="nb-need-audience">Pick a <b>Segment</b> or <b>Marketing Database</b> audience to generate per-recipient unique codes.</div>
+                  )}
+                </div>
               </div>
             </div>
           )}

@@ -854,13 +854,63 @@ class BulkSendIn(BaseModel):
     limit: int = 1000
 
 
-def _params_for_customer(c: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+def _params_for_customer(c: Dict[str, Any], extra: Optional[Dict[str, Any]] = None,
+                         campaign_link: Optional[str] = None,
+                         expiry: Optional[str] = None) -> Dict[str, Any]:
+    """Mustache params for a recipient. {{name}} {{tier}} {{points_balance}}/{{points}} {{city}}
+    come from the loyalty profile; {{expiry}} = the recipient's own points-expiry date; {{link}} =
+    the campaign URL. `extra` (per-mobile values from an uploaded Marketing DB) overrides all of
+    these (KAZO Point 1 — variable part in Upload DB + Loyalty DB)."""
+    pts = c.get("points_balance", 0)
+    p: Dict[str, Any] = {
         "name": (c.get("name") or "").split(" ")[0] or "there",
         "tier": c.get("tier", "silver"),
-        "points_balance": c.get("points_balance", 0),
+        "points_balance": pts,
+        "points": pts,
         "city": c.get("city", ""),
     }
+    if expiry:
+        p["expiry"] = expiry
+    if campaign_link:
+        p["link"] = campaign_link
+    if extra:
+        for k in ("name", "points", "expiry", "link"):
+            v = extra.get(k)
+            if v not in (None, ""):
+                p[k] = v
+    return p
+
+
+def _fmt_expiry(iso: Optional[str]) -> str:
+    if not iso:
+        return ""
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%d %b %Y")
+    except Exception:  # noqa: BLE001
+        return str(iso)[:10]
+
+
+async def _points_expiry_map(mobiles: List[str]) -> Dict[str, str]:
+    """mobile → earliest UPCOMING points-expiry date (formatted) from the points ledger.
+    Used to fill {{expiry}} for loyalty-base recipients (KAZO Point 1)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    out: Dict[str, str] = {}
+    uniq = list({m for m in mobiles if m})
+    ledger = db["points_ledger"]
+    CH = 5000
+    for i in range(0, len(uniq), CH):
+        chunk = uniq[i:i + CH]
+        pipe = [
+            {"$match": {"customer_mobile": {"$in": chunk}, "points": {"$gt": 0},
+                        "expires_at": {"$ne": None, "$gt": now_iso}}},
+            {"$group": {"_id": "$customer_mobile", "exp": {"$min": "$expires_at"}}},
+        ]
+        try:
+            async for r in ledger.aggregate(pipe, maxTimeMS=20000):
+                out[r["_id"]] = _fmt_expiry(r.get("exp"))
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def _waba_positional_params(template: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, str]:
@@ -875,7 +925,9 @@ def _waba_positional_params(template: Dict[str, Any], params: Dict[str, Any]) ->
 async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dict[str, Any],
                                 limit: int, campaign_id: Optional[str] = None,
                                 coupon_batch_id: Optional[str] = None,
-                                explicit_mobiles: Optional[List[str]] = None):
+                                explicit_mobiles: Optional[List[str]] = None,
+                                var_map: Optional[Dict[str, Dict[str, Any]]] = None,
+                                campaign_link: Optional[str] = None):
     """Background worker: pulls audience, dispatches messages, updates job state.
     Campaign SMS goes out via the BULK Karix account (fundle_campaign). If coupon_batch_id is set,
     each recipient's own unique coupon code is injected as {{coupon_code}}.
@@ -936,12 +988,24 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
             except Exception:  # noqa: BLE001
                 coupon_map = {}
         sent, failed, processed = 0, 0, 0
+        from routes.blacklist_util import norm10 as _n10
+        # {{expiry}} in the body → fill each recipient's own points-expiry date. Upload-provided
+        # expiry (var_map) wins; otherwise look it up from the points ledger for the rest.
+        body_ns = re.sub(r"\s", "", t.get("body") or "")
+        expiry_map: Dict[str, str] = {}
+        if "{{expiry}}" in body_ns:
+            need = [c.get("mobile") for c in recipients
+                    if c.get("mobile") and not ((var_map or {}).get(_n10(c.get("mobile"))) or {}).get("expiry")]
+            if need:
+                expiry_map = await _points_expiry_map(need)
         for c in recipients:
             processed += 1
-            params = _params_for_customer(c)
+            mob = c.get("mobile") or ""
+            extra = (var_map or {}).get(_n10(mob)) if var_map else None
+            exp = expiry_map.get(mob) or expiry_map.get(_n10(mob))
+            params = _params_for_customer(c, extra=extra, campaign_link=campaign_link, expiry=exp)
             if coupon_map:
-                from routes.blacklist_util import norm10 as _n10
-                code = coupon_map.get(_n10(c.get("mobile")))
+                code = coupon_map.get(_n10(mob))
                 if code:
                     params["coupon_code"] = code
             try:

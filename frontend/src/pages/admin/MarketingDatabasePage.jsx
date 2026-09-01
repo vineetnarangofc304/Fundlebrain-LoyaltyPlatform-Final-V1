@@ -73,7 +73,7 @@ function CreateModal({ onClose, onDone }) {
             <div className="border-2 border-dashed border-black/15 rounded p-6 text-center cursor-pointer hover:bg-neutral-50" onClick={() => fileRef.current?.click()} data-testid="mdb-upload-drop">
               <Upload className="w-6 h-6 mx-auto text-neutral-400" />
               <div className="text-sm mt-2">{file ? file.name : "Click to choose a .csv or .xlsx file"}</div>
-              <div className="text-[11px] text-neutral-400 mt-1">A column named mobile / phone / number is auto-detected</div>
+              <div className="text-[11px] text-neutral-400 mt-1">Auto-detected columns: <b>mobile</b> (required) · name · points · expiry · link — used to personalise {"{{name}} {{points}} {{expiry}} {{link}}"} in the SMS</div>
               <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.txt" className="hidden" onChange={(e) => setFile(e.target.files?.[0] || null)} data-testid="mdb-file-input" />
             </div>
           )}
@@ -128,6 +128,12 @@ function DetailView({ mdb, onBack }) {
         <StatCard icon={UserCheck} label="Members" value={fmtNum(mdb.member_count)} accent="text-emerald-700" testid="mdb-stat-members" />
         <StatCard icon={UserX} label="Non-members" value={fmtNum(mdb.non_member_count)} accent="text-amber-600" testid="mdb-stat-nonmembers" />
       </div>
+      {(mdb.variable_columns || []).length > 0 && (
+        <div className="mb-4 flex items-center gap-2 flex-wrap" data-testid="mdb-var-columns">
+          <span className="text-[10px] uppercase tracking-widest text-indigo-700 font-medium">Personalisation variables</span>
+          {mdb.variable_columns.map((k) => <span key={k} className="pill pill-info">{`{{${k}}}`}</span>)}
+        </div>
+      )}
       <div className="flex gap-2 items-center mb-3">
         <select className="k-input w-48" value={member} onChange={(e) => { setMember(e.target.value); setPage(1); }} data-testid="mdb-member-filter">
           <option value="">All numbers</option>
@@ -141,10 +147,10 @@ function DetailView({ mdb, onBack }) {
       </div>
       <div className="bg-white border border-black/10 rounded overflow-hidden">
         <table className="data-table">
-          <thead><tr><th>Mobile</th><th>Status</th><th>Name</th><th>Tier</th><th>City</th><th className="text-right">Points</th></tr></thead>
+          <thead><tr><th>Mobile</th><th>Status</th><th>Name</th><th>Tier</th><th>City</th><th className="text-right">Points</th><th>Variables</th></tr></thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="text-center py-8 text-neutral-400"><Loader2 className="w-5 h-5 animate-spin inline" /></td></tr>
+              <tr><td colSpan={7} className="text-center py-8 text-neutral-400"><Loader2 className="w-5 h-5 animate-spin inline" /></td></tr>
             ) : (data?.rows || []).map((r) => (
               <tr key={r.mobile} data-testid={`mdb-cust-${r.mobile}`}>
                 <td className="font-mono">{r.mobile}</td>
@@ -153,9 +159,12 @@ function DetailView({ mdb, onBack }) {
                 <td>{r.tier ? <span className="pill pill-neutral">{r.tier}</span> : "—"}</td>
                 <td>{r.city || "—"}</td>
                 <td className="text-right font-mono">{r.is_member ? fmtNum(r.points_balance || 0) : "—"}</td>
+                <td className="text-xs text-neutral-600 max-w-[240px]" data-testid={`mdb-vars-${r.mobile}`}>
+                  {r.vars && Object.keys(r.vars).length ? Object.entries(r.vars).map(([k, v]) => `${k}: ${v}`).join(" · ") : "—"}
+                </td>
               </tr>
             ))}
-            {!loading && (!data?.rows || data.rows.length === 0) && <tr><td colSpan={6} className="text-center py-8 text-neutral-400">No numbers match</td></tr>}
+            {!loading && (!data?.rows || data.rows.length === 0) && <tr><td colSpan={7} className="text-center py-8 text-neutral-400">No numbers match</td></tr>}
           </tbody>
         </table>
       </div>
