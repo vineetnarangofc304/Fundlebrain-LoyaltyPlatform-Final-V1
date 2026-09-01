@@ -14,6 +14,30 @@ async def recent_calls(limit: int = 100, user: dict = Depends(get_current_user))
     return rows
 
 
+@router.get("/db-info")
+async def db_info(user: dict = Depends(get_current_user)):
+    """Connected MongoDB server version + host. Run this on the DEPLOYED app
+    (GET /api/api-monitor/db-info) to read the exact PRODUCTION Atlas version."""
+    from database import db
+    out = {"db_name": getattr(db, "name", None)}
+    try:
+        info = await db.client.admin.command("buildInfo")
+        out["mongodb_version"] = info.get("version")
+        out["git_version"] = info.get("gitVersion")
+        out["modules"] = info.get("modules")
+    except Exception as e:  # noqa: BLE001
+        out["buildInfo_error"] = str(e)
+    try:
+        hi = await db.client.admin.command("hello")
+        host = hi.get("me") or (hi.get("hosts") or [None])[0]
+        out["host"] = host
+        out["replica_set"] = hi.get("setName")
+        out["is_atlas"] = bool(host and "mongodb.net" in host)
+    except Exception as e:  # noqa: BLE001
+        out["hello_error"] = str(e)
+    return out
+
+
 @router.get("/log-writer-health")
 async def log_writer_health(user: dict = Depends(get_current_user)):
     """Health of the isolated background api_logs writer (queue depth, rows
