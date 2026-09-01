@@ -1,15 +1,17 @@
-"""Generate the KAZO x Fundle Brain technical overview PDF (reportlab).
+"""Generate the FundleBrain technical overview PDF (reportlab).
 Every fact here was pulled directly from the codebase — no exaggeration."""
 from datetime import datetime
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
                                 HRFlowable, ListFlowable, ListItem, PageBreak)
 
-OUT = "/app/frontend/public/KAZO_Fundle_Tech_Overview.pdf"
+OUT = "/app/frontend/public/FundleBrain_Tech_Overview.pdf"
+LOGO = "/app/backend/fundle_logo_black.png"
 BURG = colors.HexColor("#6b1220")
 BURG2 = colors.HexColor("#8a1a2b")
 INK = colors.HexColor("#1a1a1a")
@@ -74,7 +76,7 @@ def rule():
 # ───────────────────────── COVER ─────────────────────────
 story.append(Spacer(1, 40))
 story.append(HRFlowable(width="100%", thickness=3, color=BURG, spaceAfter=18))
-p("KAZO &times; Fundle Brain", TITLE)
+p("FundleBrain", TITLE)
 p("Loyalty, CRM &amp; Customer-Intelligence Platform", SUB)
 story.append(Spacer(1, 6))
 p("Technical &amp; Architecture Overview", ParagraphStyle("t2", parent=SUB, textColor=BURG2, fontSize=13, fontName="Helvetica-Bold"))
@@ -101,7 +103,7 @@ story.append(PageBreak())
 p("1. Executive Summary", H1)
 rule()
 p("The platform is a single-tenant, enterprise-grade loyalty and customer-intelligence system for the "
-  "KAZO retail brand. It unifies point-of-sale loyalty processing, a CRM/customer 360, analytics and "
+  "retail brand. It unifies point-of-sale loyalty processing, a CRM/customer 360, analytics and "
   "reporting, campaign automation (SMS), an AI analytics assistant, support tooling and API monitoring.")
 bullets([
     "<b>Architecture:</b> a Python/FastAPI asynchronous REST backend, a React single-page frontend, "
@@ -227,7 +229,7 @@ p("Only the integrations below are actually wired into the running system. (For 
   "currently used by any code path, so they are deliberately excluded here.)")
 table(["Integration", "Purpose", "Notes"],
       [["Karix / Tanla (messaging)", "DLT-compliant transactional &amp; bulk marketing SMS; WhatsApp send; "
-        "OTP delivery", "Sender ID KAZOFN; delivery receipts (DLR) received by webhook; egress IP "
+        "OTP delivery", "Dedicated DLT-registered sender ID; delivery receipts (DLR) received by webhook; egress IP "
         "whitelisted with the provider; API keys held only in environment config"],
        ["Microsoft 365 mailbox (IMAP)", "Optional daily auto-pull of the sales reconciliation file",
         "Enabled only when IMAP credentials are supplied via environment; no secrets in code"],
@@ -330,19 +332,29 @@ p("Prepared from a direct review of the application source code and running serv
   "numbers reflect the project dependency manifests at the document date; model identifiers reflect "
   "the values configured in code and may be updated as newer managed models become available.", SMALL)
 
-doc = SimpleDocTemplate(OUT, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm,
+doc = SimpleDocTemplate(OUT, pagesize=A4, topMargin=26 * mm, bottomMargin=16 * mm,
                         leftMargin=18 * mm, rightMargin=18 * mm,
-                        title="KAZO x Fundle Brain - Technical Overview", author="Fundle Brain")
+                        title="FundleBrain - Technical Overview", author="FundleBrain")
 
 
 def _footer(canvas, doc_):
     canvas.saveState()
+    # header: black Fundle logo + burgundy underline rule on every page
+    lw = 38 * mm
+    lh = lw * 100 / 382.0
+    ltop = A4[1] - 11 * mm - lh
+    canvas.drawImage(ImageReader(LOGO), 18 * mm, ltop, width=lw, height=lh,
+                     mask="auto", preserveAspectRatio=True)
+    canvas.setStrokeColor(BURG)
+    canvas.setLineWidth(1.2)
+    canvas.line(18 * mm, ltop - 3 * mm, A4[0] - 18 * mm, ltop - 3 * mm)
+    # footer
     canvas.setStrokeColor(LINE)
     canvas.setLineWidth(0.5)
     canvas.line(18 * mm, 12 * mm, A4[0] - 18 * mm, 12 * mm)
     canvas.setFont("Helvetica", 7.5)
     canvas.setFillColor(GREY)
-    canvas.drawString(18 * mm, 7 * mm, "KAZO \u00d7 Fundle Brain \u2014 Technical Overview \u2014 Confidential")
+    canvas.drawString(18 * mm, 7 * mm, "FundleBrain \u2014 Technical Overview \u2014 Confidential")
     canvas.drawRightString(A4[0] - 18 * mm, 7 * mm, "Page %d" % doc_.page)
     canvas.restoreState()
 

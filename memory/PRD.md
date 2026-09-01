@@ -2583,3 +2583,8 @@ those buckets + a specific search). 6. Lifetime Purchase = net+tax, excl discoun
 - 🔎 OPEN (P2): Distinct Items count mismatch (shows 18k vs 22k+ actual) in historic_routes.py.
 - 🚧 BLOCKED (P1): Karix SMS intermittent ConnectTimeout — infra (rotating egress IPs), needs Emergent Support static IP/CIDR.
 - ⚠️ User action: REDEPLOY to push preview fixes live; rotate leaked MongoDB Atlas password.
+
+---
+## STATUS UPDATE 2026-06-24
+- ✅ DONE (P0): Regenerated client Tech Stack & Code Quality PDF as **FundleBrain-branded**. Removed ALL "KAZO" mentions (title, exec summary, Karix sender ID → "dedicated DLT-registered sender ID", footer, metadata). Added the **black Fundle logo** (recolored from white via `make_black_logo.py`, keeps colored accents) on a white header band + burgundy underline on every page. Output: `/app/frontend/public/FundleBrain_Tech_Overview.pdf`; old `KAZO_Fundle_Tech_Overview.pdf` deleted. Verified via pdftotext (NO_KAZO_MENTIONS) + rendered pages. Script: `/app/backend/gen_tech_doc.py`. Live link: {BACKEND_URL}/FundleBrain_Tech_Overview.pdf
+- ⏳ BLOCKED (P1): Daily Reco email auto-pull (M365 OAuth) — awaiting Azure app creds. Jasola external DB (P2) — awaiting connection details. Meta/WhatsApp Cloud API (P1) — awaiting Meta keys.
