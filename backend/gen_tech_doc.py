@@ -111,8 +111,8 @@ bullets([
     "<b>Scale:</b> the production data store holds a large customer base (~1M+ customer records) and "
     "a high-volume transaction / points ledger, served through indexed, read-preference-tuned queries.",
     "<b>AI:</b> a conversational, action-enabled analytics assistant backed by frontier LLMs "
-    "(Anthropic Claude, OpenAI GPT, Google Gemini), accessed through a single managed key — no model "
-    "provider keys are stored in the application.",
+    "(Anthropic Claude, OpenAI GPT, Google Gemini), accessed via LLM provider API keys held only in "
+    "the cloud environment — no provider keys are stored in the application source.",
     "<b>Messaging:</b> DLT-compliant transactional and bulk marketing SMS via the Karix (Tanla) gateway, "
     "with delivery-receipt tracking.",
     "<b>Security:</b> JWT + bcrypt authentication, ten-role RBAC, portal gating, full audit logging, "
@@ -158,7 +158,7 @@ table(["Component", "Technology", "Version"],
        ["Scheduler", "APScheduler", "3.11.2"],
        ["Data processing", "pandas / numpy", "3.0.3 / 2.4.4"],
        ["Excel / PDF generation", "openpyxl / reportlab", "3.1.5 / 4.5.1"],
-       ["LLM orchestration", "emergentintegrations + LiteLLM", "0.1.0 / 1.80.0"],
+       ["LLM orchestration", "LiteLLM (OpenAI-compatible gateway)", "1.80.0"],
        ["HTTP client", "httpx / requests", "0.28.1 / 2.34.1"]],
       [46 * mm, 74 * mm, 40 * mm])
 
@@ -188,7 +188,7 @@ rule()
 p("The primary datastore is MongoDB 7.0, running as a managed, multi-node replica set in production. "
   "Access is fully asynchronous via the Motor driver.")
 table(["Aspect", "Detail"],
-      [["Server version", "MongoDB 7.0 (managed replica set; dev/preview verified on 7.0.42)"],
+      [["Server version", "MongoDB 7.0 (managed cloud replica set; development verified on 7.0.42)"],
        ["Connectivity", "Connection pooling (max pool 100), automatic retryable reads &amp; writes"],
        ["Write concern", "w = majority (durable, acknowledged by a majority of nodes)"],
        ["Read preference", "primaryPreferred &mdash; heavy analytics reads tolerate secondaries so "
@@ -203,10 +203,10 @@ table(["Aspect", "Detail"],
 # ───────────────────────── 6. AI / LLM ─────────────────────────
 p("6. Artificial Intelligence &amp; LLMs", H1)
 rule()
-p("AI features are delivered through a single <b>managed universal LLM key</b> routed via an "
-  "OpenAI-compatible integration proxy (using the <i>emergentintegrations</i> library and LiteLLM). "
-  "Consequently <b>no OpenAI / Anthropic / Google API keys live in the application or repository</b> &mdash; "
-  "the key is injected from the environment. The following models are configured in the code today:")
+p("AI features are delivered through <b>LLM provider API keys</b> routed via an OpenAI-compatible "
+  "LLM gateway (LiteLLM). Consequently <b>no OpenAI / Anthropic / Google secrets live in the "
+  "application source or repository</b> &mdash; the keys are injected from the cloud environment. "
+  "The following models are configured in the code today:")
 table(["Capability", "Provider", "Model (as configured)"],
       [["Analytics assistant &mdash; default (&ldquo;Fundle Brain&rdquo;)", "Anthropic", "Claude Sonnet 4.6"],
        ["Assistant &mdash; deep reasoning (&ldquo;Master Brain&rdquo;)", "Anthropic", "Claude Opus 4.7 (selectable)"],
@@ -233,8 +233,8 @@ table(["Integration", "Purpose", "Notes"],
         "whitelisted with the provider; API keys held only in environment config"],
        ["Microsoft 365 mailbox (IMAP)", "Optional daily auto-pull of the sales reconciliation file",
         "Enabled only when IMAP credentials are supplied via environment; no secrets in code"],
-       ["Emergent Universal LLM key", "Single managed gateway to Anthropic / OpenAI / Google models",
-        "OpenAI-compatible proxy; usage attributed per application"]],
+       ["LLM providers (API keys / MCP)", "Gateway to Anthropic / OpenAI / Google models",
+        "OpenAI-compatible LLM gateway; keys injected from the cloud environment"]],
       [40 * mm, 55 * mm, 65 * mm])
 
 # ───────────────────────── 8. SECURITY ─────────────────────────
@@ -255,8 +255,8 @@ bullets([
     "<b>Secrets management:</b> all credentials, connection strings, keys and JWT secret come from "
     "environment variables only &mdash; the codebase contains no hardcoded secrets; missing config "
     "fails fast rather than falling back to defaults.",
-    "<b>Network:</b> HTTPS/TLS transport end-to-end; MongoDB Atlas provides encryption in transit and "
-    "at rest plus an IP access-list; the messaging provider egress IP is whitelisted.",
+    "<b>Network:</b> HTTPS/TLS transport end-to-end; the managed cloud database provides encryption in "
+    "transit and at rest plus an IP access-list; the messaging provider egress IP is whitelisted.",
     "<b>CORS:</b> requests are restricted to an explicit origin allow-list plus a controlled domain regex.",
     "<b>Least-privilege demo mode:</b> public demo accounts are enforced read-only at the auth layer &mdash; "
     "every write method is rejected except a tiny, explicit allow-list.",
@@ -297,20 +297,20 @@ bullets([
     "<b>Verification discipline:</b> backend changes are verified with live API calls (real request / "
     "response assertions) and, where relevant, direct data checks; UI changes are verified against the "
     "running application.",
-    "<b>Change safety:</b> the platform commits a checkpoint after each step, allowing instant rollback "
-    "to any previous known-good state.",
+    "<b>Change safety:</b> the codebase is version-controlled with checkpointing after each change, "
+    "allowing rollback to any previous known-good state.",
 ])
 
 # ───────────────────────── 11. DEPLOYMENT ─────────────────────────
 p("11. Deployment &amp; Operations", H1)
 rule()
 bullets([
-    "<b>Environments:</b> a clean separation between a preview/development environment and the live "
-    "production deployment, each with its own database and configuration.",
+    "<b>Environments:</b> a clean separation between a development environment and the live "
+    "production deployment on cloud infrastructure, each with its own database and configuration.",
     "<b>Process management:</b> backend and frontend run as supervised services; the API is stateless "
     "and horizontally scalable behind the ingress.",
     "<b>Configuration:</b> environment-driven (URLs, database, keys, feature flags) with no build-time "
-    "secrets; the production database is a managed MongoDB Atlas cluster.",
+    "secrets; the production database is a managed cloud MongoDB cluster.",
     "<b>Observability:</b> built-in health endpoints, the request-level API monitor, application logs, "
     "and a background-job scheduler with per-job logging.",
 ])
