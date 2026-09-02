@@ -1,7 +1,8 @@
-# Build Prompt — Beverly Hills instance (beverlyhills.fundlbrain.ai)
+# Build Prompt — Beverly Hills instance (beverlyhills.fundlebrain.ai)
 
-> Paste this into a NEW Emergent job. Connect / import the existing GitHub repo first
-> (Save to Github → import), so the new job starts from the full, latest codebase.
+> Use in a NEW Emergent project. First import the source repo, then rebrand + fresh DB.
+> GitHub: **vineetnarangofc304 / Fundlebrain-LoyaltyPlatform-Final-V1**
+> (Connect this repo to the new project so it starts from the full, latest codebase.)
 
 ---
 
