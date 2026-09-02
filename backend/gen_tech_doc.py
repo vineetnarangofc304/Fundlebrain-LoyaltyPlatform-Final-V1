@@ -206,7 +206,15 @@ rule()
 p("AI features are delivered through <b>LLM provider API keys</b> routed via an OpenAI-compatible "
   "LLM gateway (LiteLLM). Consequently <b>no OpenAI / Anthropic / Google secrets live in the "
   "application source or repository</b> &mdash; the keys are injected from the cloud environment. "
-  "The following models are configured in the code today:")
+  "The platform is <b>provider-agnostic and multi-model</b>: the same gateway serves models from all "
+  "three major LLM providers interchangeably, and the model behind any capability can be swapped "
+  "without changes to the integration layer.")
+table(["LLM provider", "Models integrated (as configured in code)"],
+      [["Anthropic (Claude)", "Claude Sonnet 4.6, Claude Opus 4.7"],
+       ["OpenAI (GPT)", "GPT-5.5, GPT-5.2, GPT-5, tts-1 / tts-1-hd (text-to-speech)"],
+       ["Google (Gemini)", "Gemini 3.1 Pro"]],
+      [46 * mm, 114 * mm])
+p("Mapped to the capabilities they power today:", BODY)
 table(["Capability", "Provider", "Model (as configured)"],
       [["Analytics assistant &mdash; default (&ldquo;Fundle Brain&rdquo;)", "Anthropic", "Claude Sonnet 4.6"],
        ["Assistant &mdash; deep reasoning (&ldquo;Master Brain&rdquo;)", "Anthropic", "Claude Opus 4.7 (selectable)"],
