@@ -1,3 +1,5 @@
+import { BRAND } from "@/brand.config";
+
 export default function ReferralProgram() {
   return (
     <div className="max-w-[1100px] mx-auto px-6 lg:px-12 py-20" data-testid="page-referral">
@@ -15,7 +17,7 @@ export default function ReferralProgram() {
         <div className="prose text-neutral-700">
           <h3 className="font-display text-3xl mb-4">How to share</h3>
           <ol className="space-y-2 list-decimal pl-5">
-            <li>Log in to your KAZO account.</li>
+            <li>Log in to your {BRAND.name} account.</li>
             <li>Visit the Referrals page to grab your unique code.</li>
             <li>Share it via WhatsApp, SMS, or email.</li>
             <li>When your friend shops, both of you earn points.</li>

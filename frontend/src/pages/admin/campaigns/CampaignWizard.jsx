@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
@@ -33,7 +34,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
   const [batches, setBatches] = useState([]);
   const [scheduleAt, setScheduleAt] = useState("");
   const [allocating, setAllocating] = useState(false);
-  const [nb, setNb] = useState({ coupon_type: "percentage", discount_value: 10, prefix: "KAZO", valid_days: 30 });
+  const [nb, setNb] = useState({ coupon_type: "percentage", discount_value: 10, prefix: BRAND.couponPrefix, valid_days: 30 });
   const reqRef = useRef(0);
 
   useEffect(() => {
@@ -106,7 +107,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
         coupon_type: nb.coupon_type,
         discount_value: parseFloat(nb.discount_value) || 0,
         valid_from: now.toISOString(), valid_to: to.toISOString(),
-        prefix: nb.prefix || "KAZO", audience: src,
+        prefix: nb.prefix || BRAND.couponPrefix, audience: src,
       });
       toast.success(`Generated ${fmtNum(r.data.total)} unique codes`);
       const b = await api.get("/coupons/unique/batches");
@@ -310,7 +311,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
 
               <div className="border border-indigo-200 rounded p-3 bg-indigo-50/60">
                 <label className="text-[10px] uppercase tracking-widest text-indigo-700 font-medium flex items-center gap-1 mb-2"><Sparkles className="w-3 h-3" /> Personalisation link — fills <code className="bg-white px-1 rounded border font-mono">{"{{link}}"}</code></label>
-                <input className="k-input" type="url" placeholder="https://stores.kazo.com/" value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} data-testid="campaign-link-input" />
+                <input className="k-input" type="url" placeholder={`https://stores.${BRAND.domain}/`} value={form.link} onChange={(e) => setForm({ ...form, link: e.target.value })} data-testid="campaign-link-input" />
                 <div className="text-[10px] text-neutral-600 mt-2 leading-relaxed" data-testid="campaign-variables-hint">
                   Variables you can put in the template body:
                   {" "}<code className="bg-white px-1 rounded border">{"{{name}}"}</code>{" "}

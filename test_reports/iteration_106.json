@@ -1,0 +1,28 @@
+{
+  "summary": "Frontend-only REGRESSION test of the brand-config refactor (frontend/src/brand.config.js). Verified 15 public routes, CRM login, store portal, and 12 edited admin pages render with zero JS/page errors and zero React error overlays, and that every KAZO default string is reproduced exactly. All requested assertions PASSED: /about-program ('KAZO Rewards is the official loyalty programme for the modern Indian woman', '25+ stores across India', kazo.com), /contact (KAZO Fashion Pvt. Ltd., New Delhi India, rewards@kazo.com, 1800 123 456), /privacy (privacy@kazo.com, 'purchases at KAZO stores or kazo.com'), /terms ('residing in India', 'KAZO reserves the right'), /store-locator ('nearest KAZO'), /how-it-works, /rewards ('your KAZO anniversary'), /referral-program ('Log in to your KAZO account'). CRM login superadmin@fundle.io works and lands on /admin. /store StoreOps shows 'KAZO' logo + customer lookup functional (searched 9990002222 -> PC Fix Test, GOLD, 12,365 pts). Admin: POS Credentials shows 'KAZO POS integration' + merchant_id KAZO_FUNDLE (modal placeholder KAZO_FUNDLE in code, table shows value); Templates editor sender placeholder 'KAZOIN', send-via options exactly 'Campaign / bulk (fundle_campaign - KAZOFN)' and 'Transactional (KAZOIN)', var examples 'Store (e.g. KAZO Phoenix)' and 'Coupon (e.g. KAZO10)'; Provider Settings placeholders KAZOIN/KAZOFN; Coupon Engine placeholder 'Code (e.g., KAZOWELCOME20)' and live Generate returned 'KAZOVJ3FD5' (KAZO prefix via API); Unique coupon batch prefix default 'KAZO'; Campaign wizard message step link placeholder 'https://stores.kazo.com/'; Points Integrity (KAZO migration / KAZO slab / KAZO tiers), Customer Analytics ('WHO IS KAZO - LIVE'), Historic Data ('LOAD MANY YEARS OF KAZO POS DATA'), Loyalty Rules ('KAZO rule: points are always earned on the Total Bill Amount before GST'), Support Desk Audit Log actor placeholder 'agent@kazo.com'. Executive Summary PDF download produced 'KAZO_Executive_Summary_0d.pdf'. Backend testing skipped per request.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CouponEngine new-coupon modal", "issue": "Pressing Escape does not close the modal; the fixed overlay (div.fixed.inset-0) then intercepts pointer events on the page behind it (blocked a click on the 'Unique coupons' tab). Pre-existing, not caused by the branding refactor.", "selector": "[data-testid=\"new-coupon-modal\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Live Bill Monitor filters (and other admin date filters)", "issues": ["Uses native browser date inputs (mm/dd/yyyy) instead of the shadcn calendar component - inconsistent with the rest of the design system. Pre-existing."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Rebranding gap (not a KAZO regression): frontend/src/lib/demoScript.js lines 276-277 still hardcode 'Welcome to KAZO - Powered by Fundle' and the narration 'Welcome to the KAZO loyalty...'. The /demo guided tour will keep saying KAZO after a rebrand - move to BRAND tokens.",
+    "pages/admin/raw_reports/_shared.jsx exports KAZO_PALETTE (chart colours) that are independent of BRAND.colors - a rebrand will leave old brand chart colours; consider deriving from BRAND.colors.",
+    "Remaining 'KAZO' occurrences elsewhere are code comments or stable CSS class names (kazo-bg-*/--kazo-*), which is per the documented design."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (skipped per request)", "frontend": "100% (all 20 branding assertions + 20 route renders passed)"},
+  "seed_data_creation": "None persisted. Opened a Campaign wizard draft named TEST_brand_check but did NOT save it; typed vars into a template editor and closed without saving. Coupon 'Generate' called POST /api/coupons/generate-code (read-only code generator, no coupon created).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": false,
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (from /app/memory/test_credentials.md) - works",
+  "context_for_next_testing_agent": "Branding refactor verified clean for KAZO. Note: super_admin can reach /store (StoreOps) directly, so no store_manager password is needed for store-portal smoke tests. Templates var-example placeholders only render when the body contains the mustache var - click the '+STORE_NAME'/'+COUPON_CODE' chips in the editor to surface them. CampaignWizard nb-prefix (coupon prefix default 'KAZO') only appears when audience is a Segment/Marketing DB, so it was verified in code, not runtime; the unique-coupon batch panel prefix default was verified in runtime as 'KAZO'.",
+  "rca_of_the_issue": "N/A - no regressions found. brand.config.js defaults reproduce the original KAZO strings verbatim across public site, store portal and admin console."
+}

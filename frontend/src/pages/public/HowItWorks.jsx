@@ -1,6 +1,8 @@
+import { BRAND } from "@/brand.config";
+
 export default function HowItWorks() {
   const steps = [
-    { n: "01", h: "Sign up free", b: "Register at any KAZO store with your mobile number — or online at kazo.com. Instant 100-point welcome bonus." },
+    { n: "01", h: "Sign up free", b: `Register at any ${BRAND.name} store with your mobile number — or online at ${BRAND.domain}. Instant 100-point welcome bonus.` },
     { n: "02", h: "Quote at checkout", b: "Simply share your mobile number when billing. Points accrue automatically based on your tier multiplier." },
     { n: "03", h: "Receive an OTP", b: "For privacy, you'll receive an OTP whenever points are redeemed against your account." },
     { n: "04", h: "Climb the tiers", b: "Cross spend thresholds and your tier upgrades automatically. Larger birthday bonuses, faster earn rates." },

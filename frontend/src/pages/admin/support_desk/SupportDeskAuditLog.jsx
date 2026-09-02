@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 /* Support Desk Audit Log — every reactivation, deactivation, unsubscribe is logged. */
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
@@ -49,7 +50,7 @@ export default function SupportDeskAuditLog() {
             </div>
             <div>
               <label className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-1 block">Actor email</label>
-              <input value={actor} onChange={(e) => setActor(e.target.value)} className="k-input w-full" placeholder="agent@kazo.com" data-testid="sd-audit-actor" />
+              <input value={actor} onChange={(e) => setActor(e.target.value)} className="k-input w-full" placeholder={`agent@${BRAND.domain}`} data-testid="sd-audit-actor" />
             </div>
             <div>
               <label className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-1 block">Start date</label>

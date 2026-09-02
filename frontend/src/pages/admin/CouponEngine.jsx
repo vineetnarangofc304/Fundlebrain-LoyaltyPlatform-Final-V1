@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import { PageHeader, StatusPill } from "./_shared";
@@ -51,7 +52,7 @@ export default function CouponEngine() {
   })();
 
   const genCode = async () => {
-    const r = await api.post("/coupons/generate-code", null, { params: { prefix: "KAZO" } });
+    const r = await api.post("/coupons/generate-code", null, { params: { prefix: BRAND.couponPrefix } });
     setForm((f) => ({ ...f, code: r.data.code }));
   };
 
@@ -180,7 +181,7 @@ export default function CouponEngine() {
             <h3 className="font-display text-2xl mb-4">{editingId ? "Edit Coupon" : "New Coupon"}</h3>
             <div className="grid grid-cols-2 gap-3">
               <div className="flex gap-2 col-span-2">
-                <input className="k-input" placeholder="Code (e.g., KAZOWELCOME20)" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} data-testid="coupon-code-input" />
+                <input className="k-input" placeholder={`Code (e.g., ${BRAND.couponPrefix}WELCOME20)`} value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} data-testid="coupon-code-input" />
                 <button type="button" className="k-btn k-btn-outline" onClick={genCode} data-testid="generate-code-btn">Generate</button>
               </div>
               <input className="k-input col-span-2" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="coupon-name-input" />

@@ -628,13 +628,19 @@ async def _seed_and_bootstrap():
             })
             logger.info("Seeded super admin")
 
+        # Brand-driven seed values — defaults reproduce KAZO exactly; a new brand
+        # overrides via env (BRAND_EMAIL_DOMAIN / BRAND_NAME / DEMO_USER_PASSWORD).
+        email_domain = os.environ.get("BRAND_EMAIL_DOMAIN", "kazo.com")
+        brand_name = os.environ.get("BRAND_NAME", "Kazo")
+        demo_pw = os.environ.get("DEMO_USER_PASSWORD", "Kazo@2026")
+
         # Seed brand admin
-        brand_admin = await users_col.find_one({"email": os.environ.get("BRAND_ADMIN_EMAIL", "admin@kazo.com").lower()})
+        brand_admin = await users_col.find_one({"email": os.environ.get("BRAND_ADMIN_EMAIL", f"admin@{email_domain}").lower()})
         if not brand_admin:
             await users_col.insert_one({
                 "id": uuid.uuid4().hex,
-                "email": os.environ.get("BRAND_ADMIN_EMAIL", "admin@kazo.com").lower(),
-                "name": "Kazo Brand Admin",
+                "email": os.environ.get("BRAND_ADMIN_EMAIL", f"admin@{email_domain}").lower(),
+                "name": f"{brand_name} Brand Admin",
                 "role": "brand_admin",
                 "password_hash": hash_password(os.environ.get("BRAND_ADMIN_PASSWORD", "Kazo@2026")),
                 "is_active": True,
@@ -644,8 +650,8 @@ async def _seed_and_bootstrap():
 
         # Backfill store_id on store-scoped users (security hardening for drilldown scope)
         store_user_map = {
-            "store.mumbai@kazo.com": "Mumbai",
-            "staff.delhi@kazo.com": "Delhi",
+            f"store.mumbai@{email_domain}": "Mumbai",
+            f"staff.delhi@{email_domain}": "Delhi",
         }
         for email, city in store_user_map.items():
             u = await users_col.find_one({"email": email})
@@ -661,15 +667,15 @@ async def _seed_and_bootstrap():
         # Seed all demo / operational users (idempotent — runs on every boot so
         # production deployments with a fresh DB always have working logins).
         demo_users = [
-            ("crm@kazo.com", "Priya Sharma", "crm_manager", None),
-            ("marketing@kazo.com", "Rohan Kapoor", "marketing_manager", None),
-            ("regional.north@kazo.com", "Anjali Verma", "regional_manager", None),
-            ("store.mumbai@kazo.com", "Neha Patel", "store_manager", "Mumbai"),
-            ("staff.delhi@kazo.com", "Karan Singh", "store_staff", "Delhi"),
-            ("support@kazo.com", "Riya Mehra", "support_agent", None),
-            ("analytics@kazo.com", "Aditya Rao", "analytics_viewer", None),
-            ("executive@kazo.com", "Kavita Iyer", "readonly_executive", None),
-            ("it@kazo.com", "Vikram Joshi", "brand_admin", None),
+            (f"crm@{email_domain}", "Priya Sharma", "crm_manager", None),
+            (f"marketing@{email_domain}", "Rohan Kapoor", "marketing_manager", None),
+            (f"regional.north@{email_domain}", "Anjali Verma", "regional_manager", None),
+            (f"store.mumbai@{email_domain}", "Neha Patel", "store_manager", "Mumbai"),
+            (f"staff.delhi@{email_domain}", "Karan Singh", "store_staff", "Delhi"),
+            (f"support@{email_domain}", "Riya Mehra", "support_agent", None),
+            (f"analytics@{email_domain}", "Aditya Rao", "analytics_viewer", None),
+            (f"executive@{email_domain}", "Kavita Iyer", "readonly_executive", None),
+            (f"it@{email_domain}", "Vikram Joshi", "brand_admin", None),
         ]
         for email, name, role, city in demo_users:
             if await users_col.find_one({"email": email}):
@@ -679,7 +685,7 @@ async def _seed_and_bootstrap():
                 "email": email,
                 "name": name,
                 "role": role,
-                "password_hash": hash_password("Kazo@2026"),
+                "password_hash": hash_password(demo_pw),
                 "is_active": True,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }

@@ -1,3 +1,5 @@
+import { BRAND } from "@/brand.config";
+
 /**
  * Fundle product-demo script.
  * Each step drives the LIVE app: navigate to `route`, spotlight the sidebar nav
@@ -273,8 +275,8 @@ export const SECTION_MAP = SECTIONS.reduce((m, s) => { m[s.id] = s; return m; },
 // ---- Welcome + closing bookends for the full tour ----
 const WELCOME = {
   id: "welcome", route: "/admin", nav: null,
-  title: "Welcome to KAZO · Powered by Fundle",
-  say: "Welcome to the KAZO loyalty and customer-intelligence platform, powered by Fundle. Over the next few minutes I'll walk you through the live platform — the dashboards, the AI, campaigns, support and reporting. Sit back and watch it run.",
+  title: `Welcome to ${BRAND.name} · Powered by ${BRAND.platform}`,
+  say: `Welcome to the ${BRAND.name} loyalty and customer-intelligence platform, powered by ${BRAND.platform}. Over the next few minutes I'll walk you through the live platform — the dashboards, the AI, campaigns, support and reporting. Sit back and watch it run.`,
 };
 
 const CLOSING = {

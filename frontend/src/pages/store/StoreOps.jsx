@@ -5,6 +5,7 @@ import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
 import { fmtMoney2, fmtNum, fmtDate, tierClass } from "@/lib/format";
 import { LogOut, Search, Sparkles, Plus, Minus, Gift } from "lucide-react";
+import { BRAND } from "@/brand.config";
 
 export default function StoreOps() {
   const { user, logout } = useAuth();
@@ -63,7 +64,7 @@ export default function StoreOps() {
     <div className="min-h-screen kazo-bg-cream" data-testid="store-ops-page">
       <header className="kazo-bg-black text-white px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <span className="font-display text-2xl tracking-tight">KAZO</span>
+          <span className="font-display text-2xl tracking-tight">{BRAND.name}</span>
           <span className="text-[10px] uppercase tracking-[0.2em] text-white/40">Store Ops · Powered by Fundle</span>
         </div>
         <div className="flex items-center gap-4">

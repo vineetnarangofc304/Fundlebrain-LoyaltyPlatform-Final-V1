@@ -25,6 +25,32 @@ Follow the documented rebrand checklist in `frontend/src/brand.config.js`:
 6. Regenerate the tech-overview PDF via `backend/gen_tech_doc.py` if the client needs a branded copy
    (already parameterised; just swap the brand string + logo).
 
+## 1b. What's now config-driven (post-refactor) vs. still manual
+After the config refactor, **every user-facing brand string lives in `frontend/src/brand.config.js`**
+(name, loyalty/program copy, domain, audience descriptor, region, store-count line, legal entity,
+head office, support phone, coupon prefix, POS merchant id, SMS sender IDs, hero/meta copy, colours).
+Public pages, the store portal, the admin console and the `/demo` tour all read `BRAND.*`. So editing
+`brand.config.js` rebrands the whole app UI in one place.
+
+**Still manual per brand (cannot read the JS config):**
+- `frontend/public/index.html` — `<title>` + description/keywords/OG meta (build-time static).
+- `frontend/src/index.css` — swap the `--kazo-*` colour VALUES (keep the names) OR just set them in
+  `brand.config.js.colors` (injected at runtime via App.js). Prefer brand.config.
+- `backend/.env` — `BRAND_NAME`, `BRAND_ADMIN_EMAIL`, `BRAND_ADMIN_PASSWORD`, optional
+  `BRAND_EMAIL_DOMAIN` + `DEMO_USER_PASSWORD` (seed logins), fresh `JWT_SECRET`, and add the new site
+  origin to `CORS_ORIGINS` (regex already allows `*.fundlebrain.ai`).
+- `backend/server.py` — replace the seeded "KAZO End of Season Sale" DLT template with the new brand's
+  Karix-registered sender/entity/template + exact approved body (DLT content is inherently per-brand).
+- Add the brand logo asset(s) in `/public`.
+- (Optional cosmetic: `raw_reports/_shared.jsx` `KAZO_PALETTE` chart colours are brand-independent
+  categorical colours — leave unless you want them tied to the brand palette. A few code comments
+  still say "KAZO" — invisible, harmless.)
+
+## 1c. CORS + domain (WILL block the app if wrong)
+`server.py` allows `*.fundlebrain.ai` (with an "e"). The requested `beverlyhills.fundlbrain.ai`
+(no "e") will FAIL CORS. Either use **beverlyhills.fundlebrain.ai**, or add the exact new origin to
+the CORS allow-list + regex in `server.py`. Also remove/replace the KAZO-specific hostnames there.
+
 ## 2. Fresh single-tenant data
 - New empty MongoDB (its own `DB_NAME`); keep the idempotent startup seeds (admin user + any DLT
   template seed) but seed them with **Beverly Hills** values, not KAZO.

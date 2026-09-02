@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 import { useCallback, useEffect, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
@@ -12,7 +13,7 @@ function CreateBatchModal({ segments, mdbs, onClose, onDone }) {
     name: "", coupon_type: "flat", discount_value: 100, min_bill_amount: 0, max_discount: "",
     valid_from: new Date().toISOString().slice(0, 16),
     valid_to: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 16),
-    prefix: "KAZO",
+    prefix: BRAND.couponPrefix,
   });
   const [src, setSrc] = useState("marketing_db");
   const [segId, setSegId] = useState("");
@@ -61,7 +62,7 @@ function CreateBatchModal({ segments, mdbs, onClose, onDone }) {
             <input className="k-input" type="number" placeholder="Max discount ₹ (optional)" value={f.max_discount} onChange={(e) => setF({ ...f, max_discount: e.target.value })} data-testid="unique-maxdisc-input" />
             <input className="k-input" type="datetime-local" value={f.valid_from} onChange={(e) => setF({ ...f, valid_from: e.target.value })} data-testid="unique-from-input" />
             <input className="k-input" type="datetime-local" value={f.valid_to} onChange={(e) => setF({ ...f, valid_to: e.target.value })} data-testid="unique-to-input" />
-            <input className="k-input col-span-2" placeholder="Code prefix (e.g. KAZO)" value={f.prefix} onChange={(e) => setF({ ...f, prefix: e.target.value })} data-testid="unique-prefix-input" />
+            <input className="k-input col-span-2" placeholder={`Code prefix (e.g. ${BRAND.couponPrefix})`} value={f.prefix} onChange={(e) => setF({ ...f, prefix: e.target.value })} data-testid="unique-prefix-input" />
           </div>
 
           <div className="text-[10px] uppercase tracking-widest text-neutral-500 pt-2">2 · Who gets a unique code</div>

@@ -1,8 +1,10 @@
+import { BRAND } from "@/brand.config";
+
 export default function Rewards() {
   const rewards = [
     { h: "Welcome 100 Points", b: "Instantly credited on sign-up." },
     { h: "Birthday Bonanza", b: "Up to 2000 points on your special day." },
-    { h: "Anniversary Surprise", b: "Bonus points on your KAZO anniversary." },
+    { h: "Anniversary Surprise", b: `Bonus points on your ${BRAND.name} anniversary.` },
     { h: "Festive Hampers", b: "Curated boxes for Platinum and Diamond members." },
     { h: "Private Previews", b: "First look at new collections — 72 hours early." },
     { h: "Personal Stylist", b: "Diamond-tier dedicated stylist sessions." },

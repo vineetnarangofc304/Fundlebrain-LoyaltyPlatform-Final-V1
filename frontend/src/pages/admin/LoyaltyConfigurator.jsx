@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 /* Loyalty Configurator v2 — full-featured logic editor.
 
    Matches Fundle Logic Configuration + extends:
@@ -148,7 +149,7 @@ export default function LoyaltyConfigurator() {
               })}
             </div>
             <p className="text-xs text-neutral-500 mt-2">
-              KAZO rule: points are always earned on the <b>Total Bill Amount before GST</b>.
+              {BRAND.name} rule: points are always earned on the <b>Total Bill Amount before GST</b>.
               Choose <b>Pre-tax</b> if the POS sends <code>amount</code> without tax,
               <b> Tax-inclusive</b> if <code>amount</code> already includes GST (it will be stripped),
               or <b>Auto-detect</b> to infer it per bill from the pre-tax net the POS sends.

@@ -2,25 +2,29 @@
  * BRAND CONFIGURATION — Single Source of Truth
  * ============================================
  *
- * Every display string, asset URL and brand identifier visible on the
- * public site, login screens and admin sidebar lives in this file.
+ * Every brand-specific display string, contact detail, operational default,
+ * asset URL and colour visible on the public site, login screens, store
+ * portal and admin console is driven from THIS file (imported as `BRAND`).
  *
- * 📦 To rebrand this project for a new brand (e.g. Red Chief):
- *   1. Edit the values below.
- *   2. Edit colour values at the top of `frontend/src/index.css`
- *      (the `--kazo-*` CSS variables — keep the variable NAMES, just
- *      swap the hex values to match the new brand palette).
- *   3. Edit `<title>` + `<meta>` tags in `frontend/public/index.html`
- *      (these are static / build-time and cannot read this file).
- *   4. Edit `BRAND_NAME` + super-admin / brand-admin emails in
- *      `backend/.env`.
- *   5. Replace hero / boutique / editorial Unsplash image URLs below
- *      with brand-appropriate imagery (or upload your own via the
- *      Public Site CMS once logged in).
+ * 📦 To rebrand this project for a new brand (e.g. Beverly Hills):
+ *   1. Edit the values in this file (identity, loyalty copy, contact/legal,
+ *      operational defaults, colours). Every field below has a KAZO default;
+ *      change the values, not the field names.
+ *   2. Edit `<title>` + `<meta>` tags in `frontend/public/index.html`
+ *      (static / build-time — cannot read this file).
+ *   3. Backend `backend/.env`: set `BRAND_NAME`, `BRAND_ADMIN_EMAIL`,
+ *      `BRAND_ADMIN_PASSWORD`, and (optional) `BRAND_EMAIL_DOMAIN`,
+ *      `DEMO_USER_PASSWORD` for the seeded logins; add the new site origin to
+ *      `CORS_ORIGINS` (the CORS regex already allows *.fundlebrain.ai).
+ *   4. Replace the DLT-approved SMS template seeded in `backend/server.py`
+ *      with the new brand's Karix-registered sender/entity/template + body.
+ *   5. Replace hero / boutique / editorial imagery below (or upload via the
+ *      in-app Public Site CMS — CMS overrides take precedence at runtime).
+ *   6. Add the brand logo asset(s) in /public.
  *
- * 🔒 Do NOT rename CSS class names (`kazo-text-burgundy`, etc.) —
- *    those are stable selectors used across 50+ components. Only the
- *    underlying CSS variable VALUES need to change per brand.
+ * 🔒 Do NOT rename CSS class names (`kazo-text-burgundy`, etc.) or the
+ *    `--kazo-*` CSS variables — they are stable selectors used across 50+
+ *    components. Only the underlying colour VALUES (below) change per brand.
  */
 
 export const BRAND = {
@@ -76,6 +80,25 @@ export const BRAND = {
     descriptor:
       "A unified suite for loyalty, CRM, analytics and campaigns — purpose-built for KAZO.",
     imageAlt: "KAZO",
+  },
+
+  // -- Public-site contact / legal (CMS overrides take precedence) ----
+  audienceDescriptor: "the modern Indian woman",
+  region: "India",
+  storeCountLine: "25+ stores across India",
+  legalEntity: "KAZO Fashion Pvt. Ltd.",
+  headOffice: "New Delhi, India",
+  supportPhone: "1800 123 456 · Mon–Sat, 10AM–8PM",
+  supportPhoneTel: "+911800123456",
+  // Public support emails are built as <box>@{domain} (rewards@, privacy@, agent@).
+
+  // -- Operational defaults (admin console) ---------------------------
+  couponPrefix: "KAZO",              // default coupon-code prefix
+  posMerchantId: "KAZO_FUNDLE",      // default POS merchant_id
+  sms: {
+    senderId: "KAZOIN",             // transactional DLT sender header
+    campaignSenderId: "KAZOFN",     // promotional / bulk DLT sender header
+    campaignAccount: "fundle_campaign",
   },
 
   // -- Brand colour palette ------------------------------------------

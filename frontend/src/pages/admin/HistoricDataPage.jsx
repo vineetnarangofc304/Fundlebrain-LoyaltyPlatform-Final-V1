@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 /* Historic Data Upload — CSV ingest UI for KAZO loading customer + transaction history. */
 import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
@@ -182,7 +183,7 @@ export default function HistoricDataPage() {
     <div data-testid="historic-data-page">
       <PageHeader
         title="Historical Data Upload"
-        subtitle="LOAD MANY YEARS OF KAZO POS DATA · CSV · BACKGROUND INGEST"
+        subtitle={`LOAD MANY YEARS OF ${BRAND.name} POS DATA · CSV · BACKGROUND INGEST`}
         actions={
           <>
             <button onClick={loadJobs} className="k-btn k-btn-outline k-btn-sm" data-testid="hist-refresh"><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>

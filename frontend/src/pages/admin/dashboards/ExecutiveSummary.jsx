@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 /* Executive Summary v2 — composite snapshot + branded PDF download. */
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
@@ -59,7 +60,7 @@ export default function ExecutiveSummary() {
       const url = window.URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
       const a = document.createElement("a");
       a.href = url;
-      a.download = `KAZO_Executive_Summary_${period}d.pdf`;
+      a.download = `${BRAND.name}_Executive_Summary_${period}d.pdf`;
       a.click();
       window.URL.revokeObjectURL(url);
     } finally {

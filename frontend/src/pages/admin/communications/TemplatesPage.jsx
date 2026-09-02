@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 /* Communication Templates — SMS / WhatsApp / RCS with AI suggest + test send. */
 import { useEffect, useState, useMemo } from "react";
 import { toast } from "sonner";
@@ -203,8 +204,8 @@ function TemplateEditor({ template, onClose, onSaved }) {
 
   // Test-send inputs: auto-detect {{variables}} from the body (so manually-typed
   // vars like {{otp}} are testable), merged with any AI-declared variables.
-  const VAR_EXAMPLES = { name: "Aarav", amount: "2499", bill_no: "INV-1042", store_name: "KAZO Phoenix",
-    coupon_code: "KAZO10", points_earned: "120", points_balance: "640", tier: "Gold", otp: "123456" };
+  const VAR_EXAMPLES = { name: "Aarav", amount: "2499", bill_no: "INV-1042", store_name: `${BRAND.name} Phoenix`,
+    coupon_code: `${BRAND.couponPrefix}10`, points_earned: "120", points_balance: "640", tier: "Gold", otp: "123456" };
   const testVars = useMemo(() => {
     const found = new Map();
     const re = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
@@ -351,7 +352,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
                 <>
                   <label className="text-xs">
                     <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Sender ID</div>
-                    <input className="k-input" value={form.sender_id || ""} onChange={(e) => update("sender_id", e.target.value)} placeholder="KAZOIN" data-testid="t-sender" />
+                    <input className="k-input" value={form.sender_id || ""} onChange={(e) => update("sender_id", e.target.value)} placeholder={BRAND.sms.senderId} data-testid="t-sender" />
                     <div className="text-[10px] text-neutral-400 mt-1">Pre-filled from Provider Settings. Leave as-is to use your global DLT-registered sender; override here only for this template.</div>
                   </label>
                   <label className="text-xs">
@@ -438,8 +439,8 @@ function TemplateEditor({ template, onClose, onSaved }) {
                   <div className="text-[10px] uppercase tracking-widest text-emerald-800/70 mb-1">Send via</div>
                   <select className="k-input text-xs" value={testVia} onChange={(e) => setTestVia(e.target.value)} data-testid="test-via-select">
                     <option value="">Auto (campaign pipe for promotional templates)</option>
-                    <option value="campaign">Campaign / bulk (fundle_campaign · KAZOFN)</option>
-                    <option value="transactional">Transactional (KAZOIN)</option>
+                    <option value="campaign">Campaign / bulk ({BRAND.sms.campaignAccount} · {BRAND.sms.campaignSenderId})</option>
+                    <option value="transactional">Transactional ({BRAND.sms.senderId})</option>
                   </select>
                   <div className="text-[10px] text-neutral-500 mt-1">Promotional SMS must go via the campaign pipe or operators drop it (ACK only).</div>
                 </label>

@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 /* POS Credentials — admin UI to view / create / rotate the x-api-key + merchant_id + customer_key
    that KAZO's eWards-style POS uses to authenticate against our /api/pos/* endpoints. */
 import { useEffect, useState } from "react";
@@ -34,7 +35,7 @@ export default function POSCredentialsPage() {
   const saveKey = async (id) => {
     const key = (keyInput || "").trim();
     if (key.length < 16) { toast.error("x-api-key must be at least 16 characters"); return; }
-    if (!window.confirm("Set this exact x-api-key? KAZO POS must send this key on every call.")) return;
+    if (!window.confirm(`Set this exact x-api-key? ${BRAND.name} POS must send this key on every call.`)) return;
     setSavingKey(true);
     try {
       await api.post(`/admin/pos-credentials/${id}/set-key`, { api_key: key });
@@ -47,7 +48,7 @@ export default function POSCredentialsPage() {
   };
 
   const rotate = async (id) => {
-    if (!window.confirm("Rotate this api_key? KAZO's POS will need the new key.")) return;
+    if (!window.confirm(`Rotate this api_key? ${BRAND.name}'s POS will need the new key.`)) return;
     try {
       await api.post(`/admin/pos-credentials/${id}/rotate`);
       toast.success("Key rotated");
@@ -71,7 +72,7 @@ export default function POSCredentialsPage() {
     <div data-testid="pos-credentials-page">
       <PageHeader
         title="POS API Credentials"
-        subtitle="x-api-key · merchant_id · customer_key · KAZO POS integration"
+        subtitle={`x-api-key · merchant_id · customer_key · ${BRAND.name} POS integration`}
         actions={
           <button onClick={() => setNewOpen(true)} className="k-btn kazo-bg-burgundy k-btn-sm" data-testid="pos-cred-new-btn">
             <Plus className="w-3.5 h-3.5" /> New credential
@@ -87,7 +88,7 @@ export default function POSCredentialsPage() {
             accent="burgundy"
           />
           <div className="text-xs text-neutral-600 mb-4">
-            Share <strong>merchant_id</strong>, <strong>customer_key</strong>, and <strong>api_key</strong> with the KAZO POS team.
+            Share <strong>merchant_id</strong>, <strong>customer_key</strong>, and <strong>api_key</strong> with the {BRAND.name} POS team.
             They send all three on every <code className="font-mono">/api/pos/*</code> call —
             <strong> x-api-key</strong> goes in the request header; the other two in the JSON body.
           </div>
@@ -154,7 +155,7 @@ export default function POSCredentialsPage() {
 
         {/* Quick-reference doc */}
         <div className="chart-card p-5" data-accent="indigo" data-testid="pos-cred-quickref">
-          <SectionHeading eyebrow="QUICK REFERENCE" title="How KAZO POS authenticates" accent="indigo" />
+          <SectionHeading eyebrow="QUICK REFERENCE" title={`How ${BRAND.name} POS authenticates`} accent="indigo" />
           <pre className="bg-neutral-900 text-emerald-200 p-3 font-mono text-[11px] overflow-x-auto whitespace-pre">
 {`POST /api/pos/posCustomerCheck
 Headers:
@@ -206,7 +207,7 @@ function CredField({ label, value, onCopy, secret = false, hidden = false, onTog
 }
 
 function NewCredentialModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({ label: "", merchant_id: "KAZO_FUNDLE", customer_key: "", note: "" });
+  const [form, setForm] = useState({ label: "", merchant_id: BRAND.posMerchantId, customer_key: "", note: "" });
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState(null);
 
@@ -246,7 +247,7 @@ function NewCredentialModal({ onClose, onCreated }) {
         ) : (
           <div className="p-5 space-y-3 text-xs">
             <Input label="Label *" value={form.label} onChange={(v) => setForm({ ...form, label: v })} placeholder="e.g. kazo_phoenix_mum01" testid="cred-label" />
-            <Input label="merchant_id *" value={form.merchant_id} onChange={(v) => setForm({ ...form, merchant_id: v })} placeholder="KAZO_FUNDLE" testid="cred-merchant" />
+            <Input label="merchant_id *" value={form.merchant_id} onChange={(v) => setForm({ ...form, merchant_id: v })} placeholder={BRAND.posMerchantId} testid="cred-merchant" />
             <Input label="customer_key *" value={form.customer_key} onChange={(v) => setForm({ ...form, customer_key: v })} placeholder="kazo_phoenix_mum01" testid="cred-ckey" />
             <Input label="Note (optional)" value={form.note} onChange={(v) => setForm({ ...form, note: v })} placeholder="For Phoenix Marketcity outlet" testid="cred-note" />
             <div className="pt-3 flex justify-end gap-2">

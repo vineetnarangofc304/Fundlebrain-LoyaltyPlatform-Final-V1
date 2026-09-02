@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 /* Points Integrity Center — one place to identify & reverse each class of points error the
    client reported, as Scan → Reverse buttons (deterministic, audited, undoable):
      A. Duplicate bonus credits (Master Brain bulk award ran twice)
@@ -148,8 +149,8 @@ export default function PointsIntegrityPage() {
 
       <RepairPanel
         code="B" testid="repair-tier-bonus"
-        title="Wrong tier-upgrade bonus during legacy → KAZO migration"
-        description="Migrated customers (historic tiers like silver/gold/platinum) who transacted after go-live were re-tiered onto a KAZO slab by their already-high lifetime spend and wrongly got a tier-upgrade bonus. This voids those tier-upgrade bonus rows and deducts the points. Use the go-live→re-tier date window; keep 'migrated only' on."
+        title={`Wrong tier-upgrade bonus during legacy → ${BRAND.name} migration`}
+        description={`Migrated customers (historic tiers like silver/gold/platinum) who transacted after go-live were re-tiered onto a ${BRAND.name} slab by their already-high lifetime spend and wrongly got a tier-upgrade bonus. This voids those tier-upgrade bonus rows and deducts the points. Use the go-live→re-tier date window; keep 'migrated only' on.`}
         previewUrl="/points-integrity/tier-upgrade-bonus/preview"
         applyUrl="/points-integrity/tier-upgrade-bonus/apply"
         buildBody={() => ({ start: b.start || "", end: b.end || "", migrated_only: b.migrated_only, mobile: b.mobile || "" })}
@@ -223,8 +224,8 @@ export default function PointsIntegrityPage() {
       <RepairRuns />
 
       <div className="chart-card p-6" data-accent="teal" data-testid="repair-retier">
-        <SectionHeading eyebrow="ISSUE E" title="Re-tier legacy customers onto KAZO tiers" accent="teal" />
-        <p className="text-sm text-neutral-600 mt-2 leading-relaxed">Identify customers still on legacy tiers (silver/gold/platinum…) and re-tier them to KAZO's actual tiers based on lifetime purchase. This awards NO bonus points.</p>
+        <SectionHeading eyebrow="ISSUE E" title={`Re-tier legacy customers onto ${BRAND.name} tiers`} accent="teal" />
+        <p className="text-sm text-neutral-600 mt-2 leading-relaxed">Identify customers still on legacy tiers (silver/gold/platinum…) and re-tier them to {BRAND.name}'s actual tiers based on lifetime purchase. This awards NO bonus points.</p>
         <div className="mt-4"><RetierSection /></div>
       </div>
     </div>

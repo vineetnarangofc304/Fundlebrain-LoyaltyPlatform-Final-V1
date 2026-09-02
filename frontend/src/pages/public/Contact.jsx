@@ -1,4 +1,5 @@
 import { Mail, Phone, MapPin } from "lucide-react";
+import { BRAND } from "@/brand.config";
 
 export default function Contact() {
   return (
@@ -9,17 +10,17 @@ export default function Contact() {
         <div className="bg-white border border-black/10 p-8">
           <Mail className="w-5 h-5 kazo-text-burgundy mb-4" />
           <h3 className="font-display text-xl mb-2">Email</h3>
-          <a href="mailto:rewards@kazo.com" className="text-sm text-neutral-700 hover:kazo-text-burgundy">rewards@kazo.com</a>
+          <a href={`mailto:rewards@${BRAND.domain}`} className="text-sm text-neutral-700 hover:kazo-text-burgundy">rewards@{BRAND.domain}</a>
         </div>
         <div className="bg-white border border-black/10 p-8">
           <Phone className="w-5 h-5 kazo-text-burgundy mb-4" />
           <h3 className="font-display text-xl mb-2">Phone</h3>
-          <a href="tel:+911800123456" className="text-sm text-neutral-700">1800 123 456 · Mon–Sat, 10AM–8PM</a>
+          <a href={`tel:${BRAND.supportPhoneTel}`} className="text-sm text-neutral-700">{BRAND.supportPhone}</a>
         </div>
         <div className="bg-white border border-black/10 p-8">
           <MapPin className="w-5 h-5 kazo-text-burgundy mb-4" />
           <h3 className="font-display text-xl mb-2">Head Office</h3>
-          <p className="text-sm text-neutral-700">KAZO Fashion Pvt. Ltd.<br />New Delhi, India</p>
+          <p className="text-sm text-neutral-700">{BRAND.legalEntity}<br />{BRAND.headOffice}</p>
         </div>
       </div>
     </div>

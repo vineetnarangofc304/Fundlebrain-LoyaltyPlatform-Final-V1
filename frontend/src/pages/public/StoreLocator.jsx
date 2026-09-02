@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
 import { MapPin, Phone } from "lucide-react";
+import { BRAND } from "@/brand.config";
 
 export default function StoreLocator() {
   const [stores, setStores] = useState([]);
@@ -23,7 +24,7 @@ export default function StoreLocator() {
   return (
     <div className="max-w-[1300px] mx-auto px-6 lg:px-12 py-20" data-testid="page-store-locator">
       <div className="text-[11px] uppercase tracking-[0.3em] kazo-text-burgundy mb-4">STORE LOCATOR</div>
-      <h1 className="editorial-headline text-5xl lg:text-7xl mb-12">Find your<br /><em className="font-light">nearest KAZO.</em></h1>
+      <h1 className="editorial-headline text-5xl lg:text-7xl mb-12">Find your<br /><em className="font-light">nearest {BRAND.name}.</em></h1>
 
       <div className="flex flex-col md:flex-row gap-3 mb-8 max-w-2xl">
         <select className="k-input" value={filter.city} onChange={(e) => setFilter({ ...filter, city: e.target.value })} data-testid="store-filter-city">

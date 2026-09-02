@@ -1,3 +1,4 @@
+import { BRAND } from "@/brand.config";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
@@ -64,7 +65,7 @@ export default function CustomerDashboard() {
     <div data-testid="customer-dashboard">
       <PageHeader
         title="Customer Analytics"
-        subtitle="WHO IS KAZO · LIVE"
+        subtitle={`WHO IS ${BRAND.name} · LIVE`}
         actions={
           <>
             <DateRangePicker value={range} onChange={setRange} testid="cust-date-range" />
