@@ -165,7 +165,11 @@ export default function LoadedFilesSection() {
           {recompute && (
             <p className="text-[11px] text-neutral-500 mt-1" data-testid="recompute-status">
               {recompute.status === "running"
-                ? `${recompute.kind === "visit_rebuild" ? "Rebuilding visit data" : "Recomputing"}… ${Number(recompute.processed || 0).toLocaleString("en-IN")} customers updated`
+                ? (recompute.kind === "visit_rebuild"
+                    ? (recompute.total
+                        ? `Rebuilding visit data… ${Number(recompute.processed || 0).toLocaleString("en-IN")}/${Number(recompute.total).toLocaleString("en-IN")} customers`
+                        : `Rebuilding visit data… scanning bills (${Number(recompute.scanned || 0).toLocaleString("en-IN")} customers found)`)
+                    : `Recomputing… ${Number(recompute.processed || 0).toLocaleString("en-IN")} customers updated`)
                 : `Last ${recompute.kind === "visit_rebuild" ? "visit rebuild" : "recompute"}: ${recompute.status} · ${Number(recompute.processed || 0).toLocaleString("en-IN")} customers${recompute.cutoff ? ` · cutoff ${recompute.cutoff}` : ""}`}
             </p>
           )}

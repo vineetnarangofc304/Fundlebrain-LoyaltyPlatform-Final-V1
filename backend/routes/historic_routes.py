@@ -2933,55 +2933,54 @@ async def recompute_status(user: dict = Depends(get_current_user)):
 
 
 async def _run_visit_rebuild(job_id: str) -> None:
-    """Rebuild first_purchase_at, last_visit_at, visit_count, days_since_last_visit,
-    lifetime_spend and tier for EVERY loyalty customer directly from their bill history
-    (incl. live-POS bills). Repairs stale/blank Last Visit without the per-job scoping
-    or the time cap of the ingest post-pass. points_balance is left untouched."""
+    """Repair first_purchase_at, last_visit_at and days_since_last_visit for EVERY loyalty
+    customer straight from their bills (incl. live-POS bills). Lean by design: only $min/$max
+    on bill_date (NO in-memory $sort / $addToSet), the group result is drained to memory and
+    the aggregation cursor is CLOSED before the write phase, so a long write run can never time
+    the cursor out (the earlier version stalled here). points_balance, visit_count, spend and
+    tier are left untouched (spend/tier are handled by 'Recompute points & tiers')."""
     from pymongo import UpdateOne
     processed = 0
+
+    async def _hb(extra: dict) -> None:
+        await recompute_jobs_col.update_one(
+            {"id": job_id},
+            {"$set": {**extra, "heartbeat": datetime.now(timezone.utc).isoformat()}})
+
     try:
         now_dt = datetime.now(timezone.utc)
         pipe = [
             {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
-            {"$sort": {"bill_date": 1}},
             {"$group": {
                 "_id": "$customer_mobile",
-                "first_purchase_at": {"$first": "$bill_date"},
-                "first_store_id": {"$first": "$store_id"},
-                "last_visit_at": {"$last": "$bill_date"},
-                "unique_bills": {"$addToSet": {"store": "$store_id",
-                                                "bill": "$bill_number",
-                                                "date": "$bill_date"}},
-                "total_spend": {"$sum": PAID_EXPR},
+                "first_purchase_at": {"$min": "$bill_date"},
+                "last_visit_at": {"$max": "$bill_date"},
             }},
         ]
-        ops: List[Any] = []
+        # 1) Drain the (scalar, light) group result into memory, then the cursor closes.
+        groups: List[Any] = []
         async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
-            lv = r.get("last_visit_at")
-            spend = round(float(r.get("total_spend") or 0), 2)
-            ops.append(UpdateOne({"mobile": r["_id"]}, {"$set": {
-                "first_purchase_at": r.get("first_purchase_at"),
+            groups.append((r["_id"], r.get("first_purchase_at"), r.get("last_visit_at")))
+            if len(groups) % 50000 == 0:
+                await _hb({"scanned": len(groups)})
+        total = len(groups)
+        await _hb({"total": total, "scanned": total})
+
+        # 2) Write phase — cursor already closed; bulk-update in large batches (mobile is indexed).
+        for i in range(0, total, 5000):
+            ops = [UpdateOne({"mobile": m}, {"$set": {
+                "first_purchase_at": fp,
                 "last_visit_at": lv,
                 "days_since_last_visit": _days_since(lv, now_dt),
-                "first_purchase_store_id": r.get("first_store_id"),
-                "visit_count": len(r.get("unique_bills") or []),
-                "lifetime_spend": spend,
-                "tier": _derive_tier(spend),
-            }}))
-            if len(ops) >= 1000:
+            }}) for (m, fp, lv) in groups[i:i + 5000]]
+            if ops:
                 await customers_col.bulk_write(ops, ordered=False)
                 processed += len(ops)
-                ops.clear()
-                await recompute_jobs_col.update_one({"id": job_id},
-                    {"$set": {"processed": processed,
-                              "heartbeat": datetime.now(timezone.utc).isoformat()}})
-        if ops:
-            await customers_col.bulk_write(ops, ordered=False)
-            processed += len(ops)
+                await _hb({"processed": processed})
         await recompute_jobs_col.update_one({"id": job_id}, {"$set": {
-            "status": "completed", "processed": processed,
+            "status": "completed", "processed": processed, "total": total,
             "completed_at": datetime.now(timezone.utc).isoformat()}})
-        logger.info(f"Visit rebuild {job_id} complete — {processed} customers")
+        logger.info(f"Visit rebuild {job_id} complete — {processed}/{total} customers")
     except Exception as e:  # noqa: BLE001
         await recompute_jobs_col.update_one({"id": job_id}, {"$set": {
             "status": "failed", "error": str(e)[:300], "processed": processed,
@@ -2991,23 +2990,39 @@ async def _run_visit_rebuild(job_id: str) -> None:
 
 @router.post("/rebuild-visit-aggregates")
 async def rebuild_visit_aggregates(user: dict = Depends(require_roles("super_admin", "brand_admin"))):
-    """Repair First/Last Visit, Total Visits and Days-Since for ALL customers by rebuilding
-    them from the actual bill history (incl. live-POS bills). Runs in the background; poll
-    /recompute-status. Preserves points_balance and manual adjustments."""
-    running = await recompute_jobs_col.find_one({"status": {"$in": ["queued", "running"]}}, {"_id": 0, "id": 1})
+    """Repair First/Last Visit and Days-Since for ALL customers by rebuilding them from the
+    actual bill history (incl. live-POS bills). Runs in the background; poll /recompute-status.
+    Preserves points_balance, visit_count, spend and tier. A previously-stalled job (e.g. one
+    killed by a redeploy — no heartbeat for >4 min) is auto-superseded so a fresh run can start."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    running = await recompute_jobs_col.find_one(
+        {"status": {"$in": ["queued", "running"]}}, sort=[("started_at", -1)])
     if running:
-        return {"queued": False, "job_id": running["id"], "message": "A recompute/rebuild is already running."}
+        hb = running.get("heartbeat") or running.get("started_at")
+        stale = True
+        try:
+            hb_dt = datetime.fromisoformat(str(hb))
+            if hb_dt.tzinfo is None:
+                hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+            stale = (datetime.now(timezone.utc) - hb_dt).total_seconds() > 240
+        except Exception:
+            stale = True
+        if not stale:
+            return {"queued": False, "job_id": running["id"],
+                    "message": "A recompute/rebuild is already running — please wait for it to finish."}
+        await recompute_jobs_col.update_one({"id": running["id"]}, {"$set": {
+            "status": "failed", "error": "superseded (stalled — no heartbeat)", "completed_at": now_iso}})
     jid = uuid.uuid4().hex
     await recompute_jobs_col.insert_one({
-        "id": jid, "status": "running", "kind": "visit_rebuild", "processed": 0,
-        "started_by": user.get("email"), "started_at": datetime.now(timezone.utc).isoformat()})
+        "id": jid, "status": "running", "kind": "visit_rebuild", "processed": 0, "total": 0,
+        "started_by": user.get("email"), "started_at": now_iso, "heartbeat": now_iso})
     await audit_logs_col.insert_one({
         "id": uuid.uuid4().hex, "action": "rebuild_visit_aggregates", "entity": "customers",
         "entity_id": "all", "user_email": user.get("email"), "user_name": user.get("name"),
-        "metadata": {}, "timestamp": datetime.now(timezone.utc).isoformat()})
+        "metadata": {}, "timestamp": now_iso})
     asyncio.create_task(_run_visit_rebuild(jid))
     return {"queued": True, "job_id": jid,
-            "message": "Rebuilding First/Last Visit, Total Visits and Days-Since for all customers from their bills."}
+            "message": "Rebuilding First/Last Visit and Days-Since for all customers from their bills."}
 
 
 # ============================================================
