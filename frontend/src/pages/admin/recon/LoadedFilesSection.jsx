@@ -105,6 +105,18 @@ export default function LoadedFilesSection() {
     }
   };
 
+  const runVisitRebuild = async () => {
+    if (!window.confirm("Rebuild First/Last Visit, Total Visits and Days-Since for EVERY customer from their bills (incl. live-POS bills)?\n\nThis repairs missing/stale Last Visit dates. Point balances and manual adjustments are preserved.")) return;
+    try {
+      const r = await api.post("/historic-data/rebuild-visit-aggregates");
+      if (r.data.queued === false) toast.info(r.data.message);
+      else toast.success(r.data.message);
+      loadRecompute();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to start rebuild");
+    }
+  };
+
   const csvRows = (j) => Number(j.total_rows || j.row_count_estimated || 0);
   const accounted = (j) => Number(j.inserted || 0) + Number(j.updated || 0) + Number(j.skipped || 0);
   const diffOf = (j) => csvRows(j) - accounted(j);
@@ -140,15 +152,21 @@ export default function LoadedFilesSection() {
           <p className="text-[11px] text-neutral-400 mt-1">Only bills on/after this date earn points.</p>
         </div>
         <div className="ml-auto text-right">
-          <button onClick={runRecompute} disabled={recompute?.status === "running"} className="k-btn kazo-bg-burgundy text-white k-btn-sm" data-testid="recompute-btn">
-            {recompute?.status === "running" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCw className="w-3.5 h-3.5" />}
-            Recompute points &amp; tiers (all)
-          </button>
+          <div className="flex items-center justify-end gap-2">
+            <button onClick={runVisitRebuild} disabled={recompute?.status === "running"} className="k-btn k-btn-outline k-btn-sm" data-testid="rebuild-visit-btn">
+              {recompute?.status === "running" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCw className="w-3.5 h-3.5" />}
+              Rebuild visit data (all)
+            </button>
+            <button onClick={runRecompute} disabled={recompute?.status === "running"} className="k-btn kazo-bg-burgundy text-white k-btn-sm" data-testid="recompute-btn">
+              {recompute?.status === "running" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCw className="w-3.5 h-3.5" />}
+              Recompute points &amp; tiers (all)
+            </button>
+          </div>
           {recompute && (
             <p className="text-[11px] text-neutral-500 mt-1" data-testid="recompute-status">
               {recompute.status === "running"
-                ? `Recomputing… ${Number(recompute.processed || 0).toLocaleString("en-IN")} customers updated`
-                : `Last recompute: ${recompute.status} · ${Number(recompute.processed || 0).toLocaleString("en-IN")} customers · cutoff ${recompute.cutoff || "—"}`}
+                ? `${recompute.kind === "visit_rebuild" ? "Rebuilding visit data" : "Recomputing"}… ${Number(recompute.processed || 0).toLocaleString("en-IN")} customers updated`
+                : `Last ${recompute.kind === "visit_rebuild" ? "visit rebuild" : "recompute"}: ${recompute.status} · ${Number(recompute.processed || 0).toLocaleString("en-IN")} customers${recompute.cutoff ? ` · cutoff ${recompute.cutoff}` : ""}`}
             </p>
           )}
         </div>

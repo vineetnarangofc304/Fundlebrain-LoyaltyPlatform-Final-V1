@@ -1,17 +1,18 @@
 /* Shared report-export client. Every export button funnels through requestExport():
    small results (server decides via known_total) download instantly; large ones are
    generated in the background and surfaced in the Downloads Center. */
-import api from "./api";
+import api, { API_URL } from "./api";
 import { toast } from "sonner";
 
-export async function downloadExport(exportId, filename) {
-  const res = await api.get(`/exports/${exportId}/download`, { responseType: "blob" });
-  const url = window.URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+export function downloadExport(exportId, filename) {
+  // Native, streamed browser download — the JWT rides on the httpOnly kazo_token
+  // cookie (same origin), so we never buffer a huge file through axios/JS memory.
   const a = document.createElement("a");
-  a.href = url;
+  a.href = `${API_URL}/exports/${exportId}/download`;
   a.download = filename || `${exportId}.csv`;
+  document.body.appendChild(a);
   a.click();
-  window.URL.revokeObjectURL(url);
+  a.remove();
 }
 
 export async function requestExport({ report_type, params = {}, label, known_total = null, filename }) {

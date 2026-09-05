@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 import httpx
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from auth import get_current_user
@@ -234,10 +234,30 @@ async def download_export(export_id: str, user: dict = Depends(get_current_user)
         raise HTTPException(404, "Export not found")
     if doc.get("status") != "ready" or not doc.get("storage_path"):
         raise HTTPException(409, "Export is not ready")
-    data, ctype = await asyncio.to_thread(_get_object, doc["storage_path"])
     fname = doc.get("filename") or f"{export_id}.csv"
-    return Response(content=data, media_type="text/csv",
-                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    path = doc["storage_path"]
+
+    # Stream the object straight from storage to the client so a very large report
+    # (hundreds of MB) never has to be buffered whole in the pod's memory.
+    def _stream():
+        global _storage_key
+        url = f"{STORAGE_URL}/objects/{path}"
+        r = requests.get(url, headers={"X-Storage-Key": _init_storage()}, stream=True, timeout=600)
+        if r.status_code == 403:
+            r.close()
+            _storage_key = None
+            r = requests.get(url, headers={"X-Storage-Key": _init_storage()}, stream=True, timeout=600)
+        r.raise_for_status()
+        try:
+            for chunk in r.iter_content(chunk_size=262144):
+                if chunk:
+                    yield chunk
+        finally:
+            r.close()
+
+    return StreamingResponse(
+        _stream(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @router.delete("/{export_id}")

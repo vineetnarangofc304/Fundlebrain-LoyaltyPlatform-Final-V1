@@ -205,6 +205,21 @@ async def _refresh_tier_rules_cache() -> None:
         _TIER_RULES_CACHE = []
 
 
+def _days_since(iso_val: Any, now_dt: Optional[datetime] = None) -> Optional[int]:
+    """Whole days between a stored ISO date/time and now (UTC). Returns None for a blank
+    or unparseable value. Used to keep 'Days Since Last Visit' in step with last_visit_at."""
+    if not iso_val:
+        return None
+    now_dt = now_dt or datetime.now(timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(iso_val).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0, (now_dt - dt).days)
+    except Exception:
+        return None
+
+
 def _derive_tier(lifetime_spend: float) -> str:
     """Assign a tier STRICTLY from the CONFIGURED Tier Rules (the tiers defined in the
     frontend Loyalty Logic editor — cumulative lifetime-spend ranges). The customer sits in
@@ -1158,7 +1173,7 @@ async def _run_ingest_job(job_id: str, dataset: str, raw_text: Optional[str] = N
                         }},
                     ]
                     cust_ops = []
-                    async for r in transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000):
+                    async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
                         spend_val = round(float(r.get("spend") or 0), 2)
                         cust_ops.append(UpdateOne(
                             {"mobile": r["_id"]},
@@ -1443,10 +1458,11 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
     # Stream the aggregate (allowDiskUse so a huge $group/$addToSet spills to disk
     # instead of hitting the 100MB in-memory limit) and flush in batches so we never
     # hold all groups in memory AND keep the heartbeat alive on multi-lakh files.
-    cursor = transactions_col.aggregate(agg_pipe, allowDiskUse=True, maxTimeMS=25000)
+    cursor = transactions_col.aggregate(agg_pipe, allowDiskUse=True)
     ops: List[Any] = []
     home_ops: List[Any] = []
     now_iso = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
     n = 0
 
     async def _flush_recompute():
@@ -1468,6 +1484,8 @@ async def _recompute_customer_aggregates(job_id: str) -> int:
         update_set: Dict[str, Any] = {
             "first_purchase_at": r["first_purchase_at"],
             "last_visit_at": r["last_visit_at"],
+            # Keep 'Days Since Last Visit' consistent with the recomputed last visit.
+            "days_since_last_visit": _days_since(r["last_visit_at"], now_dt),
             # Keep the bill-derived store under its own name; home_store_id is set
             # separately below so it never overrides the CRM registration store.
             "first_purchase_store_id": r["first_store_id"],
@@ -2858,7 +2876,7 @@ async def _run_recompute(job_id: str, cutoff: str) -> None:
             }},
         ]
         ops: List[Any] = []
-        async for r in transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000):
+        async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
             spend = round(float(r.get("spend") or 0), 2)
             earn = round(float(r.get("earn") or 0), 2)
             redeem = round(float(r.get("redeem") or 0), 2)
@@ -2912,6 +2930,84 @@ async def recompute_points_tiers(user: dict = Depends(require_roles("super_admin
 async def recompute_status(user: dict = Depends(get_current_user)):
     row = await recompute_jobs_col.find_one({}, {"_id": 0}, sort=[("started_at", -1)])
     return row or {"status": "none"}
+
+
+async def _run_visit_rebuild(job_id: str) -> None:
+    """Rebuild first_purchase_at, last_visit_at, visit_count, days_since_last_visit,
+    lifetime_spend and tier for EVERY loyalty customer directly from their bill history
+    (incl. live-POS bills). Repairs stale/blank Last Visit without the per-job scoping
+    or the time cap of the ingest post-pass. points_balance is left untouched."""
+    from pymongo import UpdateOne
+    processed = 0
+    try:
+        now_dt = datetime.now(timezone.utc)
+        pipe = [
+            {"$match": {"customer_mobile": {"$nin": [None, ""]}}},
+            {"$sort": {"bill_date": 1}},
+            {"$group": {
+                "_id": "$customer_mobile",
+                "first_purchase_at": {"$first": "$bill_date"},
+                "first_store_id": {"$first": "$store_id"},
+                "last_visit_at": {"$last": "$bill_date"},
+                "unique_bills": {"$addToSet": {"store": "$store_id",
+                                                "bill": "$bill_number",
+                                                "date": "$bill_date"}},
+                "total_spend": {"$sum": PAID_EXPR},
+            }},
+        ]
+        ops: List[Any] = []
+        async for r in transactions_col.aggregate(pipe, allowDiskUse=True):
+            lv = r.get("last_visit_at")
+            spend = round(float(r.get("total_spend") or 0), 2)
+            ops.append(UpdateOne({"mobile": r["_id"]}, {"$set": {
+                "first_purchase_at": r.get("first_purchase_at"),
+                "last_visit_at": lv,
+                "days_since_last_visit": _days_since(lv, now_dt),
+                "first_purchase_store_id": r.get("first_store_id"),
+                "visit_count": len(r.get("unique_bills") or []),
+                "lifetime_spend": spend,
+                "tier": _derive_tier(spend),
+            }}))
+            if len(ops) >= 1000:
+                await customers_col.bulk_write(ops, ordered=False)
+                processed += len(ops)
+                ops.clear()
+                await recompute_jobs_col.update_one({"id": job_id},
+                    {"$set": {"processed": processed,
+                              "heartbeat": datetime.now(timezone.utc).isoformat()}})
+        if ops:
+            await customers_col.bulk_write(ops, ordered=False)
+            processed += len(ops)
+        await recompute_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "completed", "processed": processed,
+            "completed_at": datetime.now(timezone.utc).isoformat()}})
+        logger.info(f"Visit rebuild {job_id} complete — {processed} customers")
+    except Exception as e:  # noqa: BLE001
+        await recompute_jobs_col.update_one({"id": job_id}, {"$set": {
+            "status": "failed", "error": str(e)[:300], "processed": processed,
+            "completed_at": datetime.now(timezone.utc).isoformat()}})
+        logger.exception(f"Visit rebuild {job_id} failed")
+
+
+@router.post("/rebuild-visit-aggregates")
+async def rebuild_visit_aggregates(user: dict = Depends(require_roles("super_admin", "brand_admin"))):
+    """Repair First/Last Visit, Total Visits and Days-Since for ALL customers by rebuilding
+    them from the actual bill history (incl. live-POS bills). Runs in the background; poll
+    /recompute-status. Preserves points_balance and manual adjustments."""
+    running = await recompute_jobs_col.find_one({"status": {"$in": ["queued", "running"]}}, {"_id": 0, "id": 1})
+    if running:
+        return {"queued": False, "job_id": running["id"], "message": "A recompute/rebuild is already running."}
+    jid = uuid.uuid4().hex
+    await recompute_jobs_col.insert_one({
+        "id": jid, "status": "running", "kind": "visit_rebuild", "processed": 0,
+        "started_by": user.get("email"), "started_at": datetime.now(timezone.utc).isoformat()})
+    await audit_logs_col.insert_one({
+        "id": uuid.uuid4().hex, "action": "rebuild_visit_aggregates", "entity": "customers",
+        "entity_id": "all", "user_email": user.get("email"), "user_name": user.get("name"),
+        "metadata": {}, "timestamp": datetime.now(timezone.utc).isoformat()})
+    asyncio.create_task(_run_visit_rebuild(jid))
+    return {"queued": True, "job_id": jid,
+            "message": "Rebuilding First/Last Visit, Total Visits and Days-Since for all customers from their bills."}
 
 
 # ============================================================
