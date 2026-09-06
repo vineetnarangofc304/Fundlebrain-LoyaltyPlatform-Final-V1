@@ -1524,7 +1524,7 @@ async def _apply_bill_credit(txn: Dict[str, Any]) -> Dict[str, Any]:
                   "commit_status": "committed", "committed_at": _now_iso()}},
     )
     if claimed is not None and cust_id:
-        cust_set = {"last_visit_at": _now_iso(), "tier": cr.get("new_tier")}
+        cust_set = {"last_visit_at": _now_iso(), "days_since_last_visit": 0, "tier": cr.get("new_tier")}
         if cr.get("welcome_flag"):
             cust_set["welcome_bonus_given"] = True
         # Denormalise the visit account (store CODE · NAME) so the CRM Customer Report

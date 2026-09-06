@@ -372,6 +372,30 @@ CRM_SORT_FIELDS = {
 }
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _date_days_ago(n: int) -> str:
+    """UTC calendar date (YYYY-MM-DD) n days ago — used as an ISO string cutoff on last_visit_at."""
+    return (_now_utc() - timedelta(days=n)).strftime("%Y-%m-%d")
+
+
+def _days_since_iso(v: Any, now_dt: Optional[datetime] = None) -> Optional[int]:
+    """Live 'days since last visit' derived from the stored last_visit_at ISO value. There is NO
+    stored days field, so this is always current (self-updates every day, no batch job). Returns
+    None when the customer has no recorded visit."""
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0, ((now_dt or _now_utc()) - dt).days)
+    except Exception:
+        return None
+
+
 def _crm_filter(q, city, state, tier, card_validity, recency,
                 min_visits, max_visits, min_points, max_points, min_billing,
                 store_id=None) -> Dict[str, Any]:
@@ -392,12 +416,17 @@ def _crm_filter(q, city, state, tier, card_validity, recency,
         flt["tier"] = tier
     if card_validity:
         flt["card_validity"] = card_validity
-    if recency == "active":
-        flt["days_since_last_visit"] = {"$lte": 182}
-    elif recency == "dormant":
-        flt["days_since_last_visit"] = {"$gt": 182, "$lte": 365}
-    elif recency == "lapsed":
-        flt["days_since_last_visit"] = {"$gt": 365}
+    if recency in ("active", "dormant", "lapsed"):
+        # Recency is derived LIVE from last_visit_at (no stored days field) so it is always
+        # current: active ≤6M, dormant 6–12M, lapsed >12M. Customers with no visit are excluded.
+        c182 = _date_days_ago(182)
+        c365 = _date_days_ago(365)
+        if recency == "active":
+            flt["last_visit_at"] = {"$gte": c182}
+        elif recency == "dormant":
+            flt["last_visit_at"] = {"$gte": c365, "$lt": c182}
+        else:  # lapsed
+            flt["last_visit_at"] = {"$gt": "", "$lt": c365}
     v_range: Dict[str, Any] = {}
     if min_visits is not None:
         v_range["$gte"] = min_visits
@@ -462,14 +491,20 @@ async def crm_customers(
                       store_id=store_id)
     sf = sort_by if sort_by in CRM_SORT_FIELDS else "lifetime_spend"
     direction = pymongo.ASCENDING if sort_dir == "asc" else pymongo.DESCENDING
+    if sort_by == "days_since_last_visit":
+        # No stored days field — sort by last_visit_at inverted (fewer days = more recent visit).
+        sf = "last_visit_at"
+        direction = pymongo.DESCENDING if sort_dir == "asc" else pymongo.ASCENDING
 
     total = await customers_col.count_documents(flt)
     cur = (customers_col.find(flt, _CRM_PROJECT)
            .sort(sf, direction).skip(max(0, skip)).limit(limit))
     rows = await cur.to_list(limit)
     smap = await _store_label_map([r.get("home_store_id") for r in rows])
+    now_dt = _now_utc()
     for r in rows:
         r["home_store"] = smap.get(r.get("home_store_id"), "")
+        r["days_since_last_visit"] = _days_since_iso(r.get("last_visit_at"), now_dt)
     return {"total": total, "rows": rows, "skip": skip, "limit": limit,
             "has_more": skip + len(rows) < total,
             "columns": [{"key": k, "label": l} for k, l in CRM_COLUMNS]}
@@ -498,6 +533,9 @@ async def crm_customers_export(
                       store_id=store_id)
     sf = sort_by if sort_by in CRM_SORT_FIELDS else "lifetime_spend"
     direction = pymongo.ASCENDING if sort_dir == "asc" else pymongo.DESCENDING
+    if sort_by == "days_since_last_visit":
+        sf = "last_visit_at"
+        direction = pymongo.DESCENDING if sort_dir == "asc" else pymongo.ASCENDING
 
     async def gen():
         from database import stores_col
@@ -511,11 +549,16 @@ async def crm_customers_export(
         w.writerow([l for _, l in CRM_COLUMNS])
         yield buf.getvalue(); buf.seek(0); buf.truncate(0)
         sent = 0
+        now_dt = _now_utc()
         with pymongo.timeout(900):
             cur = customers_col.find(flt, _CRM_FIELDS).sort(sf, direction).allow_disk_use(True)
             async for c in cur:
-                w.writerow([smap.get(c.get("home_store_id"), "") if k == "home_store"
-                            else c.get(k, "") for k, _ in CRM_COLUMNS])
+                dslv = _days_since_iso(c.get("last_visit_at"), now_dt)
+                w.writerow([
+                    smap.get(c.get("home_store_id"), "") if k == "home_store"
+                    else ((dslv if dslv is not None else "") if k == "days_since_last_visit"
+                          else c.get(k, ""))
+                    for k, _ in CRM_COLUMNS])
                 yield buf.getvalue(); buf.seek(0); buf.truncate(0)
                 sent += 1
                 if sent >= EXPORT_MAX_ROWS:
@@ -615,7 +658,8 @@ async def kpi_trend_export(
 
 
 # ── CRM summary (charts: tier / recency / top cities / liability) ─────────────
-_REC_LABELS = {0: "Active (0-6M)", 183: "Dormant (6-12M)", 366: "Lapsed (12M+)", "unknown": "Unknown"}
+_REC_LABELS = {"active": "Active (0-6M)", "dormant": "Dormant (6-12M)",
+               "lapsed": "Lapsed (12M+)", "unknown": "Unknown"}
 _crm_refreshing: set = set()
 
 
@@ -628,12 +672,16 @@ def _crm_summary_pipe(flt: Dict[str, Any]) -> List[Dict[str, Any]]:
                             "points": {"$sum": "$points_balance"}, "spend": {"$sum": "$lifetime_spend"}}},
                 {"$sort": {"count": -1}},
             ],
+            # Recency derived LIVE from last_visit_at (no stored days field, always current).
             "by_recency": [
-                {"$bucket": {
-                    "groupBy": {"$ifNull": ["$days_since_last_visit", 10 ** 9]},
-                    "boundaries": [0, 183, 366, 10 ** 9],
-                    "default": "unknown",
-                    "output": {"count": {"$sum": 1}},
+                {"$group": {
+                    "_id": {"$let": {"vars": {"lv": {"$ifNull": ["$last_visit_at", ""]}}, "in": {"$switch": {
+                        "branches": [
+                            {"case": {"$eq": ["$$lv", ""]}, "then": "unknown"},
+                            {"case": {"$gte": ["$$lv", _date_days_ago(182)]}, "then": "active"},
+                            {"case": {"$gte": ["$$lv", _date_days_ago(365)]}, "then": "dormant"},
+                        ], "default": "lapsed"}}}},
+                    "count": {"$sum": 1},
                 }},
             ],
             "top_cities": [
