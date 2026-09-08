@@ -114,9 +114,14 @@ async def kpis(
         start, end = _date_range(period)
     prev_start = start - (end - start)
 
-    # R5: loyalty data only — bills must have customer_mobile attached
-    txn_filter = loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()}})
-    prev_filter = loyalty_match({"bill_date": {"$gte": prev_start.isoformat(), "$lt": start.isoformat()}})
+    # R5: loyalty data only — bills must have customer_mobile attached.
+    # Exclude RETURN bills from the sales sum so "Loyalty Sales" here matches the Store KPI
+    # report's Total Loyalty Sales (New + Repeat, fresh bills only) — returns are never counted
+    # twice (KAZO doc Point 5: consistent return/cancellation logic everywhere).
+    txn_filter = loyalty_match({"bill_date": {"$gte": start.isoformat(), "$lte": end.isoformat()},
+                                "is_return": {"$ne": True}})
+    prev_filter = loyalty_match({"bill_date": {"$gte": prev_start.isoformat(), "$lt": start.isoformat()},
+                                 "is_return": {"$ne": True}})
     if store_id:
         txn_filter["store_id"] = store_id
         prev_filter["store_id"] = store_id

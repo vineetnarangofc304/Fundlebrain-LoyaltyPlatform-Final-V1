@@ -148,6 +148,10 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
     overall_sales = round(g.get("overall_sales", 0) or 0, 2)
     return_value = round(g.get("return_value", 0) or 0, 2)
     unmapped_value = round(overall_sales - return_value - new_value - repeat_value, 2)
+    # Total Loyalty Sales — the sacrosanct identity the client checks (KAZO doc Point 5):
+    #     Total Loyalty Sales == New Customer Value + Repeat Customer Value
+    # and therefore   Overall Sales == Loyalty Sales + Walk-in (Unmapped) + Returns.
+    loyalty_sales = round(new_value + repeat_value, 2)
 
     # ── Customer reconciliation (exact partition): New + Existing == Overall ──
     # `new_customers` (first-ever bill lands in range) is a subset of `customers`; any
@@ -179,6 +183,7 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
         "repeat_txn": repeat_txn,
         "repeat_value": repeat_value,
         "repeat_atv": atv(repeat_value, repeat_txn),
+        "loyalty_sales": loyalty_sales,
         "mapped_txn": mapped_txn,
         "unmapped_txn": unmapped_txn,
         "unmapped_value": unmapped_value,
@@ -229,7 +234,7 @@ STORE_SORT_FIELDS = {
     "overall_sales", "total_discount", "fresh_bills", "fresh_value",
     "return_bills", "return_value", "new_txn", "repeat_txn", "mapped_txn",
     "unmapped_txn", "unmapped_value", "overall_customers", "new_customer_count",
-    "existing_customers", "overall_atv", "new_atv", "repeat_atv",
+    "existing_customers", "overall_atv", "new_atv", "repeat_atv", "loyalty_sales",
 }
 
 STORE_COLUMNS: List[Tuple[str, str]] = [
@@ -241,6 +246,7 @@ STORE_COLUMNS: List[Tuple[str, str]] = [
     ("return_bills", "Return Bills"), ("return_value", "Return Bill Value"),
     ("new_txn", "New Cust Txns"), ("new_value", "New Cust Value"), ("new_atv", "New ATV"),
     ("repeat_txn", "Repeat Cust Txns"), ("repeat_value", "Repeat Cust Value"), ("repeat_atv", "Repeat ATV"),
+    ("loyalty_sales", "Total Loyalty Sales"),
     ("mapped_txn", "Mapped Txns"), ("unmapped_txn", "Unmapped Txns"), ("unmapped_value", "Unmapped Value"),
     ("overall_customers", "Overall Customers"), ("new_customer_count", "New Customers"),
     ("existing_customers", "Existing Customers"), ("overall_atv", "Overall ATV"),
@@ -304,13 +310,14 @@ async def store_kpi(
         "overall_sales", "total_discount", "net_before_tax", "total_tax",
         "fresh_bills", "fresh_value", "return_bills", "return_value",
         "new_txn", "repeat_txn", "mapped_txn", "unmapped_txn",
-        "new_value", "repeat_value", "unmapped_value",
+        "new_value", "repeat_value", "unmapped_value", "loyalty_sales",
         "overall_customers", "new_customer_count", "existing_customers")}
     for r in rows:
         for k in totals:
             totals[k] += r.get(k, 0) or 0
     for k in ("overall_sales", "total_discount", "net_before_tax", "total_tax",
-              "fresh_value", "return_value", "new_value", "repeat_value", "unmapped_value"):
+              "fresh_value", "return_value", "new_value", "repeat_value", "unmapped_value",
+              "loyalty_sales"):
         totals[k] = round(totals[k], 2)
 
     return {"rows": rows, "totals": totals, "count": len(rows), "compare": compare,
@@ -466,6 +473,81 @@ async def _store_label_map(store_ids: List[Optional[str]]) -> Dict[str, str]:
     return out
 
 
+async def _store_id_by_code(codes: List[str]) -> Dict[str, Dict[str, Any]]:
+    """UPPER(code) → store doc {id, code, name} for resolving a Registered Account store code."""
+    from database import stores_col
+    codes = list({(c or "").strip().upper() for c in codes if c})
+    if not codes:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    async for s in stores_col.find({"code": {"$in": codes}}, {"_id": 0, "id": 1, "code": 1, "name": 1}):
+        out[(s.get("code") or "").strip().upper()] = s
+    return out
+
+
+_ACCT_STORE_RE = re.compile(r"^[A-Za-z]{1,4}\d{2,}$")
+
+
+def _store_code_from_account(account: Optional[str]) -> Optional[str]:
+    """Store code = the part before '@' in a Registered Account (e.g. 'K00078@KAZO.com' → 'K00078'),
+    only when it matches a store-code pattern. System accounts (crm.loyalty@, application@) → None."""
+    if not account or "@" not in account:
+        return None
+    local = account.split("@", 1)[0].strip().upper()
+    return local if _ACCT_STORE_RE.match(local) else None
+
+
+async def _fill_missing_visits(rows: List[Dict[str, Any]], smap: Dict[str, str]) -> None:
+    """Derive First Visit / Last Visit / Home Store from actual data for any row whose stored field
+    is blank — so the CRM report matches Customer 360 with NO backfill. Batched, keyed on the
+    indexed customer_mobile; rows already populated are skipped (no query).
+      First Visit = earliest valid (non-return) bill date.
+      Last Visit  = latest valid (non-return) bill date.
+      Home Store  = the API/CRM registration store (Registered Account) when present, otherwise the
+                    store of the customer's FIRST bill (R2). Never changes once set.
+    DOB / DOA are NEVER touched here — they come only from their own fields."""
+    need = [r for r in rows if not r.get("first_purchase_at") or not r.get("last_visit_at")
+            or not r.get("home_store_id")]
+    if not need:
+        return
+    mobiles = [r["mobile"] for r in need if r.get("mobile")]
+    derived: Dict[str, Any] = {}
+    if mobiles:
+        pipe = [
+            {"$match": {"customer_mobile": {"$in": mobiles}, "is_return": {"$ne": True}}},
+            {"$sort": {"customer_mobile": 1, "bill_date": 1}},
+            {"$group": {"_id": "$customer_mobile",
+                        "first": {"$first": "$bill_date"}, "last": {"$last": "$bill_date"},
+                        "first_store": {"$first": "$store_id"}}},
+        ]
+        async for g in transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=60000):
+            derived[g["_id"]] = g
+
+    # Registered Account store code → store id (preferred Home/Registered store when present)
+    reg_code_for = {r["mobile"]: _store_code_from_account(r.get("registered_account"))
+                    for r in need if not r.get("home_store_id") and r.get("mobile")}
+    code_map = await _store_id_by_code([c for c in reg_code_for.values() if c])
+
+    new_store_ids: set = set()
+    for r in need:
+        d = derived.get(r.get("mobile"))
+        if not r.get("first_purchase_at") and d and d.get("first"):
+            r["first_purchase_at"] = d["first"]
+        if not r.get("last_visit_at") and d and d.get("last"):
+            r["last_visit_at"] = d["last"]
+        if not r.get("home_store_id"):
+            code = reg_code_for.get(r.get("mobile"))
+            s = code_map.get(code) if code else None
+            if s:
+                r["home_store_id"] = s["id"]
+            elif d and d.get("first_store"):
+                r["home_store_id"] = d["first_store"]
+            if r.get("home_store_id") and r["home_store_id"] not in smap:
+                new_store_ids.add(r["home_store_id"])
+    if new_store_ids:
+        smap.update(await _store_label_map(list(new_store_ids)))
+
+
 @router.get("/crm-customers")
 async def crm_customers(
     q: Optional[str] = None,
@@ -501,6 +583,7 @@ async def crm_customers(
            .sort(sf, direction).skip(max(0, skip)).limit(limit))
     rows = await cur.to_list(limit)
     smap = await _store_label_map([r.get("home_store_id") for r in rows])
+    await _fill_missing_visits(rows, smap)
     now_dt = _now_utc()
     for r in rows:
         r["home_store"] = smap.get(r.get("home_store_id"), "")
@@ -550,19 +633,37 @@ async def crm_customers_export(
         yield buf.getvalue(); buf.seek(0); buf.truncate(0)
         sent = 0
         now_dt = _now_utc()
+
+        def _row(c):
+            dslv = _days_since_iso(c.get("last_visit_at"), now_dt)
+            return [
+                smap.get(c.get("home_store_id"), "") if k == "home_store"
+                else ((dslv if dslv is not None else "") if k == "days_since_last_visit"
+                      else c.get(k, ""))
+                for k, _ in CRM_COLUMNS]
+
         with pymongo.timeout(900):
             cur = customers_col.find(flt, _CRM_FIELDS).sort(sf, direction).allow_disk_use(True)
+            # Stream in batches so blank First/Last Visit + Home Store can be derived from bills
+            # (one batched aggregation per 1000 rows; batches with nothing missing cost nothing).
+            batch: List[Dict[str, Any]] = []
             async for c in cur:
-                dslv = _days_since_iso(c.get("last_visit_at"), now_dt)
-                w.writerow([
-                    smap.get(c.get("home_store_id"), "") if k == "home_store"
-                    else ((dslv if dslv is not None else "") if k == "days_since_last_visit"
-                          else c.get(k, ""))
-                    for k, _ in CRM_COLUMNS])
-                yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-                sent += 1
-                if sent >= EXPORT_MAX_ROWS:
-                    break
+                batch.append(c)
+                if len(batch) >= 1000:
+                    await _fill_missing_visits(batch, smap)
+                    for c2 in batch:
+                        w.writerow(_row(c2))
+                        yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+                        sent += 1
+                    batch = []
+                    if sent >= EXPORT_MAX_ROWS:
+                        break
+            if batch and sent < EXPORT_MAX_ROWS:
+                await _fill_missing_visits(batch, smap)
+                for c2 in batch:
+                    w.writerow(_row(c2))
+                    yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+                    sent += 1
 
     fname = f"crm_customers_{datetime.now(IST).strftime('%Y%m%d')}.csv"
     return StreamingResponse(gen(), media_type="text/csv",
@@ -807,4 +908,73 @@ async def filter_options(user=Depends(get_current_user)):
         "tiers": await safe_distinct(customers_col, "tier"),
         "card_validities": await safe_distinct(customers_col, "card_validity"),
         "states": await safe_distinct(customers_col, "state"),
+    }
+
+
+# ── Read-only diagnostics (KAZO doc Point 1 & 2) ──────────────────────────────
+@router.get("/_diagnostics")
+async def report_diagnostics(user=Depends(get_current_user)):
+    """Read-only probe explaining why historical data may be absent from reports (Point 1) and
+    quantifying the DOB/DOA-vs-visit-date data issue (Point 2). Safe on production (time-capped)."""
+    tx_by_year: List[Dict[str, Any]] = []
+    async for g in transactions_col.aggregate(
+        [{"$group": {"_id": {"$substrCP": [{"$ifNull": ["$bill_date", ""]}, 0, 4]},
+                     "bills": {"$sum": 1}, "paid": {"$sum": PAID_EXPR}}},
+         {"$sort": {"_id": 1}}], allowDiskUse=True, maxTimeMS=40000):
+        tx_by_year.append({"year": g.get("_id") or "(blank)", "bills": g["bills"],
+                           "paid": round(g.get("paid", 0) or 0, 2)})
+    tx_by_source: List[Dict[str, Any]] = []
+    async for g in transactions_col.aggregate(
+        [{"$group": {"_id": "$source", "bills": {"$sum": 1}}}], maxTimeMS=40000):
+        tx_by_source.append({"source": g.get("_id") or "(none)", "bills": g["bills"]})
+    span_rows = await transactions_col.aggregate(
+        [{"$group": {"_id": None, "min": {"$min": "$bill_date"}, "max": {"$max": "$bill_date"}}}],
+        maxTimeMS=40000).to_list(1)
+    span = span_rows[0] if span_rows else {}
+
+    async def _cnt(flt: Dict[str, Any]) -> int:
+        try:
+            with pymongo.timeout(40):
+                return await customers_col.count_documents(flt)
+        except Exception:
+            return -1
+
+    _blank = lambda f: {"$or": [{f: {"$in": [None, ""]}}, {f: {"$exists": False}}]}
+    blanks = {
+        "customers_total": await _cnt({}),
+        "missing_first_purchase_at": await _cnt(_blank("first_purchase_at")),
+        "missing_last_visit_at": await _cnt(_blank("last_visit_at")),
+        "missing_home_store_id": await _cnt(_blank("home_store_id")),
+        "pos_created": await _cnt({"source": "pos_ewards"}),
+    }
+    # Point 2 — DOB/DOA equal to a visit date, or DOB == DOA (a source mis-fill, not our mapping)
+    suspicious = await customers_col.aggregate([
+        {"$match": {"birthday": {"$nin": [None, ""]}}},
+        {"$project": {"bad": {"$or": [
+            {"$eq": ["$birthday", {"$substrCP": [{"$ifNull": ["$first_purchase_at", ""]}, 0, 10]}]},
+            {"$eq": ["$birthday", {"$substrCP": [{"$ifNull": ["$last_visit_at", ""]}, 0, 10]}]},
+            {"$and": [{"$ne": [{"$ifNull": ["$anniversary", None]}, None]},
+                      {"$eq": ["$birthday", "$anniversary"]}]},
+        ]}}},
+        {"$match": {"bad": True}},
+        {"$count": "n"},
+    ], allowDiskUse=True, maxTimeMS=40000).to_list(1)
+    dob_doa_equals_visit = suspicious[0]["n"] if suspicious else 0
+
+    from database import stores_col
+    return {
+        "transactions": {"by_year": tx_by_year, "by_source": tx_by_source,
+                         "bill_date_min": span.get("min"), "bill_date_max": span.get("max")},
+        "customers": blanks,
+        "point2_dob_or_doa_equals_visit_or_each_other": dob_doa_equals_visit,
+        "stores_total": await stores_col.count_documents({}),
+        "notes": [
+            "Point 1: if by_year lists old years but the report shows none, the cause is the report "
+            "DATE-RANGE filter (the UI defaults to the current month) or a non-ISO bill_date format "
+            "(look for a '(blank)' or malformed year bucket). Reports impose NO go-live cutoff in code.",
+            "Point 3/4/6: missing_first_purchase_at / missing_home_store_id are the rows the CRM report "
+            "now derives live from bills; POS also stamps them on every future bill.",
+            "Point 2: point2_... counts customers whose DOB/DOA equals a visit date or each other — a "
+            "source-file mis-fill. The app reads DOB/DOA only from their own fields.",
+        ],
     }

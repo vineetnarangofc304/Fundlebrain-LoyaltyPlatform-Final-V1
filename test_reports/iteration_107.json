@@ -1,0 +1,22 @@
+{
+  "summary": "Iteration 107: Verified Store KPI loyalty_sales identity, CRM home_store/first-last visit derivation (registered-account preferred), CSV export headers, _diagnostics shape, and dashboard sales.net = store-kpi loyalty_sales consistency. Frontend Store KPI Report renders new 'Total Loyalty Sales' KPI card, column, and reconciliation line with green check; Overall Sales reconciliation also shows green. CRM Customer Report search for 6000013876 shows Home Store 'K00078' (Registered Account preferred over first-bill store K00055) with populated First/Last Visit. All 5 backend pytest cases passed and frontend flows verified visually.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration107_kpi_loyalty_crm_derive_test.py",
+    "/app/test_reports/pytest/iteration107.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Minor: React hydration warning observed in console ('span cannot be a child of option') on the CRM Report page (Home Store select). Non-blocking but should be cleaned up.",
+    "Store KPI '1y' quick range currently returns zeros because the preview DB has only ~70 transactions (per E1 note) and most fall outside the last 1 year window; consider a fallback quick range or informational message when a filter yields no rows."
+  ],
+  "updated_files": ["/app/backend/tests/iteration107_kpi_loyalty_crm_derive_test.py"],
+  "success_rate": {"backend": "100% (5/5)", "frontend": "100% (2/2 flows)"},
+  "test_credentials": "CRM superadmin@fundle.io / Fundle@2026 (login worked, redirected to /admin)",
+  "seed_data_creation": "None. No POS customers created.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend loyalty_sales identity holds (new+repeat=loyalty; loyalty+unmapped+returns=overall). CRM derivation prefers registered_account store code (regex on K00078@KAZO.com -> K00078). Dashboard /kpis sales.net now matches store-kpi.loyalty_sales (both exclude returns). CSV export header includes 'Home Store','First Visit Date','Last Visit Date'. Diagnostics endpoint exposes transactions.by_year, customers.missing_home_store_id, customers.missing_first_purchase_at, and point2_dob_or_doa_equals_visit_or_each_other. UI selectors verified: skpi-1y, skpi-kpi-loyalty, skpi-recon-total-loyalty-sales.",
+  "rca of the issue": "N/A - verification pass only. All fixes previously landed by E1 are working as designed."
+}

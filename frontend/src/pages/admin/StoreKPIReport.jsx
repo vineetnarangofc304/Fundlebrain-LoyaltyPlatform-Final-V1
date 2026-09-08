@@ -35,6 +35,7 @@ const BASE_COLS = [
   { key: "repeat_txn", label: "Repeat Txns", num: true, sort: "repeat_txn" },
   { key: "repeat_value", label: "Repeat Value", money: true, default: false },
   { key: "repeat_atv", label: "Repeat ATV", money: true, sort: "repeat_atv", default: false },
+  { key: "loyalty_sales", label: "Total Loyalty Sales", money: true, sort: "loyalty_sales" },
   { key: "mapped_txn", label: "Mapped Txns", num: true, sort: "mapped_txn", default: false },
   { key: "unmapped_txn", label: "Unmapped Txns", num: true, sort: "unmapped_txn", default: false },
   { key: "unmapped_value", label: "Unmapped Value", money: true, sort: "unmapped_value", default: false },
@@ -193,6 +194,7 @@ export default function StoreKPIReport() {
         {/* KPI tiles */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <KPICard label="Overall Sales" value={fmtINR(t.overall_sales)} fullValue={t.overall_sales} accent="burgundy" testid="skpi-kpi-sales" />
+          <KPICard label="Total Loyalty Sales" value={fmtINR(t.loyalty_sales)} fullValue={t.loyalty_sales} accent="emerald" testid="skpi-kpi-loyalty" />
           <KPICard label="Total Discount" value={fmtINR(t.total_discount)} fullValue={t.total_discount} accent="amber" testid="skpi-kpi-disc" />
           <KPICard label="Fresh Bills" value={fmtNum(t.fresh_bills)} accent="indigo" testid="skpi-kpi-bills" />
           <KPICard label="Return Bills" value={fmtNum(t.return_bills)} accent="rose" testid="skpi-kpi-rbills" />
@@ -204,8 +206,10 @@ export default function StoreKPIReport() {
         <div className="chart-card p-4" data-testid="skpi-recon">
           <div className="flex flex-wrap items-center gap-x-10 gap-y-2 text-sm">
             <span className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">Reconciliation</span>
+            <ReconLine label="Total Loyalty Sales" money total={t.loyalty_sales}
+              parts={[["New", t.new_value], ["Repeat", t.repeat_value]]} />
             <ReconLine label="Overall Sales" money total={t.overall_sales}
-              parts={[["New", t.new_value], ["Repeat", t.repeat_value], ["Unmapped", t.unmapped_value], ["Returns", t.return_value]]} />
+              parts={[["Loyalty", t.loyalty_sales], ["Unmapped", t.unmapped_value], ["Returns", t.return_value]]} />
             <ReconLine label="Fresh Bills" total={t.fresh_bills}
               parts={[["New", t.new_txn], ["Repeat", t.repeat_txn], ["Unmapped", t.unmapped_txn]]} />
             <ReconLine label="Customers" total={t.overall_customers}

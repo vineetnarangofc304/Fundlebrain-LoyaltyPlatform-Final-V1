@@ -1732,9 +1732,15 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
             "lifetime_points_redeemed": 0,
             "lifetime_spend": 0,
             "visit_count": 0,
-            "first_purchase_at": _now_iso(),
+            "first_purchase_at": order_time or _now_iso(),
             "created_at": _now_iso(),
         })
+        # Real-time (no backfill): a customer first seen on a bill is NOT API-registered, so
+        # their FIRST purchase store is the Registered / Home store (R2). Set once here.
+        if store_id:
+            customer_doc_update["home_store_id"] = store_id
+            customer_doc_update["registered_store_id"] = store_id
+            customer_doc_update["first_purchase_store_id"] = store_id
         await customers_col.insert_one(customer_doc_update)
         cust = customer_doc_update
         is_new_customer = True
@@ -1742,6 +1748,24 @@ async def pos_add_point(payload: Dict[str, Any], request: Request,
         await customers_col.update_one({"mobile": mobile}, {"$set": customer_doc_update})
         cust = {**existing, **customer_doc_update}
         is_new_customer = False
+        # Self-heal ONCE for customers that predate this fix (enrolled before their first bill,
+        # or belong to a store added after go-live): stamp First Visit + Home/Registered store
+        # only when missing so subsequent bills never overwrite them. No backfill job needed.
+        _patch: Dict[str, Any] = {}
+        if not existing.get("first_purchase_at"):
+            _patch["first_purchase_at"] = order_time or _now_iso()
+        # Home/Registered store: set the FIRST-purchase store only when the customer has NO home
+        # store AND no CRM Registered Account (an API-registered customer's home store is derived
+        # from that account, not the till). "If missing" => later bills never overwrite it.
+        _has_reg_acct = bool((existing.get("registered_account") or "").strip())
+        if store_id and not existing.get("home_store_id") and not _has_reg_acct:
+            _patch["home_store_id"] = store_id
+            _patch["first_purchase_store_id"] = store_id
+            if not existing.get("registered_store_id"):
+                _patch["registered_store_id"] = store_id
+        if _patch:
+            await customers_col.update_one({"id": cust["id"]}, {"$set": _patch})
+            cust.update(_patch)
 
     # Loyalty engine (cfg already loaded above)
     min_bill_for_earn = _parse_float(cfg.get("min_bill_for_earn", 0))
