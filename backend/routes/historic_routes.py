@@ -148,6 +148,13 @@ def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
     added_on = parse_date(r.get("Added On"))
     dob = parse_date(r.get("DOB"))
     doa = parse_date(r.get("DOA"))
+    # Guard (KAZO doc Point 2): the source CRM export sometimes fills DOB/DOA with a visit date.
+    # A real DOB/DOA never equals the customer's first/last purchase date, so drop such mis-fills.
+    _visit_days = {d.date() for d in (first_visit, last_visit) if d}
+    if dob and dob.date() in _visit_days:
+        dob = None
+    if doa and doa.date() in _visit_days:
+        doa = None
     lifetime_spend = parse_float(r.get("Total Billing"))
     visit_count = parse_int(r.get("Total Visits"))
     points_balance = parse_int(r.get("Current Point Balance"))

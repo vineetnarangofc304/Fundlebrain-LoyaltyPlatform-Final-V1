@@ -26,7 +26,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pymongo
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 
 from auth import get_current_user
@@ -85,9 +85,6 @@ def _store_group_stage() -> Dict[str, Any]:
     def fresh_sum(expr):  # sum `expr` only on fresh (non-return) bills
         return {"$sum": {"$cond": [_NE_RETURN, expr, 0]}}
 
-    def addset(cond):
-        return {"$addToSet": {"$cond": [cond, "$customer_mobile", "$$REMOVE"]}}
-
     return {
         "$group": {
             "_id": "$store_id",
@@ -106,20 +103,17 @@ def _store_group_stage() -> Dict[str, Any]:
             "return_value": {"$sum": {"$cond": [_IS_RETURN, PAID_EXPR, 0]}},
             "new_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_NEW]}, 1, 0]}},
             "new_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_NEW]}, PAID_EXPR, 0]}},
-            "repeat_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING]}, 1, 0]}},
-            "repeat_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING]}, PAID_EXPR, 0]}},
+            "repeat_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING, _HAS_MOBILE]}, 1, 0]}},
+            "repeat_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _IS_EXISTING, _HAS_MOBILE]}, PAID_EXPR, 0]}},
             "mapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _HAS_MOBILE]}, 1, 0]}},
             "mapped_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, _HAS_MOBILE]}, PAID_EXPR, 0]}},
             "unmapped_txn": {"$sum": {"$cond": [{"$and": [_NE_RETURN, {"$not": [_HAS_MOBILE]}]}, 1, 0]}},
             "unmapped_value": {"$sum": {"$cond": [{"$and": [_NE_RETURN, {"$not": [_HAS_MOBILE]}]}, PAID_EXPR, 0]}},
-            "customers": addset({"$and": [_NE_RETURN, _HAS_MOBILE]}),
-            "new_customers": addset({"$and": [_NE_RETURN, _IS_NEW, _HAS_MOBILE]}),
-            "existing_customers": addset({"$and": [_NE_RETURN, _IS_EXISTING, _HAS_MOBILE]}),
         }
     }
 
 
-def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
+def _finalize_store_row(g: Dict[str, Any], cust: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     def atv(value, txn):
         return round(value / txn, 2) if txn else 0.0
 
@@ -154,11 +148,12 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
     loyalty_sales = round(new_value + repeat_value, 2)
 
     # ── Customer reconciliation (exact partition): New + Existing == Overall ──
-    # `new_customers` (first-ever bill lands in range) is a subset of `customers`; any
-    # returning/untagged customer is Existing. Forcing Existing = Overall − New removes
-    # the double-count for customers who have both a "new" and an "existing" bill in range.
-    overall_cust = len(g.get("customers", []) or [])
-    new_cust = len(g.get("new_customers", []) or [])
+    # Distinct mapped-customer counts come from a separate scalable pipeline (see
+    # _store_customer_count_pipe) — NOT $addToSet (which blew the 16 MB group limit → 500 on
+    # multi-year ranges). `new` = customers whose first-ever bill is New; Existing = Overall − New.
+    cust = cust or {}
+    overall_cust = int(cust.get("overall", 0) or 0)
+    new_cust = int(cust.get("new", 0) or 0)
     if new_cust > overall_cust:
         new_cust = overall_cust
     existing_cust = overall_cust - new_cust
@@ -194,10 +189,40 @@ def _finalize_store_row(g: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _store_customer_count_pipe(match: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Distinct mapped-customer counts per store WITHOUT $addToSet. Two-stage: dedupe by
+    (store, mobile) — a bounded per-group flag — then count per store. Scales to years of data."""
+    m = dict(match)
+    m["is_return"] = {"$ne": True}
+    m["customer_mobile"] = {"$nin": [None, ""]}
+    return [
+        {"$match": m},
+        {"$group": {"_id": {"s": "$store_id", "m": "$customer_mobile"},
+                    "is_new": {"$max": {"$cond": [_IS_NEW, 1, 0]}}}},
+        {"$group": {"_id": "$_id.s", "overall": {"$sum": 1}, "new": {"$sum": "$is_new"}}},
+    ]
+
+
 async def _run_store_kpi(match: Dict[str, Any]) -> List[Dict[str, Any]]:
-    pipe = [{"$match": match}, _store_group_stage()]
-    raw = await transactions_col.aggregate(pipe, allowDiskUse=True, maxTimeMS=25000).to_list(2000)
-    rows = [_finalize_store_row(g) for g in raw]
+    sales_pipe = [{"$match": match}, _store_group_stage()]
+
+    async def _sales():
+        return await transactions_col.aggregate(
+            sales_pipe, allowDiskUse=True, maxTimeMS=40000).to_list(3000)
+
+    async def _counts():
+        # Graceful degradation: a very wide range must still return SALES even if the distinct
+        # customer count is too heavy — never let counts 500 the whole report (KAZO doc Point 1).
+        try:
+            rows = await transactions_col.aggregate(
+                _store_customer_count_pipe(match), allowDiskUse=True, maxTimeMS=40000).to_list(3000)
+            return {r["_id"]: r for r in rows}
+        except Exception as e:
+            logger.warning("store-kpi customer counts skipped (%s)", e)
+            return {}
+
+    sales_raw, cust_map = await asyncio.gather(_sales(), _counts())
+    rows = [_finalize_store_row(g, cust_map.get(g.get("_id"))) for g in sales_raw]
     await _fill_store_identity(rows)
     return rows
 
@@ -978,3 +1003,66 @@ async def report_diagnostics(user=Depends(get_current_user)):
             "source-file mis-fill. The app reads DOB/DOA only from their own fields.",
         ],
     }
+
+
+
+# ── Point 2 repair: null DOB/DOA that were mis-filled with a visit date ───────
+# A real DOB/DOA never equals the customer's first/last purchase date. The source CRM export
+# populated ~136k customers' DOB/DOA with a visit date; this one-off, idempotent, admin-only
+# repair nulls exactly those (safe to re-run). The ingest mapper also guards this going forward.
+_DOB_REPAIR_STATUS: Dict[str, Any] = {"state": "idle"}
+
+
+def _visit_mismatch_filter(field: str) -> Dict[str, Any]:
+    return {field: {"$nin": [None, ""]}, "$expr": {"$or": [
+        {"$eq": [f"${field}", {"$substrCP": [{"$ifNull": ["$first_purchase_at", ""]}, 0, 10]}]},
+        {"$eq": [f"${field}", {"$substrCP": [{"$ifNull": ["$last_visit_at", ""]}, 0, 10]}]},
+    ]}}
+
+
+def _require_admin(user: dict) -> None:
+    if (user or {}).get("role") not in ("super_admin", "brand_admin"):
+        raise HTTPException(403, "Admin only")
+
+
+async def _run_dob_doa_repair() -> None:
+    _DOB_REPAIR_STATUS.update({"state": "running", "started_at": datetime.now(IST).isoformat(),
+                               "birthday_cleared": 0, "anniversary_cleared": 0, "error": None})
+    try:
+        with pymongo.timeout(900):
+            rb = await customers_col.update_many(_visit_mismatch_filter("birthday"),
+                                                 {"$set": {"birthday": None}})
+            ra = await customers_col.update_many(_visit_mismatch_filter("anniversary"),
+                                                 {"$set": {"anniversary": None}})
+        _DOB_REPAIR_STATUS.update({"state": "done", "finished_at": datetime.now(IST).isoformat(),
+                                   "birthday_cleared": rb.modified_count,
+                                   "anniversary_cleared": ra.modified_count})
+    except Exception as e:
+        _DOB_REPAIR_STATUS.update({"state": "error", "error": str(e)})
+    logger.info("DOB/DOA repair result: %s", _DOB_REPAIR_STATUS)
+
+
+@export_router.post("/_repair-dob-doa")
+async def repair_dob_doa(dry_run: bool = True, user=Depends(get_current_user)):
+    """KAZO doc Point 2. dry_run=true (default) counts affected rows; dry_run=false runs the repair
+    in the background (poll /_repair-dob-doa/status). Nulls DOB/DOA that equal a first/last visit date."""
+    _require_admin(user)
+    if dry_run:
+        async def _cnt(field: str) -> int:
+            r = await customers_col.aggregate(
+                [{"$match": _visit_mismatch_filter(field)}, {"$count": "n"}],
+                allowDiskUse=True, maxTimeMS=40000).to_list(1)
+            return r[0]["n"] if r else 0
+        return {"dry_run": True, "birthday_to_clear": await _cnt("birthday"),
+                "anniversary_to_clear": await _cnt("anniversary"),
+                "note": "POST ?dry_run=false to apply (background). Only DOB/DOA equal to a visit date are nulled."}
+    if _DOB_REPAIR_STATUS.get("state") == "running":
+        return {"started": False, "reason": "already running", "status": _DOB_REPAIR_STATUS}
+    asyncio.create_task(_run_dob_doa_repair())
+    return {"started": True, "status_url": "/api/kpi-reports/_repair-dob-doa/status"}
+
+
+@export_router.get("/_repair-dob-doa/status")
+async def repair_dob_doa_status(user=Depends(get_current_user)):
+    _require_admin(user)
+    return _DOB_REPAIR_STATUS

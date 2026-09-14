@@ -2611,3 +2611,22 @@ those buckets + a specific search). 6. Lifetime Purchase = net+tax, excl discoun
 **Point 1 — historical/old-year data missing from reports**: Reports impose NO go-live cutoff in code (`_date_match` filters only when start/end supplied); StoreKPIReport UI defaults to current month. Built read-only diagnostic `GET /api/kpi-reports/_diagnostics` (transactions.by_year, by_source, bill_date min/max; customers missing_first_purchase_at/last_visit_at/home_store_id; point2 count; stores_total). PENDING: run on PRODUCTION after redeploy to confirm whether old bills exist and their bill_date format; final data fix depends on that output.
 
 Tested: iteration_107.json (backend 5/5, frontend 2/2). Live posAddPoint verified stamping + idempotency (duplicate rejected, home store unchanged on 2nd bill at different store). NOTE: all fixes are on PREVIEW; production (kazoloyalty.fundlebrain.ai) needs a redeploy to take effect.
+
+
+---
+## 2026-09-14 — Client Points 1, 2, 5 (round 2, diagnosed against PRODUCTION data)
+
+Production diagnostic (GET /api/kpi-reports/_diagnostics, superadmin@fundle.io) revealed: transactions span 2021-2026 all present with clean ISO dates (2025: 212k bills Rs1.18B); 799k txns (751k historic + 48k pos); customers 1,018,468 with missing_home_store_id=1,006,497 (98.8
+
+---
+## 2026-09-14 — Client Points 1, 2, 5 (round 2, diagnosed against PRODUCTION data)
+
+Production diagnostic (GET /api/kpi-reports/_diagnostics, superadmin@fundle.io) showed: transactions span 2021-2026, all present with clean ISO dates (2025: 212k bills, ~1.18B); 799k txns (751k historic + 48k pos); customers 1,018,468 with missing_home_store_id 1,006,497 (98.8 percent), missing_first_purchase_at 613,560; point2 DOB/DOA-equals-visit = 136,479.
+
+Point 5 — VERIFIED CORRECT (definition gap, not a bug): For 2023, Store KPI new (424.8M) + repeat (248.4M) = Total Loyalty Sales (673.3M), and Dashboard /kpis sales.net = 673.3M EXACTLY matches. Overall (727.9M) = Loyalty (673.3M) + Walk-in/Unmapped (63.7M) + Returns (-9.2M). New+Repeat only covers mapped (has-mobile) bills; the gap vs Overall is anonymous walk-in bills + returns. Hardened: repeat now requires has-mobile so loyalty_sales = new + repeat = mapped exactly.
+
+Point 1 — REAL BUG FIXED: Full-history Store KPI returned HTTP 500 because _store_group_stage used $addToSet to collect distinct mobiles per store -> exceeded the 16MB group limit on multi-year ranges. Refactored _run_store_kpi: sales via pure numeric accumulators (no arrays); distinct customer counts via a scalable two-stage pipeline _store_customer_count_pipe (group by store+mobile then by store), run concurrently with graceful degradation. Single-year already worked. Scale fix needs production confirmation (preview has ~71 txns).
+
+Point 2 — DATA CLEANUP built: 136,479 customers have DOB/DOA mis-filled with a visit date by the source. Added admin-only repair: POST /api/kpi-reports/_repair-dob-doa?dry_run=true|false + GET /_repair-dob-doa/status (background, idempotent). Nulls DOB/DOA equal to first_purchase_at or last_visit_at. Also guarded historic ingest mapper for future uploads. Verified on preview (cleared 2+2, re-run 0).
+
+NOTE: These round-2 fixes are NEW since the deploy initiated 2026-09-14 and need ANOTHER redeploy. After redeploy: run POST /api/kpi-reports/_repair-dob-doa?dry_run=false to clean the 136k rows, and confirm full-history Store KPI loads (no 500).
