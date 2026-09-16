@@ -14,6 +14,8 @@ import { BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGri
 const monthStart = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10); };
 const today = () => new Date().toISOString().slice(0, 10);
 const yearsAgo = (n) => { const d = new Date(); return new Date(d.getFullYear() - n, d.getMonth(), 1).toISOString().slice(0, 10); };
+const fyStart = () => { const d = new Date(); const y = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1; return new Date(y, 3, 1).toISOString().slice(0, 10); };
+const allStart = () => "2015-01-01";
 
 const BASE_COLS = [
   { key: "store_code", label: "Store Code", mono: true, sort: "store_code" },
@@ -182,8 +184,13 @@ export default function StoreKPIReport() {
               <input type="checkbox" checked={params.compare} onChange={(e) => set("compare", e.target.checked)} data-testid="skpi-compare" />
               Year-over-Year comparison
             </label>
+            <span className="text-[11px] text-neutral-500 mr-1">Quick range:</span>
             <button onClick={() => { set("start_date", monthStart()); set("end_date", today()); }} className="k-btn k-btn-outline k-btn-sm" data-testid="skpi-mtd">This month</button>
+            <button onClick={() => { set("start_date", fyStart()); set("end_date", today()); }} className="k-btn k-btn-outline k-btn-sm" data-testid="skpi-fy">This FY</button>
             <button onClick={() => { set("start_date", yearsAgo(1)); set("end_date", today()); }} className="k-btn k-btn-outline k-btn-sm" data-testid="skpi-1y">1y</button>
+            <button onClick={() => { set("start_date", yearsAgo(3)); set("end_date", today()); }} className="k-btn k-btn-outline k-btn-sm" data-testid="skpi-3y">3y</button>
+            <button onClick={() => { set("start_date", yearsAgo(5)); set("end_date", today()); }} className="k-btn k-btn-outline k-btn-sm" data-testid="skpi-5y">5y</button>
+            <button onClick={() => { set("start_date", allStart()); set("end_date", today()); }} className="k-btn k-btn-outline k-btn-sm" data-testid="skpi-all">All time</button>
             <div className="flex-1" />
             <button onClick={fetchData} disabled={loading} className="k-btn kazo-bg-burgundy text-white" data-testid="skpi-apply">
               <Search className="w-3.5 h-3.5" /> {loading ? "Loading…" : "Apply"}
