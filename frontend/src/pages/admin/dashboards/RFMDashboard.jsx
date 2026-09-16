@@ -43,7 +43,7 @@ export default function RFMDashboard() {
         params.start_date = range.start_date;
         params.end_date = range.end_date;
       }
-      const r = await api.get("/dashboard/rfm", { params });
+      const r = await api.get("/dashboard/rfm", { params, timeout: 60000 });
       setData(r.data);
     } finally {
       setLoading(false);

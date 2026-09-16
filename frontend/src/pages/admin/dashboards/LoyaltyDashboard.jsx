@@ -46,7 +46,7 @@ export default function LoyaltyDashboard() {
         params.start_date = range.start_date;
         params.end_date = range.end_date;
       }
-      const r = await api.get("/analytics/loyalty-dashboard", { params });
+      const r = await api.get("/analytics/loyalty-dashboard", { params, timeout: 60000 });
       setData(r.data);
     } finally { setLoading(false); }
   };

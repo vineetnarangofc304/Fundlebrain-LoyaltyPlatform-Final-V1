@@ -48,7 +48,7 @@ export default function CustomerDashboard() {
         params.start_date = range.start_date;
         params.end_date = range.end_date;
       }
-      const r = await api.get("/analytics/customer-dashboard", { params });
+      const r = await api.get("/analytics/customer-dashboard", { params, timeout: 60000 });
       setData(r.data);
     } finally { setLoading(false); }
   };

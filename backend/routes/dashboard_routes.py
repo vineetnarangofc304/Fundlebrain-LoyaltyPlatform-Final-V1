@@ -486,6 +486,7 @@ async def filter_options(user: dict = Depends(get_current_user)):
 
 
 @router.get("/command-center")
+@dash_cache("command-center")
 async def command_center(
     period: str = "30d",
     start_date: Optional[str] = None,

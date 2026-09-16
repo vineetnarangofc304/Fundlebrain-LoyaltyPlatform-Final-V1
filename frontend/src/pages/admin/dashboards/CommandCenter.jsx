@@ -60,7 +60,7 @@ export default function CommandCenter() {
       if (storeId) params.store_id = storeId;
       if (city && !storeId) params.city = city;
       if (force) params.refresh = 1;   // explicit Refresh bypasses the 60s server cache
-      const res = await api.get("/dashboard/command-center", { params });
+      const res = await api.get("/dashboard/command-center", { params, timeout: 60000 });
       setData(res.data);
       setError(null);
     } catch (e) {

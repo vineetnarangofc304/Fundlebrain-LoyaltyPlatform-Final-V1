@@ -65,6 +65,7 @@ from routes.demo_routes import router as demo_router
 from routes.watch_routes import router as watch_router
 from routes.reel_routes import router as reel_router
 from routes.reco_routes import router as reco_router
+from routes.data_quality_routes import router as data_quality_router
 from routes.master_brain_routes import router as master_brain_router
 
 app = FastAPI(title="KAZO Fundle Platform", version="1.0.0")
@@ -137,6 +138,7 @@ api_router.include_router(demo_router)
 api_router.include_router(watch_router)
 api_router.include_router(reel_router)
 api_router.include_router(reco_router)
+api_router.include_router(data_quality_router)
 api_router.include_router(master_brain_router)
 
 app.include_router(api_router)
@@ -872,8 +874,12 @@ async def startup():
     # Keep the heaviest default dashboard views permanently warm so first
     # loads never hang for 10-20 s on production-scale aggregations.
     try:
-        from routes._cache_warmer import warm_loop
+        from routes._cache_warmer import warm_loop, seed_dashboard_l2_once
         asyncio.create_task(warm_loop())
+        # One-shot: proactively seed the persistent L2 for every heavy dashboard's
+        # DEFAULT view shortly after boot, so the FIRST viewer after a redeploy
+        # never waits on a cold full-collection scan.
+        asyncio.create_task(seed_dashboard_l2_once())
     except Exception as e:
         logger.warning(f"Could not schedule cache warmer: {e}")
 
@@ -886,6 +892,15 @@ async def startup():
         asyncio.create_task(rollup_loop())
     except Exception as e:
         logger.warning(f"Could not schedule analytics rollup loop: {e}")
+
+    # One-time (per 12h) data-quality maintenance: recompute churn_risk from
+    # recency + fill blank customer cities from their home store. Deferred so it
+    # never blocks startup; skipped if it already ran in the last 12h.
+    try:
+        from routes.data_quality_routes import deferred_startup_run
+        asyncio.create_task(deferred_startup_run())
+    except Exception as e:
+        logger.warning(f"Could not schedule data-quality startup run: {e}")
 
     # Warm the RFM population breakpoints once at startup (then refreshed every
     # 30 min by the scheduler). Persisted to a shared Mongo doc so the Customer-360

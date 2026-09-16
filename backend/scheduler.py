@@ -145,6 +145,19 @@ def start_scheduler():
                    coalesce=True,
                    misfire_grace_time=300)
 
+    # Data-quality maintenance — daily 06:00 IST: recompute churn_risk from
+    # recency + fill blank customer cities from the home store. Off the request
+    # path (CSOT-disabled client), idempotent.
+    from routes.data_quality_routes import run_data_quality_maintenance
+    sched.add_job(run_data_quality_maintenance,
+                   CronTrigger(hour=6, minute=0, timezone="Asia/Kolkata"),
+                   id="data_quality_daily",
+                   replace_existing=True,
+                   max_instances=1,
+                   coalesce=True,
+                   misfire_grace_time=3600,
+                   kwargs={"reason": "daily_cron", "force": True})
+
     sched.start()
     _scheduler = sched
     logger.info("Started exec digest scheduler — next Mon 09:00 IST | historic ingest worker every 15s | auto-campaigns daily 10:00 IST | RFM breakpoints refresh every 30m | data-health daily 07:30 IST | reco daily pull %02d:%02d IST (enabled=%s)",

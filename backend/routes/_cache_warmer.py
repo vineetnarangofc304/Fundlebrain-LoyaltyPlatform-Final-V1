@@ -77,3 +77,40 @@ async def warm_loop() -> None:
         except Exception as e:
             logger.warning(f"cache warm cycle failed: {e}")
         await asyncio.sleep(WARM_INTERVAL_S)
+
+
+# One-shot seed of the persistent L2 (dash_cache_l2) for every heavy dashboard's
+# DEFAULT view — runs once ~45s after boot regardless of CACHE_WARMER_ENABLED, so
+# the FIRST viewer after a redeploy is served instantly instead of triggering a
+# cold full-collection scan on the request path. Idempotent + gentle (one pass).
+SEED_PATHS = [
+    "/api/dashboard/command-center?period=30d",
+    "/api/dashboard/sales-trend?period_days=30",
+    "/api/analytics/sales-dashboard?period_days=30",
+    "/api/analytics/loyalty-dashboard?period_days=0",
+    "/api/analytics/customer-dashboard?period_days=0",
+    "/api/dashboard/store-performance-v2?period_days=30",
+    "/api/dashboard/rfm?period_days=0",
+    "/api/dashboard/cohorts-segmentation?period_days=0",
+    "/api/dashboard/points-economics?period_days=0",
+    "/api/dashboard/executive-summary?period_days=30",
+]
+
+
+async def seed_dashboard_l2_once() -> None:
+    await asyncio.sleep(45)   # after bind + first indexes, before real traffic
+    try:
+        token = await _mint_token()
+        if not token:
+            return
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(base_url=BASE, headers=headers, timeout=120) as client:
+            for path in SEED_PATHS:
+                try:
+                    await client.get(path)
+                except Exception as e:
+                    logger.info(f"L2 seed {path} failed: {e}")
+                await asyncio.sleep(3)   # be gentle on the DB
+        logger.info("dashboard L2 seed pass complete (%d paths)", len(SEED_PATHS))
+    except Exception as e:
+        logger.warning(f"dashboard L2 seed failed: {e}")

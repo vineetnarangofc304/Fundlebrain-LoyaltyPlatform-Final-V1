@@ -30,7 +30,7 @@ export default function PointsDashboard() {
         params.start_date = range.start_date;
         params.end_date = range.end_date;
       }
-      const r = await api.get("/dashboard/points-economics", { params });
+      const r = await api.get("/dashboard/points-economics", { params, timeout: 60000 });
       setData(r.data);
     } finally { setLoading(false); }
   };

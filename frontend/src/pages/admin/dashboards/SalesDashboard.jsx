@@ -44,8 +44,8 @@ export default function SalesDashboard() {
       trendParams.end_date = range.end_date;
     }
     Promise.all([
-      api.get("/analytics/sales-dashboard", { params }),
-      api.get("/dashboard/sales-trend", { params: trendParams }),
+      api.get("/analytics/sales-dashboard", { params, timeout: 60000 }),
+      api.get("/dashboard/sales-trend", { params: trendParams, timeout: 60000 }),
     ]).then(([d, t]) => { setData(d.data); setTrend(t.data); setError(null); })
       .catch((e) => setError(e?.response?.data?.detail || e?.message || "Failed to load"));
   }, [range, reloadKey]);

@@ -39,7 +39,7 @@ export default function CohortsDashboard() {
         params.start_date = range.start_date;
         params.end_date = range.end_date;
       }
-      const r = await api.get("/dashboard/cohorts-segmentation", { params });
+      const r = await api.get("/dashboard/cohorts-segmentation", { params, timeout: 60000 });
       setData(r.data);
     } finally { setLoading(false); }
   };

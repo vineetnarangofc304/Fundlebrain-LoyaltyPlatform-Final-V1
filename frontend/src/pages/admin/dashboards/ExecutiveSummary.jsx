@@ -43,7 +43,7 @@ export default function ExecutiveSummary() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/dashboard/executive-summary", { params: { period_days: period } });
+      const r = await api.get("/dashboard/executive-summary", { params: { period_days: period }, timeout: 60000 });
       setData(r.data);
     } finally { setLoading(false); }
   };

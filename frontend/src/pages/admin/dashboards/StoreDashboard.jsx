@@ -29,7 +29,7 @@ export default function StoreDashboard() {
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.get("/dashboard/store-performance-v2", { params: { period_days: period } });
+      const r = await api.get("/dashboard/store-performance-v2", { params: { period_days: period }, timeout: 60000 });
       setData(r.data);
     } finally {
       setLoading(false);
