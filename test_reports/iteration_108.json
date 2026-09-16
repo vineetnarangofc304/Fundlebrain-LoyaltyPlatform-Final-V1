@@ -1,0 +1,22 @@
+{
+  "summary": "Iteration 108: Verified fix for the 7 stuck dashboards + data-quality endpoints + churn recompute + city backfill. Backend: 12/12 pytest cases passed (10 dashboard endpoints served 200 on both cold/warm calls with warm call fast; churn buckets in RFM non-zero: high=663143, medium=136891, low=33; DQ POST /api/data-quality/run?force=true returns {started:true} and GET /api/data-quality/status resolves to state=done with churn.matched=800067 modified=7 and city object {stores_mapped:61, city_filled_from_home_store:0, home_store_derived_from_first_bill:0, residual_no_home_store:18}). Frontend: logged in as super_admin, navigated via sidebar to ALL 11 dashboards (Command Center, Sales, Customer Analytics, Loyalty, Campaign Performance, Store Performance, RFM & Churn, Cohorts & Segments, Points Economics, Campaign ROI, Executive Summary) — every dashboard rendered its header + KPI cards + charts/tables within ~6s, zero stuck 'Loading...'/'Computing...' spinners, zero error/retry testids. Customer Analytics API returns churn_distribution with non-zero high=120058 and populated city_distribution (top cities: Chennai/Pune/Noida/Gurugram/Surat).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/iteration108_dashboards_l2cache_dq_test.py",
+    "/app/test_reports/pytest/iteration108.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Frontend routes for dashboards on the sidebar don't match the README-style slugs; e.g. Customer Analytics is /admin/dashboards/customers (plural), Campaign Performance is /admin/dashboards/campaigns, Store Performance is /admin/dashboards/stores, Points Economics is /admin/dashboards/points. Deep-links using non-plural slugs (customer-analytics, campaign-performance, store-performance, points-economics) currently 404-to-home. Consider adding redirect aliases so external links / docs / emails don't silently drop users on the marketing landing page.",
+    "data-quality status object doesn't include city_filled_from_home_store>0 on this preview because home_store is already populated for the seeded dataset (residual_no_home_store=18 only); worth adding a lightweight sanity check that if residual_no_home_store>0 we still attempt derivation from first-bill so the field is exercised."
+  ],
+  "updated_files": ["/app/backend/tests/iteration108_dashboards_l2cache_dq_test.py"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (11/11 dashboards)"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (role super_admin) — login via /api/auth/login works and returns {token,user}. /api/crm/auth/login does NOT exist (returns 404) — the sidebar just uses /admin routes after login.",
+  "seed_data_creation": "None. Data-quality maintenance job was invoked once (force=true) — it updated 7 churn_risk documents out of 800067; no destructive changes.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 7 previously-stuck dashboards now render. Cache path is: L1 in-process -> L2 dash_cache_l2 in Mongo -> fresh compute; the _cache_warmer seeded L2 already so cold reads are sub-100ms. RFM churn_distribution field name is 'churn_distribution' (not 'churn'). Customer dashboard exposes churn_distribution + city_distribution. DQ endpoints require Bearer token from /api/auth/login. Correct sidebar routes: /admin/dashboards/{command-center|sales|customers|loyalty|campaigns|stores|rfm|cohorts|points|campaign-roi|executive-summary}.",
+  "rca of the issue": "Verified fixes: (1) dash_cache_l2 persistent Mongo layer + seed_dashboard_l2_once() eliminate the cold-pod full-collection-scan stall that produced the infinite spinner; (2) 60s axios timeout means any residual slow call surfaces as an error+retry UI instead of forever-loading (no error UI observed this run); (3) recompute_churn_risk() correctly buckets 800k customers into low/medium/high with the seeded stale last-visit skewing high (expected per E1 note) — the key regression (all-zero high-risk) is fixed; (4) backfill_default_city derives blank city from home-store city — on this preview only 18 customers still miss a home_store so the backfill count is 0 but the machinery runs cleanly and reports the counters."
+}
