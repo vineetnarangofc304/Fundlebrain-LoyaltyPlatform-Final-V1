@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
@@ -48,6 +49,61 @@ def _require_admin(user: dict) -> None:
 
 _BLANK = [{"city": None}, {"city": ""}, {"city": {"$exists": False}}]
 _NO_HOME = [{"home_store_id": None}, {"home_store_id": ""}, {"home_store_id": {"$exists": False}}]
+_NO_STORE = {"$in": [None, ""]}
+
+
+def _norm_store(v: Any) -> str:
+    return re.sub(r"\s+", " ", str(v or "").strip()).upper()
+
+
+async def backfill_transaction_store_id() -> Dict[str, Any]:
+    """Attribute migrated bills to their real store.
+
+    93%+ of migrated (`historic_upload`) bills have `store_id = null` but DO carry
+    `store_name` / `store_code`. The Store KPI report groups by `store_id`, so those
+    bills collapse into one "Unmapped" bucket instead of showing under their store.
+    We resolve each distinct (store_code, store_name) combo among null-store bills to
+    a store in the master (normalised match, code first then name) and bulk-set
+    `store_id`. Idempotent; only fills null store_id. Unresolved combos are reported
+    so the operator can see which store codes/names are missing from the master.
+    """
+    txns = long_col("transactions")
+    stores = long_col("stores")
+    by_code: Dict[str, str] = {}
+    by_name: Dict[str, str] = {}
+    async for s in stores.find({}, {"_id": 0, "id": 1, "code": 1, "name": 1}):
+        if not s.get("id"):
+            continue
+        if s.get("code"):
+            by_code[_norm_store(s["code"])] = s["id"]
+        if s.get("name"):
+            by_name[_norm_store(s["name"])] = s["id"]
+
+    combos = await txns.aggregate([
+        {"$match": {"store_id": _NO_STORE}},
+        {"$group": {"_id": {"code": "$store_code", "name": "$store_name"}, "n": {"$sum": 1}}},
+    ], allowDiskUse=True).to_list(10000)
+
+    filled = 0
+    unresolved: List[Dict[str, Any]] = []
+    for c in combos:
+        code = c["_id"].get("code")
+        name = c["_id"].get("name")
+        sid = by_code.get(_norm_store(code)) if code else None
+        if not sid and name:
+            sid = by_name.get(_norm_store(name))
+        if sid:
+            r = await txns.update_many(
+                {"store_id": _NO_STORE, "store_code": code, "store_name": name},
+                {"$set": {"store_id": sid}},
+            )
+            filled += r.modified_count
+        else:
+            unresolved.append({"code": code, "name": name, "bills": c["n"]})
+
+    return {"distinct_combos": len(combos), "bills_mapped": filled,
+            "unresolved_combos": len(unresolved),
+            "unresolved_top": sorted(unresolved, key=lambda x: -x["bills"])[:20]}
 
 
 async def recompute_churn_risk() -> Dict[str, Any]:
@@ -151,10 +207,11 @@ async def run_data_quality_maintenance(reason: str = "manual", force: bool = Fal
 
     _STATUS.update({"state": "running", "reason": reason,
                     "started_at": datetime.now(timezone.utc).isoformat(),
-                    "churn": None, "city": None, "error": None})
+                    "store_id": None, "churn": None, "city": None, "error": None})
     try:
-        _STATUS["churn"] = await recompute_churn_risk()
+        _STATUS["store_id"] = await backfill_transaction_store_id()
         _STATUS["city"] = await backfill_default_city()
+        _STATUS["churn"] = await recompute_churn_risk()
         _STATUS.update({"state": "done", "finished_at": datetime.now(timezone.utc).isoformat()})
         try:
             await rollups_col.replace_one(
