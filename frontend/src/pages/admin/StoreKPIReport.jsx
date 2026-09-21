@@ -74,7 +74,7 @@ const ReconLine = ({ label, parts, total, money }) => {
 
 export default function StoreKPIReport() {
   const [params, setParams] = useState({
-    start_date: monthStart(), end_date: today(),
+    start_date: allStart(), end_date: today(),
     zone: "", city: "", store_class: "", store_id: "",
     compare: false, sort_by: "overall_sales", sort_dir: "desc",
   });
