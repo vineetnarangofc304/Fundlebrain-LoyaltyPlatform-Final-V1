@@ -40,6 +40,7 @@ router = APIRouter()
 _STATUS_KEY = "data_quality_status"
 _STATUS: Dict[str, Any] = {"state": "idle"}
 _MIN_RERUN_GAP_S = 12 * 3600.0   # startup run is skipped if a run finished < 12h ago
+_DQ_VERSION = "2"                 # bump when adding a new maintenance step so it runs once after deploy
 
 
 def _require_admin(user: dict) -> None:
@@ -104,6 +105,57 @@ async def backfill_transaction_store_id() -> Dict[str, Any]:
     return {"distinct_combos": len(combos), "bills_mapped": filled,
             "unresolved_combos": len(unresolved),
             "unresolved_top": sorted(unresolved, key=lambda x: -x["bills"])[:20]}
+
+
+async def _ecom_store_id() -> Any:
+    """Resolve the online-channel store id (code KECOMAPPL / name 'ECom Application')."""
+    s = await long_col("stores").find_one(
+        {"$or": [{"code": "KECOMAPPL"},
+                 {"name": {"$regex": "^ecom application$", "$options": "i"}}]},
+        {"_id": 0, "id": 1})
+    return (s or {}).get("id")
+
+
+async def reattribute_ecom_to_home_store() -> Dict[str, Any]:
+    """Option B: attribute ONLINE (ECom-channel) bills to the customer's home store.
+
+    The historical bills all sit on the single online store 'ECom Application' (they
+    carry no physical store), so the Store KPI report shows them as one outlet. Here
+    we move each ECom/store-less bill to the customer's `home_store_id` WHERE ONE
+    EXISTS (~10.5% of customers). Bills whose customer has no home store on file stay
+    on ECom (unavoidable). The original store id is preserved in `orig_store_id`, so
+    this is fully reversible and idempotent (a re-run won't match already-moved bills).
+    """
+    ecom_id = await _ecom_store_id()
+    src_ids: List[Any] = [None, ""]
+    if ecom_id:
+        src_ids.append(ecom_id)
+
+    cust = long_col("customers")
+    txns = long_col("transactions")
+    home_to_mobiles: Dict[str, List[str]] = {}
+    async for c in cust.find(
+        {"mobile": {"$nin": [None, ""]}, "home_store_id": {"$nin": [None, ""]}},
+        {"_id": 0, "mobile": 1, "home_store_id": 1},
+    ):
+        home_to_mobiles.setdefault(c["home_store_id"], []).append(c["mobile"])
+
+    moved = 0
+    customers_with_home = sum(len(v) for v in home_to_mobiles.values())
+    CHUNK = 1000
+    for home_sid, mobiles in home_to_mobiles.items():
+        for i in range(0, len(mobiles), CHUNK):
+            chunk = mobiles[i:i + CHUNK]
+            r = await txns.update_many(
+                {"store_id": {"$in": src_ids}, "customer_mobile": {"$in": chunk}},
+                [{"$set": {"orig_store_id": {"$ifNull": ["$orig_store_id", "$store_id"]},
+                           "store_id": home_sid}}],
+            )
+            moved += r.modified_count
+
+    return {"ecom_store_id": ecom_id, "physical_home_stores": len(home_to_mobiles),
+            "customers_with_home_store": customers_with_home,
+            "bills_moved_to_home_store": moved}
 
 
 async def recompute_churn_risk() -> Dict[str, Any]:
@@ -200,16 +252,19 @@ async def run_data_quality_maintenance(reason: str = "manual", force: bool = Fal
     if not force:
         try:
             doc = await rollups_col.find_one({"_id": _STATUS_KEY})
-            if doc and time.time() - float(doc.get("computed_at", 0)) < _MIN_RERUN_GAP_S:
+            if (doc and (doc.get("value") or {}).get("version") == _DQ_VERSION
+                    and time.time() - float(doc.get("computed_at", 0)) < _MIN_RERUN_GAP_S):
                 return {"skipped": True, "reason": "ran recently", "last": doc.get("value")}
         except Exception:
             pass
 
-    _STATUS.update({"state": "running", "reason": reason,
+    _STATUS.update({"state": "running", "reason": reason, "version": _DQ_VERSION,
                     "started_at": datetime.now(timezone.utc).isoformat(),
-                    "store_id": None, "churn": None, "city": None, "error": None})
+                    "store_id": None, "ecom_reattribution": None,
+                    "city": None, "churn": None, "error": None})
     try:
         _STATUS["store_id"] = await backfill_transaction_store_id()
+        _STATUS["ecom_reattribution"] = await reattribute_ecom_to_home_store()
         _STATUS["city"] = await backfill_default_city()
         _STATUS["churn"] = await recompute_churn_risk()
         _STATUS.update({"state": "done", "finished_at": datetime.now(timezone.utc).isoformat()})
