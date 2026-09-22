@@ -49,6 +49,9 @@ async def _points_cutoff() -> str:
 # Inline apply is bounded to keep the chat request fast; bigger jobs are routed
 # to the dedicated batched re-tier tool on the Loyalty Rules page.
 INLINE_CAP = 20000
+# Bulk bonus credits via efficient batched bulk_write (CREDIT_BATCH=2000), so a much
+# larger single run is safe — raised to 1 lakh on client request (was 20000).
+BULK_BONUS_CAP = 100000
 BATCH = 1000
 
 logger = logging.getLogger("kazo-fundle.master-brain-tools")
@@ -967,8 +970,8 @@ async def bulk_award_bonus(attachment_id: str = "", mode: str = "flat", value: i
     if not pairs:
         return {"error": "Nothing to award — no matched customer needs points for this batch "
                          f"({not_found} not found, {skipped_zero} already at/above target)."}
-    if len(pairs) > INLINE_CAP:
-        return {"error": f"{len(pairs)} customers exceeds the {INLINE_CAP} cap — split the file and run it in parts."}
+    if len(pairs) > BULK_BONUS_CAP:
+        return {"error": f"{len(pairs)} customers exceeds the {BULK_BONUS_CAP} cap — split the file and run it in parts."}
     if prior and not force:
         return {"error": "ALREADY_AWARDED", "blocked": True, **plan,
                 "message": (f"Blocked to prevent double-crediting — this exact batch was already awarded on "

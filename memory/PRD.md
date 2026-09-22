@@ -33,6 +33,17 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### 🟢 Batch (Jun 16, 2026): bonus cap + Campaign Manager items were mostly STALE-PROD, not bugs
+Client reported 8 items. Findings after code audit:
+- **Bulk bonus 20k cap → 100k**: `master_brain_tools.py` new `BULK_BONUS_CAP=100000` (was shared INLINE_CAP=20000) used in `bulk_award_bonus`; credits via batched bulk_write (CREDIT_BATCH=2000) so 1-lakh is safe. FIXED (deploy).
+- **Store KPI "1 outlet" / old data**: Option B reattribution (see entry above). Point 5 identity (New+Repeat == Total Loyalty) holds BY CONSTRUCTION in `_finalize_store_row` (loyalty_sales = new_value+repeat_value, new_value = mapped_value−repeat_value) — production just stale.
+- **Points in Segment Builder**: ALREADY exists — `segments_routes.py` filter-schema has `points_balance`, `lifetime_points_earned`, `lifetime_points_redeemed`, `burn_ratio`. Stale prod.
+- **Multi-variable campaign messages** ({{name}}{{points}}{{expiry}}{{link}}{{coupon_code}}): ALREADY works — `_render` replaces ALL mustache vars; `_params_for_customer` fills them from profile (points_balance), ledger (expiry), campaign_link (link), coupon batch (coupon_code); uploaded Marketing-DB values override. Stale prod. Caveat: a REAL Karix DLT send only fills the slots the DLT-approved template actually contains.
+- **Segment → coupon campaigns**: ALREADY built (unique coupon batch injection). Stale prod. User must SAVE a segment first for it to appear in the campaign "From Segment Builder" dropdown.
+- **SMS DLR "0 delivered / pending"**: webhook `/api/communications/dlr/karix` + `/communications/dlr/pull` exist and are live. Delivered/Failed only populate when KARIX POSTs receipts to that URL — must be registered on the Karix sender account (Karix-side config), NOT our bug.
+- All consolidated into one deploy (triggered).
+
+
 ### 🟢 Store KPI "one ECom outlet" — resolved as data-model reality + client chose Option B (Jun 16, 2026)
 Second production RCA corrected the first: bills now carry store_id (only ~56 truly null); the historical/online bills all sit on ONE real online store 'ECom Application' (code KECOMAPPL) and carry no physical store — so the report correctly shows one outlet. NOT a bug. Physical-store attribution can only come from the customer, and prod coverage is low: home_store_id 10.5% (106,846/1,019,595), registered_store_code 46.8% (only 1.3% resolved), 84 distinct home stores, 157 stores in master.
 - **Client chose Option B:** attribute ECom/online bills to the customer's `home_store_id` WHERE ONE EXISTS (~10.5%), rest stay on ECom. `routes/data_quality_routes.py::reattribute_ecom_to_home_store()` resolves the KECOMAPPL store, moves those bills to home store via customer_mobile (chunked pipeline update on long_col), preserves original id in `orig_store_id` (reversible), idempotent. Wired into maintenance (store_id → ECom→home → city → churn); `_DQ_VERSION="2"` guarantees a one-time run ~4 min after this deploy. ⚠️ Redeploy triggered.
