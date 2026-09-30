@@ -1,0 +1,51 @@
+{
+  "summary": "Frontend-only validation of Points Campaign follow-up (Expiry Targeting audience + Tiered Points Bands). Both FLOW A and FLOW B pass end-to-end via the wizard UI; regression on single Points + minpoints also works.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "detailed_results": {
+    "flow_a_expiring_points": {
+      "status": "PASS",
+      "audience_count_30d": "21,779",
+      "template_selected": "KAZO · Points Expiry Reminder",
+      "msg_preview_rendered": "Yes — sample: 'Hi Perf, your 2829 points expire on 15 Oct 2026. Redeem them before they lapse!' (no raw {{...}})",
+      "review_objective": "points · ROI 7d",
+      "toast": "Campaign saved as draft",
+      "list_visible": true
+    },
+    "flow_b_tiered": {
+      "status": "PASS",
+      "prefilled_bands": 2,
+      "band_count_0": "64,126 customers",
+      "band_count_1": "719,700 customers",
+      "band_0_template_set": "KAZO · Points Balance Reminder",
+      "third_band_added": "band-min-2=1000, max blank",
+      "audience_step": "audience-tiered-note shown, audience-type-select hidden",
+      "message_step": "message-tiered-note shown, single template select hidden",
+      "review_bands": ["100-499 pts · KAZO · Points Balance Reminder", "500+ pts · Simulated (no template)", "1000+ pts · Simulated (no template)"],
+      "campaigns_created_in_list": 3,
+      "campaign_names_in_list": ["QA Tiered UI · 100-499 pts", "QA Tiered UI · 500+ pts", "QA Tiered UI · 1000+ pts"]
+    },
+    "regression_single_points": {
+      "status": "PASS",
+      "min_points_500_audience": "7,19,700"
+    }
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "CampaignWizard.jsx is ~560 lines and CampaignObjective.jsx ~260 — near the 700-line threshold; consider splitting review/message step components as this feature grows.",
+    "In FLOW A the 'Objective' review card renders as 'points · ROI 7d' which is fine, but 'review-objective' testid concatenates both — if you ever assert exact match tests may need updating."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped)", "frontend": "100%"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (from request)",
+  "seed_data_creation": "Created 1 QA Expiring Points draft (deleted) + 3 QA Tiered UI draft campaigns. Cleanup only removed the single QA Expiring Points campaign — the 3 tiered drafts remain in the list (tiered POST returns {campaigns:[...]}; script only extracted one id). Please delete the 3 'QA Tiered UI · <range> pts' drafts if desired.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "New audience option 'expiring_points' (data-testid audience-expiry-days) and tiered points bands (tiered-toggle, bands-editor, band-row-N, band-min/max/template-N, band-add, review-bands, review-band-N) all working. Tiered submit uses POST /campaigns/tiered-points and returns array of campaigns — when writing cleanup, walk campaigns[].id from the response body. Three QA Tiered UI drafts left over from this run.",
+  "rca of the issue": "N/A — no bugs found"
+}

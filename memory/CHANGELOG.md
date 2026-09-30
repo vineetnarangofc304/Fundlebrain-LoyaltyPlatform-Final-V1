@@ -838,3 +838,14 @@ Implemented & tested (frontend E2E 100% — iteration_109):
 
 Files: `campaigns_routes.py`, `communications_routes.py`, `server.py`, `CampaignObjective.jsx`, `CampaignWizard.jsx`, `CampaignRoiModal.jsx`.
 
+
+
+## 2026-06 — Expiry Targeting + Tiered Points Bands
+Follow-up to Points Campaigns. Frontend E2E 100% (iteration_110), backend curl-verified.
+
+- **Expiry Targeting audience** — new `audience_type="expiring_points"` with adjustable window `audience_filter.expiry_days` (7/15/30/60/90, default 30). `_expiring_points_mobiles()` resolves mobiles from `points_ledger` (points>0, upcoming `expires_at` within window), intersected with `points_balance>0`. Wizard: `audience-expiry-days`. Counts: 21,778 (30d), 63,189 (90d). Pairs perfectly with the "Points Expiry Reminder" template ({{points}} + {{expiry}}).
+- **Tiered Points Bands** (Points objective only) — new `POST /api/campaigns/tiered-points` creates ONE campaign per band (up to 4), each with its own points range (`min_points`/`max_points`) + its own SMS template; `mode` draft|launch|schedule launches/schedules every band. Wizard: `tiered-toggle` → `bands-editor` (BandRow with live per-band count via audience-preview, add/remove up to 4, per-band template). In tiered mode the Audience picker + single-template selector + live preview are hidden (shown as per-band). Review shows `review-bands`; footer routes to `submitTiered`.
+- setObj clears `tiered` when leaving the Points objective.
+
+Files: `campaigns_routes.py` (_expiring_points_mobiles, expiring_points branch, /tiered-points endpoint + PointsBandIn/TieredPointsIn), `CampaignWizard.jsx`, `CampaignObjective.jsx` (BandRow).
+
