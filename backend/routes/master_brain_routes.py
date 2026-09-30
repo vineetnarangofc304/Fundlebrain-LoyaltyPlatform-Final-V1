@@ -642,7 +642,7 @@ async def require_query_viewer(user: dict = Depends(get_current_user)) -> dict:
     (is_master_query_admin) sees ALL users' queries."""
     if user.get("is_demo"):
         raise HTTPException(403, "Read-only demo accounts cannot view Master Brain query logs.")
-    if not (user.get("is_master_admin") or user.get("is_master_query_admin")):
+    if not (user.get("is_master_admin") or user.get("is_master_query_admin") or user.get("role") == "cxo"):
         raise HTTPException(403, "Master Admin access required.")
     return user
 
@@ -683,7 +683,7 @@ def _extract_suggested_actions(reply: str) -> tuple[str, List[Dict[str, Any]]]:
 async def require_master_admin(user: dict = Depends(get_current_user)) -> dict:
     if user.get("is_demo"):
         raise HTTPException(403, "Read-only demo accounts cannot use Master Brain.")
-    if not user.get("is_master_admin"):
+    if not (user.get("is_master_admin") or user.get("role") == "cxo"):
         raise HTTPException(403, "Master Admin access required.")
     return user
 

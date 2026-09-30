@@ -8,7 +8,7 @@ import { useAuth } from "@/lib/auth";
 
 const ROLES = [
   "super_admin","brand_admin","crm_manager","marketing_manager","regional_manager",
-  "store_manager","store_staff","support_agent","analytics_viewer","readonly_executive",
+  "store_manager","store_staff","support_agent","analytics_viewer","readonly_executive","cxo",
 ];
 
 export default function UserManagement() {

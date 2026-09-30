@@ -25,6 +25,7 @@ class Role(str, Enum):
     SUPPORT_AGENT = "support_agent"
     ANALYTICS_VIEWER = "analytics_viewer"
     READONLY_EXECUTIVE = "readonly_executive"
+    CXO = "cxo"
 
 
 class LoyaltyTier(str, Enum):

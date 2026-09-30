@@ -720,6 +720,18 @@ async def _seed_and_bootstrap():
                     await users_col.update_one({"email": email}, {"$set": patch})
                     logger.info(f"Backfilled flags for {email}: {patch}")
 
+        # Seed a ready-to-use CXO login — executive view: Fundle Brain + Master Brain + Live
+        # Bill Monitor only. Idempotent (never clobbers an existing account/password).
+        cxo_email = os.environ.get("CXO_SEED_EMAIL", "cxo@fundle.io").lower()
+        if not await users_col.find_one({"email": cxo_email}):
+            await users_col.insert_one({
+                "id": uuid.uuid4().hex, "email": cxo_email, "name": "Fundle CXO",
+                "role": "cxo",
+                "password_hash": hash_password(os.environ.get("CXO_SEED_PASSWORD", "Cxo@2026")),
+                "is_active": True, "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info("Seeded CXO account")
+
         # Seed loyalty config
         cfg = await loyalty_config_col.find_one({"id": "default"})
         if not cfg:

@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { fmtNum } from "@/lib/format";
 import {
   Target, Users, MessageSquare, ClipboardCheck, ChevronLeft, ChevronRight,
-  Check, Sparkles, Send, Loader2, X, Users2, Play, Save, Database, Ticket, CalendarClock,
+  Check, Sparkles, Send, Loader2, X, Users2, Play, Save, Database, Ticket, CalendarClock, CheckCircle2,
 } from "lucide-react";
 import CampaignObjective from "./CampaignObjective";
 
@@ -341,6 +341,11 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   <>
                     <div className="text-3xl font-display mt-2" data-testid="audience-count">{fmtNum(audience.total_audience)}</div>
                     <div className="text-[11px] text-neutral-500">customers match · capped at your send limit · blacklisted numbers auto-excluded ({fmtNum(audience.blacklisted_total || 0)} on blacklist)</div>
+                    {audience.has_coupon_column && (
+                      <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1" data-testid="coupon-column-hint">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Coupon column detected — <code className="font-mono">{"{{coupon_code}}"}</code> will be personalised per customer from this database.
+                      </div>
+                    )}
                     {audience.sample?.length > 0 && (
                       <div className="flex gap-1.5 flex-wrap mt-2">
                         {audience.sample.slice(0, 8).map((s, i) => (

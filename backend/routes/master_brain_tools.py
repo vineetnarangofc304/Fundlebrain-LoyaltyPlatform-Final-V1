@@ -66,7 +66,7 @@ def _require_master(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         return {"error": "User context missing — Master Brain actions require an authenticated session."}
     if user.get("is_demo"):
         return {"error": "This is a read-only demo account — Master Brain actions are disabled."}
-    if not user.get("is_master_admin"):
+    if not (user.get("is_master_admin") or user.get("role") == "cxo"):
         return {"error": "Permission denied. Master Brain actions require Master Admin rights. "
                          "Ask a super admin to grant 'Master Admin' in User Management."}
     return None
@@ -1854,11 +1854,28 @@ async def _resolve_audience(audience_type, audience_value, attachment_id, mobile
                     "label": "high-value (Gold/Platinum/Elite)"}, None
         return None, (f"Unknown cohort '{audience_value}'. Try one_timers[:months], lapsed, dormant, "
                       f"inactive_90 or high_value.")
+    if at in {"marketing_db", "marketing_database", "mdb"}:
+        from database import db as _mdb_db
+        mdb = None
+        if audience_value:
+            mdb = await _mdb_db["marketing_databases"].find_one(
+                {"$or": [{"id": audience_value}, {"name": audience_value}]},
+                {"_id": 0, "id": 1, "mobiles": 1, "variables": 1, "name": 1})
+        if not mdb:
+            mdb = await _mdb_db["marketing_databases"].find_one(
+                {}, {"_id": 0, "id": 1, "mobiles": 1, "variables": 1, "name": 1},
+                sort=[("created_at", -1)])
+        if not mdb:
+            return None, ("No Marketing Database found. Upload the list (with a 'coupon' column for "
+                          "coupon campaigns) under Marketing → Marketing Database first.")
+        ms = list(dict.fromkeys(m for m in (mdb.get("mobiles") or []) if m))
+        return {"mode": "mobiles", "mobiles": ms, "var_map": mdb.get("variables") or {},
+                "label": f"marketing_db:{mdb.get('name')}"}, None
     if at == "segment" and audience_value:
         try:
             from routes.segments_routes import compile_tree
-            from database import segments_col
-            seg = await segments_col.find_one({"id": audience_value}, {"_id": 0})
+            from database import db as _seg_db
+            seg = await _seg_db["segments"].find_one({"id": audience_value}, {"_id": 0})
             if not seg:
                 return None, f"Segment '{audience_value}' not found."
             f = await compile_tree(seg.get("tree") or {})
@@ -1866,7 +1883,7 @@ async def _resolve_audience(audience_type, audience_value, attachment_id, mobile
         except Exception as e:  # noqa: BLE001
             return None, f"Could not resolve segment: {e}"
     return None, (f"Unknown audience_type '{audience_type}'. Use all, tier, city, cohort, segment, "
-                  f"report or mobiles.")
+                  f"marketing_db, report or mobiles.")
 
 
 async def _is_campaign_cancelled(cid: str) -> bool:
@@ -1875,7 +1892,7 @@ async def _is_campaign_cancelled(cid: str) -> bool:
 
 
 async def _run_mb_campaign(cid: str) -> None:
-    from routes.communications_routes import send_sms_campaign_karix, _render
+    from routes.communications_routes import send_sms_campaign_karix, _render, _params_for_customer
     from database import templates_col
     camp = await master_campaigns_col.find_one({"id": cid}, {"_id": 0})
     if not camp:
@@ -1900,9 +1917,12 @@ async def _run_mb_campaign(cid: str) -> None:
             else:
                 failed += 1
         if spec.get("mode") == "mobiles":
+            from routes.blacklist_util import norm10 as _n10
+            var_map = spec.get("var_map") or {}
             for m in spec.get("mobiles") or []:
                 c = await _find_customer(m)
-                await _dispatch(m, _camp_params(c))
+                extra = (var_map.get(_n10(m)) or var_map.get(m)) if var_map else None
+                await _dispatch(m, _params_for_customer(c or {"mobile": m}, extra=extra))
                 processed += 1
                 if processed % 25 == 0:
                     if await _is_campaign_cancelled(cid):
@@ -1916,7 +1936,7 @@ async def _run_mb_campaign(cid: str) -> None:
                 m = c.get("mobile")
                 if not m:
                     continue
-                await _dispatch(m, _camp_params(c))
+                await _dispatch(m, _params_for_customer(c))
                 processed += 1
                 if processed % 25 == 0:
                     if await _is_campaign_cancelled(cid):
@@ -1974,9 +1994,31 @@ async def _tool_send_campaign(message: Optional[str] = None, template_id: Option
         count = await customers_col.count_documents(spec["filter"])
         sdocs = await customers_col.find(spec["filter"], {"_id": 0, "mobile": 1}).limit(5).to_list(5)
         sample = [d.get("mobile") for d in sdocs]
-    from routes.communications_routes import _render
-    sample_text = _render((tpl.get("body") if tpl else message) or "",
-                          {"name": "there", "tier": "", "points_balance": 0, "city": ""})
+    from routes.communications_routes import _render, _params_for_customer
+    from routes.blacklist_util import norm10 as _n10
+    import re as _re
+    body_text = ((tpl.get("body") if tpl else message) or "")
+    # Guard: never send literal {{coupon_code}}. It only resolves when the audience carries
+    # per-recipient coupon data (a Marketing Database with a coupon column).
+    needs_coupon = "{{coupon_code}}" in _re.sub(r"\s", "", body_text)
+    var_map = spec.get("var_map") or {}
+    has_coupon_data = any(
+        isinstance(v, dict) and (v.get("coupon") or v.get("coupon_code"))
+        for v in var_map.values())
+    if needs_coupon and not has_coupon_data:
+        return {"error": ("This message uses {{coupon_code}} but the chosen audience has no per-customer "
+                          "coupon data, so it would send the literal text '{{coupon_code}}'. Upload the "
+                          "coupon list as a Marketing Database (with a 'coupon' column) and set "
+                          "audience_type='marketing_db' (audience_value = the database name) so each "
+                          "customer receives their OWN code.")}
+    # Realistic preview using the FIRST recipient's actual profile + uploaded columns (real coupon).
+    sample_mobile = sample[0] if sample else None
+    sample_cust = await _find_customer(sample_mobile) if sample_mobile else None
+    sample_extra = None
+    if var_map and sample_mobile:
+        sample_extra = var_map.get(_n10(sample_mobile)) or var_map.get(sample_mobile)
+    sample_params = _params_for_customer(sample_cust or {"mobile": sample_mobile or ""}, extra=sample_extra)
+    sample_text = _render(body_text, sample_params)
     plan = {"action": "send_campaign", "channel": "sms", "via": "Telecom Provider Bulk SMS",
             "recipients": count, "audience": spec.get("label"),
             "template": tpl.get("name") if tpl else None,
@@ -3847,11 +3889,14 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "send_campaign",
         "description": "MUTATION (Master Admin). Send a BULK SMS CAMPAIGN via the Karix Bulk SMS API. Provide either "
-                       "a raw `message` (mustache vars {{name}}/{{tier}}/{{city}}/{{points_balance}} are filled per "
+                       "a raw `message` (mustache vars {{name}}/{{tier}}/{{city}}/{{points}}/{{coupon_code}} are filled per "
                        "customer) OR an existing SMS `template_id`. Audience: audience_type='all' | 'tier' (audience_value=tier slug) "
                        "| 'city' (audience_value=city) | 'cohort' (audience_value=one_timers[:months]|lapsed|dormant|inactive_90|high_value) "
-                       "| 'segment' (audience_value=segment_id) | 'report' (the uploaded report's mobiles, optional attachment_id) "
-                       "| 'mobiles' (explicit mobiles list). OPTIONALLY set an `objective` so the campaign gets real ROI tracking in the "
+                       "| 'segment' (audience_value=segment_id) | 'marketing_db' (audience_value=Marketing Database name/id — REQUIRED for "
+                       "coupon campaigns: each recipient gets THEIR OWN {{coupon_code}} from the uploaded 'coupon' column, plus any other "
+                       "uploaded columns) | 'report' (the uploaded report's mobiles, optional attachment_id) | 'mobiles' (explicit mobiles list). "
+                       "IMPORTANT: if the message/template contains {{coupon_code}}, you MUST use audience_type='marketing_db' — any other "
+                       "audience has no per-customer coupon and the send will be refused. OPTIONALLY set an `objective` so the campaign gets real ROI tracking in the "
                        "Campaign Manager: 'generic' (default — anyone who shops again), 'store' (objective_params={store_codes:[...]}), "
                        "'coupon' (objective_params={coupon_codes:[...]}), 'sku' (objective_params={categories/subcategories/skus:[...]}). "
                        "`roi_window` is the attribution window (72h|3d|5d|7d|14d|30d, default 7d) and `cost` is optional spend for ROI%. "
@@ -3860,8 +3905,8 @@ MASTER_TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {
             "message": {"type": "string", "description": "Raw SMS text (omit if using template_id)"},
             "template_id": {"type": "string", "description": "Existing SMS template id (omit if using message)"},
-            "audience_type": {"type": "string", "enum": ["all", "tier", "city", "cohort", "segment", "report", "mobiles"], "default": "all"},
-            "audience_value": {"type": "string", "description": "tier slug / city / cohort key / segment_id depending on audience_type"},
+            "audience_type": {"type": "string", "enum": ["all", "tier", "city", "cohort", "segment", "marketing_db", "report", "mobiles"], "default": "all"},
+            "audience_value": {"type": "string", "description": "tier slug / city / cohort key / segment_id / marketing-database name or id depending on audience_type"},
             "attachment_id": {"type": "string", "description": "uploaded report id when audience_type='report'"},
             "mobiles": {"type": "array", "items": {"type": "string"}, "description": "explicit mobiles when audience_type='mobiles'"},
             "objective": {"type": "string", "enum": ["generic", "store", "coupon", "sku"], "default": "generic",

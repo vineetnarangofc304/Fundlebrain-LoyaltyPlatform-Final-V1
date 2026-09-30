@@ -69,3 +69,10 @@ export const STORE_LOGIN_ROLES = ["store_manager", "store_staff"];
 export function isStoreLogin(user) {
   return !!user && STORE_LOGIN_ROLES.includes(user.role);
 }
+
+// CXO logins get an executive-only view: Fundle Brain + Master Brain + Live Bill Monitor. Nothing
+// else — no dashboards, reports, customers, users, settings, data or operations.
+export const CXO_LOGIN_ROLES = ["cxo"];
+export function isCxoLogin(user) {
+  return !!user && CXO_LOGIN_ROLES.includes(user.role);
+}

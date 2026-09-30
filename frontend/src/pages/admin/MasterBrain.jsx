@@ -95,7 +95,7 @@ export default function MasterBrain() {
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthScanning, setHealthScanning] = useState(false);
 
-  const isMaster = !!user?.is_master_admin;
+  const isMaster = !!user?.is_master_admin || user?.role === "cxo";
   const isQueryAdmin = !!user?.is_master_query_admin;
   const canAccess = isMaster || isQueryAdmin;
 

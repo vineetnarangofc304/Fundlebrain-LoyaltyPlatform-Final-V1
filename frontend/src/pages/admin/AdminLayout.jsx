@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
-import { useAuth, hasRole, isStoreLogin } from "@/lib/auth";
+import { useAuth, hasRole, isStoreLogin, isCxoLogin } from "@/lib/auth";
 import {
   LayoutDashboard, TrendingUp, UserRound, Award, BarChart3, Store as StoreIcon, MessageCircle,
   Users, Ticket, Send, Brain, Activity, UserCog, MessageSquare, FileBarChart, LogOut, Sparkles,
@@ -153,12 +153,23 @@ const STORE_SECTIONS = [
   },
 ];
 
+// CXO logins see ONLY the Live Bill Monitor here (Fundle Brain + Master Brain are the hero entries above).
+const CXO_SECTIONS = [
+  {
+    label: "EXECUTIVE",
+    items: [
+      { to: "/admin", end: true, icon: Radio, label: "Live Bill Monitor", testid: "nav-live-monitor" },
+    ],
+  },
+];
+
 export default function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const storeLogin = isStoreLogin(user);
-  const sections = storeLogin ? STORE_SECTIONS : SECTIONS;
+  const cxoLogin = isCxoLogin(user);
+  const sections = storeLogin ? STORE_SECTIONS : cxoLogin ? CXO_SECTIONS : SECTIONS;
 
   // Store logins are hard-restricted to Live Monitor + Customer 360 — bounce any other route.
   useEffect(() => {
@@ -168,6 +179,16 @@ export default function AdminLayout() {
       || p === "/admin/customers" || p.startsWith("/admin/customers/");
     if (!allowed) navigate("/admin", { replace: true });
   }, [storeLogin, location.pathname, navigate]);
+
+  // CXO logins are hard-restricted to Live Bill Monitor + Fundle Brain + Master Brain — bounce anything else.
+  useEffect(() => {
+    if (!cxoLogin) return;
+    const p = location.pathname;
+    const allowed = p === "/admin"
+      || p === "/admin/ai" || p.startsWith("/admin/ai/")
+      || p === "/admin/master-brain" || p.startsWith("/admin/master-brain/");
+    if (!allowed) navigate("/admin", { replace: true });
+  }, [cxoLogin, location.pathname, navigate]);
 
   // Downloads Center: poll for newly-ready exports → toast + sidebar badge.
   const [downloadsBadge, setDownloadsBadge] = useState(0);
@@ -355,9 +376,9 @@ export default function AdminLayout() {
           </NavLink>
           )}
 
-          {/* Master Brain hero — only for Master Admins. Red treatment signals
+          {/* Master Brain hero — Master Admins and CXO logins. Red treatment signals
               that this surface can take LIVE actions on the database. */}
-          {user?.is_master_admin && (
+          {(user?.is_master_admin || cxoLogin) && (
             <NavLink
               to="/admin/master-brain"
               data-testid="nav-master-brain"

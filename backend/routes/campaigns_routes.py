@@ -73,11 +73,15 @@ async def audience_preview(body: AudiencePreviewIn, user: dict = Depends(get_cur
             return {"total_audience": 0, "sample": [], "needs_filter": True,
                     "blacklisted_total": blacklisted}
         mdb = await db["marketing_databases"].find_one(
-            {"id": mdb_id}, {"_id": 0, "mobiles": 1, "member_count": 1, "non_member_count": 1})
+            {"id": mdb_id}, {"_id": 0, "mobiles": 1, "member_count": 1, "non_member_count": 1, "variables": 1})
         mobiles = (mdb or {}).get("mobiles") or []
         bl = await blacklisted_set()
         eff = [m for m in mobiles if norm10(m) not in bl] if bl else list(mobiles)
         sample_mobiles = eff[:10]
+        # Detect a per-recipient coupon column so the wizard can confirm {{coupon_code}} will personalise.
+        _vm = (mdb or {}).get("variables") or {}
+        has_coupon_column = any(
+            isinstance(v, dict) and (v.get("coupon") or v.get("coupon_code")) for v in _vm.values())
         member_map: Dict[str, Any] = {}
         if sample_mobiles:
             async for cst in customers_col.find(
@@ -93,6 +97,7 @@ async def audience_preview(body: AudiencePreviewIn, user: dict = Depends(get_cur
         return {"total_audience": len(eff), "sample": sample,
                 "member_count": (mdb or {}).get("member_count"),
                 "non_member_count": (mdb or {}).get("non_member_count"),
+                "has_coupon_column": has_coupon_column,
                 "blacklisted_total": blacklisted}
     # Guard: an audience type that REQUIRES a filter key but has none must not degenerate to the
     # whole base (which is misleading in the wizard) — report needs_filter with a 0 count instead.
