@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
 import { fmtMoney2, fmtNum } from "@/lib/format";
-import { X, Loader2, TrendingUp, Users, Store, Ticket, Package, IndianRupee } from "lucide-react";
+import { X, Loader2, TrendingUp, Users, Store, Ticket, Package, IndianRupee, Coins } from "lucide-react";
 import { WINDOWS } from "./CampaignObjective";
 
 function Stat({ label, value, sub, testid, accent }) {
@@ -128,6 +128,18 @@ export default function CampaignRoiModal({ campaign, onClose }) {
                     <Stat label="Units sold" value={fmtNum(data.sku.units_sold)} sub={`${fmtNum(data.sku.target_sku_count)} SKUs targeted`} testid="roi-sku-units" />
                     <Stat label="Value sold" value={fmtMoney2(data.sku.value_sold)} accent="text-emerald-700" testid="roi-sku-value" />
                     <Stat label="Buyers" value={fmtNum(data.sku.buyers)} testid="roi-sku-buyers" />
+                  </div>
+                </div>
+              )}
+
+              {/* points */}
+              {data.points && (
+                <div data-testid="roi-points">
+                  <div className="text-[10px] uppercase tracking-widest text-neutral-500 mb-2 flex items-center gap-1"><Coins className="w-3.5 h-3.5" /> Points redeemed by this audience</div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <Stat label="Points redeemed" value={fmtNum(data.points.points_redeemed)} accent="text-emerald-700" testid="roi-points-redeemed" />
+                    <Stat label="Redemption events" value={fmtNum(data.points.redemption_events)} testid="roi-points-events" />
+                    <Stat label="Unique redeemers" value={fmtNum(data.points.redeemers)} testid="roi-points-redeemers" />
                   </div>
                 </div>
               )}

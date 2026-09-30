@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { Store, Ticket, Package, Target, Search, X, Clock } from "lucide-react";
+import { Store, Ticket, Package, Target, Search, X, Clock, Coins } from "lucide-react";
 
 const OBJECTIVES = [
   { k: "generic", label: "Generic", icon: Target, hint: "Anyone who shops again after the send" },
+  { k: "points", label: "Points", icon: Coins, hint: "Show live points & drive redemption" },
   { k: "store", label: "Store-wise", icon: Store, hint: "Drive footfall to specific stores" },
   { k: "coupon", label: "Coupon", icon: Ticket, hint: "Track coupon redemptions" },
   { k: "sku", label: "Product / SKU", icon: Package, hint: "Push categories or specific SKUs" },
@@ -95,6 +96,16 @@ export default function CampaignObjective({ form, setForm }) {
             {filteredStores.length === 0 && <span className="text-xs text-neutral-400 p-1">No stores</span>}
           </div>
           <div className="text-[10px] text-neutral-500 mt-1">{(p.store_codes || []).length} store(s) selected</div>
+        </div>
+      )}
+
+      {obj === "points" && (
+        <div className="text-xs text-neutral-600" data-testid="objective-points-note">
+          Each recipient's <b>live points balance</b> is injected via the{" "}
+          <code className="bg-white px-1 rounded border font-mono">{"{{points}}"}</code> variable —
+          looked up by mobile number at send time. ROI tracks the points this audience actually
+          redeems within the window below. Tip: use the <b>"By points balance"</b> audience so you
+          only message customers who hold points.
         </div>
       )}
 

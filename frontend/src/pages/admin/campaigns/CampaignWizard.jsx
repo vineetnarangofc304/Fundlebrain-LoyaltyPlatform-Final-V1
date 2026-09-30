@@ -35,6 +35,8 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
   const [scheduleAt, setScheduleAt] = useState("");
   const [allocating, setAllocating] = useState(false);
   const [nb, setNb] = useState({ coupon_type: "percentage", discount_value: 10, prefix: BRAND.couponPrefix, valid_days: 30 });
+  const [msgPreview, setMsgPreview] = useState(null);
+  const [previewingMsg, setPreviewingMsg] = useState(false);
   const reqRef = useRef(0);
 
   useEffect(() => {
@@ -73,6 +75,24 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, form.audience_type, JSON.stringify(form.audience_filter)]);
 
+  // Live message preview — resolves the exact text sample recipients get, with LIVE points by
+  // mobile. Previews the ACTUAL body that will send (template body if linked, else fallback body).
+  const runMessagePreview = async () => {
+    const tpl = templates.find((t) => t.id === form.template_id);
+    const body = (tpl?.body || form.message_template || "").trim();
+    if (!body) { toast.error("Pick a template (or type a preview body) containing {{points}} first"); return; }
+    setPreviewingMsg(true);
+    try {
+      const r = await api.post("/campaigns/message-preview", {
+        body, audience_type: form.audience_type, audience_filter: form.audience_filter || {}, link: form.link || null,
+      });
+      setMsgPreview(r.data);
+      if (!(r.data.samples || []).length) toast.info("No sample recipients found for this audience yet");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Preview failed");
+    } finally { setPreviewingMsg(false); }
+  };
+
   const stepValid = () => {
     const k = STEPS[step].key;
     if (k === "objective") return !!form.name.trim();
@@ -81,6 +101,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
       if (form.audience_type === "marketing_db") return !!form.audience_filter?.marketing_db_id;
       if (form.audience_type === "tier") return !!form.audience_filter?.tier;
       if (form.audience_type === "city") return !!form.audience_filter?.city;
+      if (form.audience_type === "points") return (form.audience_filter?.min_points || 0) > 0;
       if (form.audience_type === "cohort") return !!form.audience_filter?.cohort;
       return true;
     }
@@ -208,6 +229,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   <option value="marketing_db">From Marketing Database</option>
                   <option value="tier">By tier</option>
                   <option value="city">By city</option>
+                  <option value="points">By points balance</option>
                   <option value="cohort">By cohort</option>
                 </select>
                 {form.audience_type === "segment" && (
@@ -232,6 +254,12 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                 )}
                 {form.audience_type === "city" && (
                   <input className="k-input" placeholder="City" value={form.audience_filter?.city || ""} onChange={(e) => setForm({ ...form, audience_filter: { city: e.target.value } })} data-testid="audience-city-input" />
+                )}
+                {form.audience_type === "points" && (
+                  <input className="k-input" type="number" min="1" placeholder="Min points held (e.g. 100)"
+                    value={form.audience_filter?.min_points || ""}
+                    onChange={(e) => setForm({ ...form, audience_filter: { min_points: parseInt(e.target.value, 10) || 0 } })}
+                    data-testid="audience-minpoints-input" />
                 )}
                 {form.audience_type === "cohort" && (
                   <select className="k-input" value={form.audience_filter?.cohort || ""} onChange={(e) => setForm({ ...form, audience_filter: { cohort: e.target.value } })} data-testid="audience-cohort-select">
@@ -321,6 +349,27 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   <code className="bg-white px-1 rounded border">{"{{coupon_code}}"}</code>.
                   <br />Loyalty/segment audiences fill these from the customer profile ({"{{expiry}}"} = their own points-expiry date). Uploaded Marketing DBs use your file's <b>name / points / expiry / link</b> columns.
                 </div>
+              </div>
+
+              <div className="border border-emerald-200 rounded p-3 bg-emerald-50/50" data-testid="msg-preview-box">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-[10px] uppercase tracking-widest text-emerald-800 font-medium flex items-center gap-1"><Sparkles className="w-3 h-3" /> Live preview — resolves real points by mobile</label>
+                  <button type="button" className="k-btn k-btn-sm k-btn-ghost" onClick={runMessagePreview} disabled={previewingMsg} data-testid="msg-preview-btn">
+                    {previewingMsg ? <Loader2 className="w-3 h-3 animate-spin" /> : "Preview"}
+                  </button>
+                </div>
+                {msgPreview?.samples?.length > 0 ? (
+                  <div className="space-y-1.5" data-testid="msg-preview-list">
+                    {msgPreview.samples.map((s, i) => (
+                      <div key={i} className="text-xs bg-white border rounded p-2" data-testid={`msg-preview-${i}`}>
+                        <div className="text-[10px] text-neutral-400 mb-0.5">{s.mobile} · {s.is_member ? `${fmtNum(s.points)} pts` : "non-member · 0 pts"}</div>
+                        <div className="text-neutral-800">{s.rendered}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-neutral-500">Click Preview to see the exact message a few sample recipients will receive, with their live points balance filled in.</div>
+                )}
               </div>
 
               <div className="grid grid-cols-3 gap-3">

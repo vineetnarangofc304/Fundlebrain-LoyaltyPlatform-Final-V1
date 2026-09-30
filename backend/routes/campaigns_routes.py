@@ -82,11 +82,11 @@ async def audience_preview(body: AudiencePreviewIn, user: dict = Depends(get_cur
         if sample_mobiles:
             async for cst in customers_col.find(
                     {"mobile": {"$in": sample_mobiles}},
-                    {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1}):
+                    {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1, "points_balance": 1}):
                 member_map[cst["mobile"]] = cst
         sample = [
             ({"mobile": m, "name": member_map[m].get("name"), "tier": member_map[m].get("tier"),
-              "city": member_map[m].get("city")} if m in member_map
+              "city": member_map[m].get("city"), "points_balance": member_map[m].get("points_balance")} if m in member_map
              else {"mobile": m, "name": None, "tier": "non-member"})
             for m in sample_mobiles
         ]
@@ -104,8 +104,71 @@ async def audience_preview(body: AudiencePreviewIn, user: dict = Depends(get_cur
     fil = await _audience_filter_async(fake)
     total = await customers_col.count_documents(fil)
     sample = await customers_col.find(
-        fil, {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1}).limit(10).to_list(10)
+        fil, {"_id": 0, "mobile": 1, "name": 1, "tier": 1, "city": 1, "points_balance": 1}).limit(10).to_list(10)
     return {"total_audience": total, "sample": sample, "blacklisted_total": blacklisted}
+
+
+class MessagePreviewIn(BaseModel):
+    body: str = ""
+    audience_type: str = "all"
+    audience_filter: Dict[str, Any] = {}
+    link: Optional[str] = None
+
+
+@router.post("/message-preview")
+async def message_preview(body_in: MessagePreviewIn, user: dict = Depends(get_current_user)):
+    """Resolve the exact message a few sample recipients would receive, with LIVE points filled
+    in from each mobile's loyalty profile. Powers the Campaign Wizard live preview so the user can
+    confirm {{points}} / {{expiry}} pick up real balances before launching."""
+    from routes.communications_routes import _params_for_customer, _render, _points_expiry_map
+    from routes.blacklist_util import norm10
+    tmpl = body_in.body or ""
+    at = body_in.audience_type or "all"
+    af = body_in.audience_filter or {}
+    proj = {"_id": 0, "name": 1, "mobile": 1, "tier": 1, "points_balance": 1, "city": 1}
+    var_map: Dict[str, Any] = {}
+    members: set = set()
+    if at == "marketing_db":
+        mdb_id = af.get("marketing_db_id")
+        mdb = await db["marketing_databases"].find_one(
+            {"id": mdb_id}, {"_id": 0, "mobiles": 1, "variables": 1}) if mdb_id else None
+        mobiles = [(m or "").strip() for m in ((mdb or {}).get("mobiles") or []) if (m or "").strip()][:6]
+        var_map = (mdb or {}).get("variables") or {}
+        variants = list({m for m in mobiles} | {norm10(m) for m in mobiles})
+        mem: Dict[str, Any] = {}
+        async for d in customers_col.find({"mobile": {"$in": variants}}, proj):
+            mem[norm10(d.get("mobile"))] = d
+        recipients: List[Dict[str, Any]] = []
+        for m in mobiles:
+            d = mem.get(norm10(m))
+            if d:
+                members.add(m)
+                recipients.append({**d, "mobile": m})
+            else:
+                recipients.append({"mobile": m})
+    else:
+        fil = await _audience_filter_async({"audience_type": at, "audience_filter": af})
+        recipients = await customers_col.find(fil, proj).limit(6).to_list(6)
+        members = {r.get("mobile") for r in recipients}
+    exp_map: Dict[str, str] = {}
+    if "{{expiry}}" in re.sub(r"\s", "", tmpl):
+        mobs = [r.get("mobile") for r in recipients if r.get("mobile")]
+        if mobs:
+            exp_map = await _points_expiry_map(mobs)
+    samples = []
+    for r in recipients:
+        mob = r.get("mobile") or ""
+        extra = (var_map.get(norm10(mob)) or var_map.get(mob)) if var_map else None
+        exp = exp_map.get(mob) or exp_map.get(norm10(mob))
+        params = _params_for_customer(r, extra=extra, campaign_link=body_in.link, expiry=exp)
+        samples.append({
+            "mobile": mob,
+            "name": r.get("name"),
+            "points": int(r.get("points_balance") or 0),
+            "is_member": mob in members,
+            "rendered": _render(tmpl, params),
+        })
+    return {"samples": samples}
 
 
 # ─────────────────────────── Blacklist (Phase 4) ───────────────────────────
@@ -180,6 +243,20 @@ def _audience_filter(c: dict) -> dict:
             fil["visit_count"] = {"$lte": 1}
         elif cohort == "vip":
             fil["tier"] = {"$in": ["platinum", "diamond"]}
+    # NEW: points-balance audience — target customers who actually hold points (>= min_points).
+    if c.get("audience_type") == "points":
+        try:
+            mn = max(int(af.get("min_points") or 1), 1)
+        except (TypeError, ValueError):
+            mn = 1
+        q: Dict[str, Any] = {"$gte": mn}
+        mx = af.get("max_points")
+        if mx not in (None, ""):
+            try:
+                q["$lte"] = int(mx)
+            except (TypeError, ValueError):
+                pass
+        fil["points_balance"] = q
     return fil
 
 
@@ -630,6 +707,24 @@ async def campaign_roi_detail(campaign_id: str, window: Optional[str] = None,
             "units_sold": sk.get("units", 0),
             "value_sold": round(sk.get("value") or 0, 2),
             "buyers": len(sk.get("customers") or []),
+        }
+
+    # ---- Points redeemed by the targeted audience within the window (points campaigns) ----
+    if c.get("objective") == "points":
+        ledger = db["points_ledger"]
+        prows = await ledger.aggregate([
+            {"$match": {"customer_mobile": {"$in": mobiles},
+                        "type": {"$in": ["redeem", "redemption"]},
+                        "created_at": {"$gte": t0_iso, "$lte": end_iso}}},
+            {"$group": {"_id": None, "events": {"$sum": 1},
+                        "points": {"$sum": {"$abs": "$points"}},
+                        "customers": {"$addToSet": "$customer_mobile"}}},
+        ], allowDiskUse=True, maxTimeMS=30000).to_list(1)
+        pr = prows[0] if prows else {}
+        out["points"] = {
+            "redemption_events": pr.get("events", 0),
+            "points_redeemed": int(abs(pr.get("points") or 0)),
+            "redeemers": len(pr.get("customers") or []),
         }
 
     return out

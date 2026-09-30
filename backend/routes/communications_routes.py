@@ -865,6 +865,7 @@ def _params_for_customer(c: Dict[str, Any], extra: Optional[Dict[str, Any]] = No
     the campaign URL. `extra` (per-mobile values from an uploaded Marketing DB) overrides all of
     these (KAZO Point 1 — variable part in Upload DB + Loyalty DB)."""
     pts = c.get("points_balance", 0)
+    is_member = "points_balance" in c  # matched a live loyalty profile (not a bare {mobile})
     p: Dict[str, Any] = {
         "name": (c.get("name") or "").split(" ")[0] or "there",
         "tier": c.get("tier", "silver"),
@@ -872,8 +873,10 @@ def _params_for_customer(c: Dict[str, Any], extra: Optional[Dict[str, Any]] = No
         "points": pts,
         "city": c.get("city", ""),
     }
-    if expiry:
+    if expiry is not None:
         p["expiry"] = expiry
+    else:
+        p["expiry"] = ""
     if campaign_link:
         p["link"] = campaign_link
     if extra:
@@ -886,6 +889,11 @@ def _params_for_customer(c: Dict[str, Any], extra: Optional[Dict[str, Any]] = No
         cc = extra.get("coupon_code") or extra.get("coupon")
         if cc not in (None, ""):
             p["coupon_code"] = cc
+    # Live loyalty balance is authoritative for members — never let an uploaded "points" column
+    # shadow a real customer's balance (the whole point of a live-points campaign).
+    if is_member:
+        p["points_balance"] = pts
+        p["points"] = pts
     return p
 
 
@@ -957,19 +965,25 @@ async def _run_bulk_send_job(job_id: str, template_id: str, audience_filter: Dic
         # fail with "operation exceeded time limit".
         if explicit_mobiles is not None:
             # Marketing-DB / explicit-mobile campaign — send to ALL numbers (members + non-members).
+            from routes.blacklist_util import norm10 as _n10
             mob_list = [m for m in explicit_mobiles if m][:min(limit, 50000)]
             member_map: Dict[str, Any] = {}
             CH = 5000
             for i in range(0, len(mob_list), CH):
                 chunk = mob_list[i:i + CH]
+                # Match by BOTH the raw and normalised (last-10) mobile so a member's LIVE points
+                # resolve even when the uploaded number's format differs from the loyalty profile.
+                variants = list({m for m in chunk} | {_n10(m) for m in chunk})
                 with pymongo.timeout(120):
                     docs = await customers_col.find(
-                        {"mobile": {"$in": chunk}},
+                        {"mobile": {"$in": variants}},
                         {"_id": 0, "id": 1, "name": 1, "mobile": 1, "tier": 1,
-                         "points_balance": 1, "city": 1}).to_list(len(chunk))
+                         "points_balance": 1, "city": 1}).to_list(len(variants))
                 for d in docs:
-                    member_map[d["mobile"]] = d
-            recipients = [member_map.get(m, {"mobile": m}) for m in mob_list]
+                    member_map[_n10(d.get("mobile"))] = d
+            # Keep the original send-to number; hydrate {{points}}/{{name}}/{{tier}} from the profile.
+            recipients = [({**member_map[_n10(m)], "mobile": m} if _n10(m) in member_map
+                           else {"mobile": m}) for m in mob_list]
         else:
             with pymongo.timeout(300):
                 recipients = await customers_col.find(

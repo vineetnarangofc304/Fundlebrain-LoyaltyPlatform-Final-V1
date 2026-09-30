@@ -820,6 +820,44 @@ async def _seed_and_bootstrap():
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not seed AW'26 templates: {e}")
 
+    # Ready-made "live points" campaign SMS templates: {{points}} resolves each customer's LIVE
+    # balance by mobile at send time; the expiry variant adds {{expiry}}. Seeded once each (guarded
+    # by seed_flags). dlt_template_id is left blank on purpose — a variable SMS needs the user's own
+    # DLT content template ID registered with the operator before a real send.
+    try:
+        from database import templates_col, db as _db
+        seed_flags = _db["seed_flags"]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _points_tpls = [
+            ("kazo_points_balance_tpl", "KAZO · Points Balance Reminder",
+             "Hi {{name}}, you have {{points}} points in your KAZO account. Redeem them on your next visit! T&C Apply",
+             [{"key": "name", "label": "Name"}, {"key": "points", "label": "Live points balance"}]),
+            ("kazo_points_expiry_tpl", "KAZO · Points Expiry Reminder",
+             "Hi {{name}}, your {{points}} points expire on {{expiry}}. Redeem them before they lapse! T&C Apply",
+             [{"key": "name", "label": "Name"}, {"key": "points", "label": "Live points balance"},
+              {"key": "expiry", "label": "Points expiry date"}]),
+        ]
+        for flag, name, body, vars_ in _points_tpls:
+            if await seed_flags.find_one({"_id": flag}):
+                continue
+            await templates_col.insert_one({
+                "id": uuid.uuid4().hex, "name": name, "channel": "sms",
+                "event_trigger": "campaign_bulk", "body": body, "variables": vars_,
+                "sender_id": "KAZOFN", "dlt_entity_id": "1101409540000012086",
+                "dlt_template_id": "", "dlt_tm_id": None,
+                "waba_template_id": None, "waba_params_order": [], "waba_language": "en",
+                "waba_category": None, "waba_approval_status": "pending", "waba_approval_note": None,
+                "preview_url": False, "status": "active",
+                "note": ("Ready-made live-points template ({{points}} = each customer's live balance, "
+                         "looked up by mobile). Add your DLT content template ID (with a variable "
+                         "placeholder) before launching a real SMS send."),
+                "created_at": now_iso, "updated_at": now_iso, "created_by": "system-seed",
+            })
+            await seed_flags.insert_one({"_id": flag, "seeded_at": now_iso})
+            logger.info(f"Seeded live-points SMS template '{name}'")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not seed points templates: {e}")
+
 
 
 @app.on_event("startup")
