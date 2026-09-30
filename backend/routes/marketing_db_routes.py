@@ -41,13 +41,16 @@ def _parse_mobiles_text(text: str) -> List[str]:
 
 
 # Variable columns we can carry per-mobile from an upload and merge into the SMS as
-# {{name}} {{points}} {{expiry}} {{link}} (KAZO Point 1 — variable part in Upload DB).
+# {{name}} {{points}} {{expiry}} {{link}} {{coupon_code}} (KAZO Point 1 — variable part in Upload DB).
+# A "coupon" column lets the client SEND THEIR OWN pre-existing coupon codes directly as
+# {{coupon_code}} — no need to generate a unique batch in our system.
 _VAR_ALIASES = {
     "mobile": ("mobile", "phone", "number", "msisdn", "contact", "mob"),
     "name": ("name", "customer", "first"),
     "points": ("points", "point", "pts", "balance"),
     "expiry": ("expiry", "expire", "expires", "valid", "validity"),
     "link": ("link", "url", "short"),
+    "coupon_code": ("coupon", "voucher", "promo"),
 }
 
 
@@ -72,7 +75,7 @@ def _rows_to_records(rows: List[Dict[str, Any]], cols: Dict[str, Optional[str]])
     recs: List[Dict[str, Any]] = []
     for row in rows:
         rec: Dict[str, Any] = {"mobile": row.get(cols["mobile"]) if cols["mobile"] else None}
-        for k in ("name", "points", "expiry", "link"):
+        for k in ("name", "points", "expiry", "link", "coupon_code"):
             if cols.get(k) is not None:
                 rec[k] = row.get(cols[k])
         recs.append(rec)

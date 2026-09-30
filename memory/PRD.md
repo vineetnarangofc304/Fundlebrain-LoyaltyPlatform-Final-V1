@@ -33,6 +33,12 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 
 
+### 🟢 Batch (Jun 16, 2026): coupon-from-sheet + Bulk Send Jobs drill-down/download
+- **Uploaded sheet coupon not filling {{coupon_code}}** (only {{name}} worked): root cause — `marketing_db_routes.py` `_VAR_ALIASES`/`_rows_to_records` didn't include a coupon column, so it was dropped at upload; and `_params_for_customer` only copied name/points/expiry/link. FIX: added `coupon_code` alias (coupon/voucher/promo) to upload detection + records; `_params_for_customer` now copies ALL uploaded columns as vars and aliases coupon→coupon_code. Lets clients SEND THEIR OWN pre-existing coupon codes from the sheet directly (no batch generation needed). Verified end-to-end on the client's `Sep 30 Test.csv` ({{coupon_code}} → Aq1w2e3r4 / P0o9i8u7). NOTE: existing uploaded DBs must be RE-UPLOADED to capture the coupon column.
+- **Bulk Send Jobs — no drill-down/download**: added `GET /communications/bulk-jobs/{id}/recipients` (per-recipient mobile, delivery status, message, MID, time) + `/recipients.csv` export; frontend `BulkJobsPage.jsx` rows now click to open a recipient delivery-report modal with a Download CSV button (+ per-row View/Download). Message column reads the rendered SMS from `payload_summary.text`.
+- Both verified on preview; need deploy to reach prod.
+
+
 ### 🟢 Batch (Jun 16, 2026): bonus cap + Campaign Manager items were mostly STALE-PROD, not bugs
 Client reported 8 items. Findings after code audit:
 - **Bulk bonus 20k cap → 100k**: `master_brain_tools.py` new `BULK_BONUS_CAP=100000` (was shared INLINE_CAP=20000) used in `bulk_award_bonus`; credits via batched bulk_write (CREDIT_BATCH=2000) so 1-lakh is safe. FIXED (deploy).

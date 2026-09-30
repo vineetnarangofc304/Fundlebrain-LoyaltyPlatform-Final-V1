@@ -9,6 +9,8 @@
 import uuid
 import re
 import json
+import csv
+import io
 import asyncio
 import logging
 import pymongo
@@ -16,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Body, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from database import (
@@ -874,10 +877,15 @@ def _params_for_customer(c: Dict[str, Any], extra: Optional[Dict[str, Any]] = No
     if campaign_link:
         p["link"] = campaign_link
     if extra:
-        for k in ("name", "points", "expiry", "link"):
-            v = extra.get(k)
-            if v not in (None, ""):
-                p[k] = v
+        # Any uploaded column becomes a usable variable; a "coupon"/"coupon_code" column
+        # fills {{coupon_code}} directly (send the client's own pre-existing codes — no batch needed).
+        for k, v in extra.items():
+            if k == "mobile" or v in (None, ""):
+                continue
+            p[k] = v
+        cc = extra.get("coupon_code") or extra.get("coupon")
+        if cc not in (None, ""):
+            p["coupon_code"] = cc
     return p
 
 
@@ -1127,6 +1135,64 @@ async def get_bulk_job(job_id: str, user: dict = Depends(get_current_user)):
     if not j:
         raise HTTPException(404, "Job not found")
     return j
+
+
+_DLR_LABEL = {"delivered": "Delivered", "failed": "Failed", "submitted": "Pending",
+              "undelivered": "Undelivered", "expired": "Expired", "rejected": "Rejected"}
+
+
+def _msg_text(row: Dict[str, Any]) -> str:
+    ps = row.get("payload_summary") or {}
+    for k in ("text", "msg", "message", "content", "body", "sms"):
+        if ps.get(k):
+            return str(ps[k])
+    return ""
+
+
+async def _bulk_job_recipient_rows(job_id: str, limit: int = 50000) -> List[Dict[str, Any]]:
+    proj = {"_id": 0, "mobile": 1, "status": 1, "delivery_status": 1, "provider_mid": 1,
+            "delivered_at": 1, "timestamp": 1, "response": 1, "payload_summary": 1, "channel": 1}
+    docs = await message_log_col.find({"bulk_job_id": job_id}, proj).sort("timestamp", 1).limit(limit).to_list(limit)
+    out = []
+    for r in docs:
+        out.append({
+            "mobile": r.get("mobile"),
+            "channel": r.get("channel"),
+            "status": r.get("status"),
+            "delivery_status": r.get("delivery_status"),
+            "delivery_label": _DLR_LABEL.get(r.get("delivery_status"), (r.get("delivery_status") or "").title()),
+            "message": _msg_text(r),
+            "provider_mid": r.get("provider_mid"),
+            "delivered_at": r.get("delivered_at"),
+            "timestamp": r.get("timestamp"),
+            "error": (r.get("response") if r.get("status") != "ok" else None),
+        })
+    return out
+
+
+@router.get("/communications/bulk-jobs/{job_id}/recipients")
+async def bulk_job_recipients(job_id: str, limit: int = 3000, user: dict = Depends(get_current_user)):
+    """Per-recipient drill-down for a bulk send job (mobile, delivery status, message sent)."""
+    job = await bulk_jobs_col.find_one({"id": job_id}, {"_id": 0, "template_name": 1, "channel": 1})
+    rows = await _bulk_job_recipient_rows(job_id, min(max(limit, 1), 10000))
+    return {"job_id": job_id, "template_name": (job or {}).get("template_name"),
+            "count": len(rows), "recipients": rows}
+
+
+@router.get("/communications/bulk-jobs/{job_id}/recipients.csv")
+async def bulk_job_recipients_csv(job_id: str, user: dict = Depends(get_current_user)):
+    """Download the full per-recipient result of a bulk send job as CSV."""
+    rows = await _bulk_job_recipient_rows(job_id, 50000)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Mobile", "Channel", "Submit Status", "Delivery Status", "Message",
+                "Provider MID", "Delivered At", "Sent At", "Error"])
+    for r in rows:
+        w.writerow([r["mobile"], r["channel"], r["status"], r["delivery_label"], r["message"],
+                    r["provider_mid"], r["delivered_at"], r["timestamp"], r["error"] or ""])
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="bulk_job_{job_id[:8]}_recipients.csv"'})
 
 
 
