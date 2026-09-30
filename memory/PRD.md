@@ -2669,3 +2669,9 @@ Point 1 — REAL BUG FIXED: Full-history Store KPI returned HTTP 500 because _st
 Point 2 — DATA CLEANUP built: 136,479 customers have DOB/DOA mis-filled with a visit date by the source. Added admin-only repair: POST /api/kpi-reports/_repair-dob-doa?dry_run=true|false + GET /_repair-dob-doa/status (background, idempotent). Nulls DOB/DOA equal to first_purchase_at or last_visit_at. Also guarded historic ingest mapper for future uploads. Verified on preview (cleared 2+2, re-run 0).
 
 NOTE: These round-2 fixes are NEW since the deploy initiated 2026-09-14 and need ANOTHER redeploy. After redeploy: run POST /api/kpi-reports/_repair-dob-doa?dry_run=false to clean the 136k rows, and confirm full-history Store KPI loads (no 500).
+
+
+---
+### [2026-06] Points Campaigns (live points-by-mobile) — DONE & TESTED
+- Added "Points" campaign objective + "By points balance" audience (min_points) + live-points `{{points}}` resolution for every audience (incl. Marketing DB upload) + wizard live message preview (`POST /api/campaigns/message-preview`) + two ready-made seeded SMS templates ("Points Balance Reminder", "Points Expiry Reminder", need user DLT ID for real send). Live profile balance is authoritative for members. Frontend E2E 100% (test_reports/iteration_109.json). See CHANGELOG.md for detail.
+

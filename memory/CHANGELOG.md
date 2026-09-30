@@ -824,3 +824,17 @@ File: `backend/routes/live_monitor_routes.py`, `frontend/.../LiveMonitorPage.jsx
   - Formatters `_fmt_negative_balances` / `_fmt_double_redemptions` render the honest "couldn't compute" message.
 - TESTED in preview (production-scale: 800,064 customers, 1,542,467 ledger rows): neg-balance Q resolves deterministically in ~9s (tool itself 2.6s, cross-check cached → 0.0s on repeat), single audit_negative_balances tool, exact answer, NO LLM loop. Dup-redemption Q in 0.18s. Honest-fail rendering verified with synthetic dicts.
 - ACTION: user must REDEPLOY to push this live on production. ix_cust_points_balance is created by ensure_indexes() at startup (server.py:429) so it lands on deploy.
+
+
+## 2026-06 — Points Campaigns (live points-by-mobile)
+User ask: "no option to send a points campaign — send a message where {{points}} is a variable that picks up live points by mobile and shows it."
+
+Implemented & tested (frontend E2E 100% — iteration_109):
+- **New "Points" campaign objective** card in the wizard Objective step (`CampaignObjective.jsx`, testid `objective-points` + `objective-points-note`). ROI for points campaigns tracks points redeemed by the frozen audience within the window (`campaigns_routes.py` → `/roi` adds `out["points"]` from `points_ledger` type=redeem; surfaced in `CampaignRoiModal.jsx` `roi-points`).
+- **New "By points balance" audience** (`audience_type="points"`, `audience_filter.min_points`) — `_audience_filter` adds `points_balance >= min`. Wizard input testid `audience-minpoints-input`. Verified counts: 799,885 (≥1), 719,700 (≥500).
+- **Live `{{points}}` for ALL audiences** — `_run_bulk_send_job` now matches uploaded Marketing-DB numbers to loyalty profiles by normalised (last-10) mobile, and `_params_for_customer` makes the LIVE profile balance authoritative for members (an uploaded "points" column can no longer shadow it). Non-members resolve to 0. `{{expiry}}` now defaults to "" instead of leaking the raw mustache.
+- **New endpoint `POST /api/campaigns/message-preview`** — resolves the exact message a few sample recipients get, with live points by mobile (handles marketing_db + all customer audiences). Wizard "Live preview" panel (testids `msg-preview-box`/`msg-preview-btn`/`msg-preview-list`).
+- **Two ready-made seeded SMS templates** (`server.py`, idempotent seed_flags): "KAZO · Points Balance Reminder" ({{name}},{{points}}) and "KAZO · Points Expiry Reminder" ({{name}},{{points}},{{expiry}}). Seeded with blank `dlt_template_id` — user must add their own DLT content-template ID (with a variable placeholder) before a real SMS launch.
+
+Files: `campaigns_routes.py`, `communications_routes.py`, `server.py`, `CampaignObjective.jsx`, `CampaignWizard.jsx`, `CampaignRoiModal.jsx`.
+

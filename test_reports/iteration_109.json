@@ -1,0 +1,20 @@
+{
+  "summary": "Frontend E2E validation of the new Points campaign flow in Campaign Manager. Logged in as superadmin, opened New Campaign wizard, and validated Objective → Audience → Message → Review → Save Draft. All required data-testids present and working. Live message preview correctly resolves {points} and {name} using live points-by-mobile lookup, and the campaign was saved as draft successfully.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped)", "frontend": "100%"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (as provided in review_request)",
+  "seed_data_creation": "Created a 'QA Points Campaign' draft in campaign list (points objective, By points balance >=100 audience, SMS KAZO · Points Balance Reminder template).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Points campaign wizard fully verified end-to-end via UI. Verified items: objective-points card + objective-points-note; campaign-name-input; wizard-next progression; audience-type-select (native SELECT) has 'points' option; audience-minpoints-input accepts 100; audience-preview-box shows audience-count '7,83,826' (matches backend 799885 tier); campaign-template-dropdown includes both 'KAZO · Points Balance Reminder · SMS' and 'KAZO · Points Expiry Reminder · SMS'; msg-preview-btn triggers preview; msg-preview-list + msg-preview-0..N render with real names/mobiles and numeric points (no raw {points}/{name} strings); review-objective shows 'points · ROI 7d'; wizard-create-draft saves and toast 'Campaign saved as draft' appears; new campaign visible in list. Backend endpoints message-preview and audience-preview confirmed working through UI. No SMS launch attempted (templates lack DLT ID by design).",
+  "rca of the issue": "N/A - no issues found."
+}
