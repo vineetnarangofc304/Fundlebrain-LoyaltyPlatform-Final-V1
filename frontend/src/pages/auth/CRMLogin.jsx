@@ -6,7 +6,7 @@ export default function CRMLogin() {
       title="CRM"
       subtitle="CRM & Support"
       portal="crm"
-      allowedRoles={["crm_manager", "support_agent", "super_admin", "brand_admin"]}
+      allowedRoles={["crm_manager", "support_agent", "super_admin", "brand_admin", "cxo"]}
       redirectTo="/admin"
       dataTestPrefix="crm-login"
     />

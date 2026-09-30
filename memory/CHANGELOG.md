@@ -849,3 +849,19 @@ Follow-up to Points Campaigns. Frontend E2E 100% (iteration_110), backend curl-v
 
 Files: `campaigns_routes.py` (_expiring_points_mobiles, expiring_points branch, /tiered-points endpoint + PointsBandIn/TieredPointsIn), `CampaignWizard.jsx`, `CampaignObjective.jsx` (BandRow).
 
+
+
+## 2026-06 — Coupon-in-AI fix + CXO login
+### Issue 1 — {{coupon_code}} sent as literal text (Master Brain AI)
+Root cause: the Campaign Manager UI substitutes coupons correctly (verified), but the Master Brain AI `send_campaign` engine (`_run_mb_campaign`) had no per-recipient variable mapping and used `_camp_params` (name/tier/points/city only). Also a real crash: `master_brain_tools.py` imported `segments_col` from `database` (it lives in `segments_routes`), breaking segment sends.
+Fixes (`master_brain_tools.py`):
+- `_resolve_audience`: fixed segment lookup (`db["segments"]`); added **`marketing_db` audience** (audience_value = DB name/id, falls back to most recent) returning `{mobiles, var_map, label}`.
+- `_run_mb_campaign`: now fills each recipient via `_params_for_customer(cust, extra=var_map[norm10(mobile)])` for BOTH mobiles and db branches — so `{{coupon_code}}`/`{{name}}`/`{{points}}` resolve per person (live profile authoritative for members).
+- `_tool_send_campaign`: **guard** — if body has `{{coupon_code}}` but the audience has no coupon data, it REFUSES with a clear message (use marketing_db). Preview now renders the first real recipient (real coupon) instead of dummy values.
+- Tool schema updated: `marketing_db` added to the audience enum + coupon guidance.
+Verified end-to-end (python): temp coupon DB → AI preview rendered "Hi Ravi, use SAVE20-AAA…" (no literal token). Guard blocks coupon body on `all` audience.
+UI hint (`campaigns_routes.py` audience_preview + `CampaignWizard.jsx`): marketing_db preview returns `has_coupon_column`; wizard shows a green "Coupon column detected — {{coupon_code}} will be personalised" badge.
+
+### Issue 2 — CXO login (executive view)
+New `cxo` role (models.py). Seeded `cxo@fundle.io` / `Cxo@2026` (env-overridable, idempotent). CXO sees ONLY 3 sidebar items — Fundle Brain (`/admin/ai`), Master Brain (`/admin/master-brain`), Live Bill Monitor (`/admin`); every other route hard-bounces to `/admin` (AdminLayout effect, mirrors store-login). Full Master Brain action power (role `cxo` treated as master in `require_master_admin`/`require_query_viewer`/`_require_master`). Creatable via User Management (role dropdown). Also required (found by testing agent): `Role.CXO` added to `auth.ALL_DASHBOARD_ROLES` + `cxo` to `CRMLogin.allowedRoles` (CRM-portal gate), and `cxo` added to the live-monitor read endpoints (transactions/stats/export) so the landing page populates. Frontend E2E 100% (iteration_111).
+

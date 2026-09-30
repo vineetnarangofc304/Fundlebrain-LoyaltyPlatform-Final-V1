@@ -122,7 +122,7 @@ async def live_transactions(
     user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
                                          "marketing_manager", "regional_manager",
                                          "analytics_viewer", "readonly_executive",
-                                         "store_manager", "store_staff")),
+                                         "store_manager", "store_staff", "cxo")),
 ):
     """Paginated list of recent transactions for the cockpit table."""
     if user.get("role") in ("store_manager", "store_staff"):
@@ -247,7 +247,7 @@ async def live_export(
     is_return: Optional[bool] = None,
     user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
                                          "marketing_manager", "regional_manager",
-                                         "analytics_viewer", "readonly_executive")),
+                                         "analytics_viewer", "readonly_executive", "cxo")),
 ):
     """Streamed CSV export of the cockpit bills (honours the same filters)."""
     fil = await _build_live_filter(
@@ -333,7 +333,7 @@ async def live_stats(
     user: dict = Depends(require_roles("super_admin", "brand_admin", "crm_manager",
                                          "marketing_manager", "regional_manager",
                                          "analytics_viewer", "readonly_executive",
-                                         "store_manager", "store_staff")),
+                                         "store_manager", "store_staff", "cxo")),
 ):
     """Top KPIs for the cockpit: bills, revenue, mobile-attach rate, lost opportunities."""
     if start_date or end_date:
