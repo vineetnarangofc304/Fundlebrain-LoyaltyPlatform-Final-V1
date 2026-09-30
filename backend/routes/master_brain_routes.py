@@ -145,7 +145,7 @@ RECOMMENDED ACTIONS (this is the extra layer over Fundle Brain):
 ```suggested-actions
 [
   {"label": "Re-tier 22 zero-spend customers to 'kazo insider'", "description": "Sets tier on every customer with lifetime_spend = 0 (no bonus points).", "tool": "set_customer_tier", "args": {"tier": "kazo insider", "max_lifetime_spend": 0}},
-  {"label": "SMS win-back to lapsing Gold customers", "description": "Bulk SMS via Karix to the Gold tier.", "tool": "send_campaign", "args": {"audience_type": "tier", "audience_value": "gold", "message": "We miss you! Enjoy 20% off your next KAZO order."}}
+  {"label": "SMS win-back to lapsing Gold customers", "description": "Bulk SMS via the Telecom Provider to the Gold tier.", "tool": "send_campaign", "args": {"audience_type": "tier", "audience_value": "gold", "message": "We miss you! Enjoy 20% off your next KAZO order."}}
 ]
 ```
 

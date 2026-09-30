@@ -553,7 +553,7 @@ export default function MasterBrain() {
       {tab === "campaigns" && (
         <div className="p-4" data-testid="mb-campaigns">
           <div className="flex justify-between items-center mb-2">
-            <p className="text-xs text-neutral-600">Bulk SMS campaigns sent via Karix. Create one by asking Master Brain in <b>Chat</b> (e.g. "Send an SMS to all Gold customers…").</p>
+            <p className="text-xs text-neutral-600">Bulk SMS campaigns sent via Telecom Provider. Create one by asking Master Brain in <b>Chat</b> (e.g. "Send an SMS to all Gold customers…").</p>
             <button className="k-btn k-btn-outline k-btn-sm" onClick={loadCampaigns} data-testid="mb-campaigns-refresh"><RefreshCw className="w-4 h-4" /> Refresh</button>
           </div>
           <div className="bg-white border border-black/10 overflow-x-auto">

@@ -1,5 +1,5 @@
 import { BRAND } from "@/brand.config";
-/* Karix Provider Settings — editable from frontend. */
+/* Telecom Provider Provider Settings — editable from frontend. */
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import api from "@/lib/api";
@@ -8,7 +8,7 @@ import { Save, RefreshCw, Eye, EyeOff } from "lucide-react";
 
 const SECTIONS = [
   {
-    title: "SMS (Karix Transactional)",
+    title: "SMS (Telecom Provider Transactional)",
     accent: "indigo",
     fields: [
       { key: "sms_endpoint", label: "Endpoint URL", placeholder: "https://pod2-japi.instaalerts.zone/httpapi/QueryStringReceiver" },
@@ -20,7 +20,7 @@ const SECTIONS = [
     ],
   },
   {
-    title: "SMS — Campaign / Bulk (Karix 'fundle_campaign')",
+    title: "SMS — Campaign / Bulk (Telecom Provider 'fundle_campaign')",
     accent: "burgundy",
     fields: [
       { key: "sms_campaign_endpoint", label: "Bulk Endpoint URL (JSON API)", placeholder: "https://japi.instaalerts.zone/httpapi/JsonReceiver" },
@@ -31,7 +31,7 @@ const SECTIONS = [
     ],
   },
   {
-    title: "WhatsApp (Karix WABA)",
+    title: "WhatsApp (Telecom Provider WABA)",
     accent: "emerald",
     fields: [
       { key: "whatsapp_endpoint", label: "Endpoint URL", placeholder: "https://rcmapi.instaalerts.zone/services/rcm/sendMessage" },
@@ -82,7 +82,7 @@ export default function ProviderSettingsPage() {
     <div data-testid="provider-settings">
       <PageHeader
         title="Provider Settings"
-        subtitle="KARIX SMS · WHATSAPP · RCS · API CONFIGURATION"
+        subtitle="TELECOM PROVIDER SMS · WHATSAPP · RCS · API CONFIGURATION"
         actions={
           <>
             <button className="k-btn k-btn-outline k-btn-sm" onClick={load}><RefreshCw className="w-3.5 h-3.5" /> Reload</button>

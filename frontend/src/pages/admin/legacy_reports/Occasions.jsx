@@ -126,7 +126,7 @@ function SendSmsPanel({ total, params }) {
             </div>
             <p className="text-sm text-neutral-600 mb-4">
               Message customers whose <b>{occasionLabel}</b> falls in <b>{monthLabel}{yearLabel}</b>{" "}
-              (~<b>{fmtNum(total)}</b> in the current view · capped at 5,000 per send). Sent via Karix.
+              (~<b>{fmtNum(total)}</b> in the current view · capped at 5,000 per send). Sent via Telecom Provider.
             </p>
 
             {templates.length === 0 ? (

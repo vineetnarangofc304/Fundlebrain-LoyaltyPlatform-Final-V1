@@ -77,7 +77,7 @@ export const CLIPS = {
         { value: "1.5M+", label: "Bills reconciled" },
         { value: "₹2.7B", label: "Revenue tracked" },
       ],
-      pills: ["eWards POS", "Karix SMS", "WhatsApp", "Points engine", "RFM & Churn", "Campaigns"],
+      pills: ["eWards POS", "Telecom Provider SMS", "WhatsApp", "Points engine", "RFM & Churn", "Campaigns"],
     },
     { id: "p_close", kind: "cta", tagline: "Loyalty, run by intelligence.", sub: "Trained by fundle.ai" },
   ],
@@ -146,7 +146,7 @@ export const CLIPS = {
         {
           k: "confirm", title: "Preview — Win-back SMS",
           rows: [["Recipients", "18,340"], ["DLT template", "WINBACK_2X"], ["Message", "\u201cWe miss you! 2X points…\u201d"]],
-          confirmLabel: "Send now", executed: "Campaign live · via Karix DLT",
+          confirmLabel: "Send now", executed: "Campaign live · via Telecom Provider DLT",
         },
         { k: "progress", label: "Delivering messages", total: 18340 },
       ],

@@ -130,7 +130,7 @@ export default function CampaignManager() {
 
   return (
     <div data-testid="campaign-manager">
-      <PageHeader title="Campaign Manager" subtitle="GUIDED WORKFLOW · REAL ROI · KARIX DELIVERY"
+      <PageHeader title="Campaign Manager" subtitle="GUIDED WORKFLOW · REAL ROI · TELECOM PROVIDER DELIVERY"
         actions={
           <div className="flex gap-2">
             <button className="k-btn k-btn-ghost" onClick={() => setShowBlacklist(true)} data-testid="open-blacklist-btn"><ShieldBan className="w-4 h-4" /> Blacklist</button>
@@ -165,11 +165,11 @@ export default function CampaignManager() {
                     <td><span className="pill pill-info">{c.audience_type}</span></td>
                     <td>
                       {c.send_mode === "karix" ? (
-                        <span className="pill" style={{ background: "#dcfce7", color: "#166534" }} data-testid={`send-mode-${c.id}`}><ChannelIcon className="w-3 h-3 inline mr-1" /> Real Karix</span>
+                        <span className="pill" style={{ background: "#dcfce7", color: "#166534" }} data-testid={`send-mode-${c.id}`}><ChannelIcon className="w-3 h-3 inline mr-1" /> Real Telecom Provider</span>
                       ) : c.send_mode === "simulated" ? (
                         <span className="pill pill-neutral" data-testid={`send-mode-${c.id}`}>Simulated</span>
                       ) : c.template_id ? (
-                        <span className="pill pill-info">Karix · ready</span>
+                        <span className="pill pill-info">Telecom Provider · ready</span>
                       ) : (
                         <span className="pill pill-warning">No template</span>
                       )}

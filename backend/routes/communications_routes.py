@@ -653,7 +653,7 @@ async def test_send(tid: str, body: TestSendIn, user: dict = Depends(get_current
         return res
     if t["channel"] == "whatsapp":
         if not t.get("waba_template_id"):
-            raise HTTPException(400, "WhatsApp template requires waba_template_id (the Karix-approved template id)")
+            raise HTTPException(400, "WhatsApp template requires waba_template_id (the telecom-provider-approved template id)")
         return await send_whatsapp_karix(body.mobile, t["waba_template_id"],
                                           body.params, template_id=tid,
                                           event_trigger=t.get("event_trigger"))
@@ -761,8 +761,8 @@ async def provider_connectivity(user: dict = Depends(get_current_user)):
         out["verdict"] = "SMS gateway reachable from this deployment."
     elif control_ok:
         out["verdict"] = ("General internet egress works, but the SMS gateway host is NOT "
-                          "reachable — host/IP-specific block (Karix IP filter on this pod, or "
-                          "a route to this host). Give your production egress IP to Karix, or "
+                          "reachable — host/IP-specific block (telecom-provider IP filter on this pod, or "
+                          "a route to this host). Give your production egress IP to your telecom provider, or "
                           "ask Emergent Support to allow this destination host.")
     else:
         out["verdict"] = ("No outbound internet egress at all from this deployment — blanket "
@@ -1073,7 +1073,7 @@ async def bulk_send(body: BulkSendIn, background_tasks: BackgroundTasks,
         raise HTTPException(400, "Template must be active to bulk send")
     if t["channel"] in {"whatsapp", "rcs"}:
         if not t.get("waba_template_id"):
-            raise HTTPException(400, "WhatsApp/RCS template requires a Karix-approved waba_template_id")
+            raise HTTPException(400, "WhatsApp/RCS template requires a telecom-provider-approved waba_template_id")
         if t.get("waba_approval_status") != "approved":
             raise HTTPException(400, "Template WABA approval status must be 'approved' before bulk send")
 
@@ -1215,8 +1215,8 @@ async def karix_dlr_pull(payload: Dict[str, Any] = Body(default={}),
     endpoint = cfg.get("dlr_pull_endpoint")
     if not endpoint:
         return {"ok": False, "configured": False,
-                "message": ("Karix delivers DLRs by WEBHOOK. Register your callback URL "
-                            "(…/api/communications/dlr/karix) with Karix support. If your account "
+                "message": ("Your telecom provider delivers DLRs by WEBHOOK. Register your callback URL "
+                            "(…/api/communications/dlr/karix) with your telecom provider's support. If your account "
                             "also exposes a DLR pull API, set 'dlr_pull_endpoint' in Provider Settings.")}
     params = {"send": payload.get("sender_id") or cfg.get("sms_sender_id"),
               "key": cfg.get("sms_api_key")}

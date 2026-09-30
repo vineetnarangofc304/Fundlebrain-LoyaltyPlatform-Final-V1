@@ -72,7 +72,7 @@ export default function TemplatesPage() {
     <div data-testid="templates-page">
       <PageHeader
         title="Communication Templates"
-        subtitle="SMS · WHATSAPP · RCS · POWERED BY KARIX"
+        subtitle="SMS · WHATSAPP · RCS · POWERED BY TELECOM PROVIDER"
         actions={
           <button
             className="k-btn kazo-bg-burgundy k-btn-sm"
@@ -311,7 +311,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
               {form.channel !== "sms" && (
                 <>
                   <label className="text-xs col-span-2">
-                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Karix Approved Template ID (waba/rcs)</div>
+                    <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">Telecom Provider Approved Template ID (waba/rcs)</div>
                     <input className="k-input" value={form.waba_template_id || ""} onChange={(e) => update("waba_template_id", e.target.value)} placeholder="e.g. testing_fundle" data-testid="t-waba-id" />
                   </label>
                   <label className="text-xs">
@@ -330,7 +330,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
                   <label className="text-xs col-span-2">
                     <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">WABA Param Order (positional, comma-separated keys)</div>
                     <input className="k-input font-mono" value={(form.waba_params_order || []).join(", ")} onChange={(e) => update("waba_params_order", e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} placeholder="name, coupon_code, valid_to" data-testid="t-waba-order" />
-                    <div className="text-[10px] text-neutral-400 mt-1">These map to Karix positional params {"{{1}}, {{2}}, ..."} of the approved WABA template body.</div>
+                    <div className="text-[10px] text-neutral-400 mt-1">These map to Telecom Provider positional params {"{{1}}, {{2}}, ..."} of the approved WABA template body.</div>
                   </label>
                   <div className="col-span-2 p-3 border border-amber-200 bg-amber-50/40 flex items-center justify-between" data-testid="waba-approval-strip">
                     <div>
@@ -362,7 +362,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
                   <label className="text-xs col-span-2">
                     <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">DLT Content Template ID <span className="text-rose-600">(required for delivery)</span></div>
                     <input className="k-input font-mono" value={form.dlt_template_id || ""} onChange={(e) => update("dlt_template_id", e.target.value)} placeholder="e.g. 1107161951486743588" data-testid="t-dlt-template" />
-                    <div className="text-[10px] text-neutral-400 mt-1">The DLT-approved Content Template ID registered for THIS message. Without it, Indian operators drop the SMS even though Karix returns "Accepted".</div>
+                    <div className="text-[10px] text-neutral-400 mt-1">The DLT-approved Content Template ID registered for THIS message. Without it, Indian operators drop the SMS even though Telecom Provider returns "Accepted".</div>
                   </label>
                   <label className="text-xs">
                     <div className="text-neutral-500 uppercase tracking-widest mb-1 text-[10px]">DLT Telemarketer / Chain ID (optional)</div>
@@ -470,7 +470,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
           <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4" onClick={() => setApprovalEdit({ ...approvalEdit, open: false })}>
             <div className="bg-white w-full max-w-md" onClick={(e) => e.stopPropagation()} data-testid="approval-modal">
               <div className="p-5 border-b border-black/10">
-                <div className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-0.5">META / KARIX WABA</div>
+                <div className="text-[10px] uppercase tracking-[0.22em] text-neutral-500 mb-0.5">META / TELECOM PROVIDER WABA</div>
                 <h3 className="font-display text-xl">Set approval status</h3>
               </div>
               <div className="p-5 space-y-3">
@@ -487,7 +487,7 @@ function TemplateEditor({ template, onClose, onSaved }) {
                   <textarea rows={3} className="k-input" value={approvalEdit.note} onChange={(e) => setApprovalEdit({ ...approvalEdit, note: e.target.value })} placeholder="e.g. Approved by Meta on 2026-05-19, ticket #1234" />
                 </label>
                 <div className="text-[11px] text-neutral-500 leading-relaxed">
-                  Bulk send is blocked unless WhatsApp / RCS templates are <b>approved</b>. Status here mirrors your Meta Business Manager / Karix portal state.
+                  Bulk send is blocked unless WhatsApp / RCS templates are <b>approved</b>. Status here mirrors your Meta Business Manager / Telecom Provider portal state.
                 </div>
               </div>
               <div className="p-5 border-t border-black/10 flex justify-end gap-2">

@@ -1,6 +1,6 @@
 /* SMS / Message Log — every message dispatch, with the real provider response.
    Shows mobile, date/time, channel, event trigger, bill number, sender, DLT template id,
-   delivery status and the raw Karix response so failures are self-diagnosing. */
+   delivery status and the raw Telecom Provider response so failures are self-diagnosing. */
 import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
 import { PageHeader, SectionHeading } from "../_shared";
@@ -132,7 +132,7 @@ export default function MessageLogPage() {
           <SectionHeading eyebrow={`${total.toLocaleString()} TOTAL · ${rows.length} SHOWN`} title="Message dispatch log" accent="burgundy" />
           <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 my-2 flex items-start gap-2">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <span><strong>"Sent · NO DLT ID"</strong> means Karix accepted the request but no DLT Content Template ID was attached — Indian carriers will silently drop it. Add the DLT Content Template ID on the template (Templates → edit) to fix delivery.</span>
+            <span><strong>"Sent · NO DLT ID"</strong> means Telecom Provider accepted the request but no DLT Content Template ID was attached — Indian carriers will silently drop it. Add the DLT Content Template ID on the template (Templates → edit) to fix delivery.</span>
           </div>
           {loading && !rows.length ? (
             <div className="py-10 text-neutral-500 text-sm">Loading…</div>

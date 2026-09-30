@@ -36,7 +36,7 @@ export default function CampaignDeliveryModal({ campaign, onClose }) {
     setPulling(true);
     try {
       const r = await api.post("/communications/dlr/pull", {});
-      if (r.data.configured === false) toast.info(r.data.message || "Karix delivers DLRs by webhook — no pull API configured");
+      if (r.data.configured === false) toast.info(r.data.message || "Telecom Provider delivers DLRs by webhook — no pull API configured");
       else toast.success(`Reconciled ${fmtNum(r.data.ingested || 0)} delivery report(s)`);
       load();
     } catch (e) {
@@ -51,7 +51,7 @@ export default function CampaignDeliveryModal({ campaign, onClose }) {
       <div className="bg-neutral-50 w-full max-w-3xl max-h-[92vh] overflow-y-auto rounded" onClick={(e) => e.stopPropagation()} data-testid="campaign-delivery-modal">
         <div className="flex items-center justify-between p-5 border-b border-black/10 bg-white sticky top-0 z-10">
           <div>
-            <div className="text-[10px] uppercase tracking-widest text-neutral-500 flex items-center gap-1"><Truck className="w-3.5 h-3.5" /> Delivery report (Karix DLR)</div>
+            <div className="text-[10px] uppercase tracking-widest text-neutral-500 flex items-center gap-1"><Truck className="w-3.5 h-3.5" /> Delivery report (Telecom Provider DLR)</div>
             <h3 className="font-display text-xl">{campaign.name}</h3>
           </div>
           <div className="flex gap-2">
@@ -79,17 +79,17 @@ export default function CampaignDeliveryModal({ campaign, onClose }) {
               {data.total === 0 && (
                 <div className="text-sm text-neutral-500 bg-white border border-black/10 rounded p-4" data-testid="delivery-empty">
                   <b>No messages logged for this campaign yet.</b>
-                  <div className="mt-1.5">If it was launched as <span className="font-medium">“Simulated metrics only”</span> (no Karix template linked), it never sent a real SMS — relaunch with a DLT-approved template selected in the wizard.</div>
-                  <div className="mt-1.5">Real delivery statuses then arrive as Karix posts DLRs to
-                  <code className="mx-1 px-1 bg-neutral-100 rounded">{data.webhook_url}</code>. Ask Karix support to register this callback for your account.</div>
+                  <div className="mt-1.5">If it was launched as <span className="font-medium">“Simulated metrics only”</span> (no Telecom Provider template linked), it never sent a real SMS — relaunch with a DLT-approved template selected in the wizard.</div>
+                  <div className="mt-1.5">Real delivery statuses then arrive as Telecom Provider posts DLRs to
+                  <code className="mx-1 px-1 bg-neutral-100 rounded">{data.webhook_url}</code>. Ask Telecom Provider support to register this callback for your account.</div>
                 </div>
               )}
 
               {data.total > 0 && (c.delivered || 0) === 0 && (c.pending || 0) > 0 && (
                 <div className="text-sm bg-amber-50 border border-amber-200 rounded p-4 text-amber-800" data-testid="delivery-awaiting-dlr">
-                  <b>{fmtNum(c.pending)} message(s) were accepted by Karix but no delivery receipt (DLR) has arrived yet.</b>
-                  <div className="mt-1.5">Karix must POST delivery receipts to
-                  <code className="mx-1 px-1 bg-white rounded border">{data.webhook_url}</code> for “Delivered / Failed” to populate. If this stays at 0 delivered, ask Karix support to enable/register the DLR callback for your sender account.</div>
+                  <b>{fmtNum(c.pending)} message(s) were accepted by Telecom Provider but no delivery receipt (DLR) has arrived yet.</b>
+                  <div className="mt-1.5">Telecom Provider must POST delivery receipts to
+                  <code className="mx-1 px-1 bg-white rounded border">{data.webhook_url}</code> for “Delivered / Failed” to populate. If this stays at 0 delivered, ask Telecom Provider support to enable/register the DLR callback for your sender account.</div>
                 </div>
               )}
 

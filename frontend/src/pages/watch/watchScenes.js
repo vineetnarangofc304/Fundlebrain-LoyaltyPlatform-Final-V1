@@ -138,7 +138,7 @@ export const SCENES = [
       {
         k: "confirm", title: "Preview — Win-back SMS",
         rows: [["Recipients", "18,340"], ["DLT template", "WINBACK_2X"], ["Message", "\u201cWe miss you! 2X points this week…\u201d"]],
-        confirmLabel: "Send now", executed: "Campaign live · delivering via Karix DLT",
+        confirmLabel: "Send now", executed: "Campaign live · delivering via Telecom Provider DLT",
       },
       { k: "progress", label: "Delivering messages", total: 18340 },
       { k: "insight", text: "Sent to 18,340 lapsed customers in minutes — no marketing team, no manual list, no waiting." },

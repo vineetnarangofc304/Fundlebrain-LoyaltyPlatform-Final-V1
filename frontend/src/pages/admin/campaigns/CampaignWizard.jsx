@@ -282,7 +282,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
 
               <div className="border border-neutral-200 rounded p-3 bg-neutral-50" data-testid="campaign-template-select">
                 <div className="flex items-center justify-between mb-2">
-                  <label className="text-[10px] uppercase tracking-widest text-neutral-700 font-medium flex items-center gap-1"><Send className="w-3 h-3" /> Send via Karix template (real send)</label>
+                  <label className="text-[10px] uppercase tracking-widest text-neutral-700 font-medium flex items-center gap-1"><Send className="w-3 h-3" /> Send via Telecom Provider template (real send)</label>
                   {form.template_id && <button type="button" onClick={() => setForm({ ...form, template_id: "" })} className="text-[10px] text-rose-600 hover:underline">Clear</button>}
                 </div>
                 {compatibleTemplates.length === 0 ? (
@@ -297,7 +297,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                     ))}
                   </select>
                 )}
-                {form.template_id && <div className="text-[10px] text-emerald-700 mt-1">✓ This campaign will actually send messages via Karix when launched.</div>}
+                {form.template_id && <div className="text-[10px] text-emerald-700 mt-1">✓ This campaign will actually send messages via Telecom Provider when launched.</div>}
                 {(() => {
                   const sel = templates.find((t) => t.id === form.template_id);
                   if (sel && sel.channel === "sms" && !(sel.dlt_template_id || "").trim()) {
@@ -307,7 +307,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                 })()}
               </div>
 
-              <textarea className="k-input" placeholder="Optional preview / fallback body (only used if no Karix template above)" value={form.message_template} onChange={(e) => setForm({ ...form, message_template: e.target.value })} data-testid="message-template-input" />
+              <textarea className="k-input" placeholder="Optional preview / fallback body (only used if no Telecom Provider template above)" value={form.message_template} onChange={(e) => setForm({ ...form, message_template: e.target.value })} data-testid="message-template-input" />
 
               <div className="border border-indigo-200 rounded p-3 bg-indigo-50/60">
                 <label className="text-[10px] uppercase tracking-widest text-indigo-700 font-medium flex items-center gap-1 mb-2"><Sparkles className="w-3 h-3" /> Personalisation link — fills <code className="bg-white px-1 rounded border font-mono">{"{{link}}"}</code></label>
@@ -374,7 +374,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                 <ReviewItem label="Objective" value={`${form.objective} · ROI ${form.roi_window}`} testid="review-objective" />
                 <ReviewItem label="Audience" value={audience ? `${fmtNum(audience.total_audience)} customers · ${form.audience_type}` : form.audience_type} testid="review-audience" />
                 <ReviewItem label="Channels" value={form.channels.join(", ") || "—"} testid="review-channels" />
-                <ReviewItem label="Send mode" value={form.template_id ? "Real Karix send" : "Simulated metrics"} testid="review-sendmode" accent={form.template_id ? "text-emerald-700" : "text-neutral-500"} />
+                <ReviewItem label="Send mode" value={form.template_id ? "Real Telecom Provider send" : "Simulated metrics"} testid="review-sendmode" accent={form.template_id ? "text-emerald-700" : "text-neutral-500"} />
                 <ReviewItem label="Send limit" value={fmtNum(form.send_limit)} testid="review-limit" />
                 {form.coupon_code && <ReviewItem label="Coupon" value={form.coupon_code} testid="review-coupon" />}
                 {form.coupon_batch_id && <ReviewItem label="Unique coupons" value="Per-recipient codes attached" testid="review-coupon-batch" accent="text-emerald-700" />}
@@ -388,7 +388,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
               </div>
 
               <div className="text-[11px] text-neutral-500 bg-amber-50 border border-amber-200 rounded p-2.5">
-                Launching freezes this exact audience as the ROI dataset (t₀ = launch). Real Karix sends go via the bulk campaign account; simulated campaigns generate demo metrics.
+                Launching freezes this exact audience as the ROI dataset (t₀ = launch). Real Telecom Provider sends go via the bulk campaign account; simulated campaigns generate demo metrics.
               </div>
             </div>
           )}

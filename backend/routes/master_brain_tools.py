@@ -1962,7 +1962,7 @@ async def _tool_send_campaign(message: Optional[str] = None, template_id: Option
         if not tpl:
             return {"error": "Template not found."}
         if (tpl.get("channel") or "sms") != "sms":
-            return {"error": "Only SMS templates are supported for Karix bulk campaigns."}
+            return {"error": "Only SMS templates are supported for Telecom Provider bulk campaigns."}
     session_id = (user or {}).get("_mb_session")
     spec, aerr = await _resolve_audience(audience_type, audience_value, attachment_id, mobiles, user, session_id)
     if aerr:
@@ -1977,7 +1977,7 @@ async def _tool_send_campaign(message: Optional[str] = None, template_id: Option
     from routes.communications_routes import _render
     sample_text = _render((tpl.get("body") if tpl else message) or "",
                           {"name": "there", "tier": "", "points_balance": 0, "city": ""})
-    plan = {"action": "send_campaign", "channel": "sms", "via": "Karix Bulk SMS",
+    plan = {"action": "send_campaign", "channel": "sms", "via": "Telecom Provider Bulk SMS",
             "recipients": count, "audience": spec.get("label"),
             "template": tpl.get("name") if tpl else None,
             "message_preview": sample_text, "sample_recipients": sample}
@@ -1986,7 +1986,7 @@ async def _tool_send_campaign(message: Optional[str] = None, template_id: Option
         return plan
     if not confirm:
         plan["preview"] = True
-        plan["confirmation_required"] = (f"This sends an SMS to {count} customers via Karix. Confirm with the "
+        plan["confirmation_required"] = (f"This sends an SMS to {count} customers via the Telecom Provider. Confirm with the "
                                          f"user + capture a reason, then call again confirm=true.")
         return plan
     rerr = _need_reason(reason)
@@ -2027,7 +2027,7 @@ async def _tool_send_campaign(message: Optional[str] = None, template_id: Option
     asyncio.create_task(_run_mb_campaign(cid))
     return {"ok": True, "applied": True, "audit_id": audit_id, "campaign_id": cid,
             "recipients": count, **plan,
-            "message": f"Campaign queued — sending SMS to {count} customers via Karix. "
+            "message": f"Campaign queued — sending SMS to {count} customers via the Telecom Provider. "
                        f"Track progress in the Campaigns tab (id {cid})."}
 
 

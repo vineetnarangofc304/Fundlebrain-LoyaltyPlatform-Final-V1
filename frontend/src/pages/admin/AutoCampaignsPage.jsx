@@ -77,7 +77,7 @@ function RuleCard({ rule, templates, onUpdate, onPreview, onRunNow }) {
 
   const runNow = async (dryRun) => {
     if (!templateId && !dryRun) { toast.error("Pick a template first"); return; }
-    if (!dryRun && !window.confirm(`Run "${rule.label}" now? This will send REAL messages via Karix.`)) return;
+    if (!dryRun && !window.confirm(`Run "${rule.label}" now? This will send REAL messages via Telecom Provider.`)) return;
     setRunning(true);
     try {
       const r = await api.post(`/auto-campaigns/rules/${rule.key}/run`, null, { params: { dry_run: dryRun } });
@@ -124,7 +124,7 @@ function RuleCard({ rule, templates, onUpdate, onPreview, onRunNow }) {
             </label>
 
             <div>
-              <label className="text-[10px] uppercase tracking-widest text-neutral-500">Karix Template</label>
+              <label className="text-[10px] uppercase tracking-widest text-neutral-500">Telecom Provider Template</label>
               <select
                 className="w-full border border-neutral-300 rounded px-2 py-1.5 text-xs mt-0.5"
                 value={templateId}
@@ -251,7 +251,7 @@ export default function AutoCampaignsPage() {
   useEffect(() => { load(); }, []);
 
   const runAll = async (dryRun) => {
-    if (!dryRun && !window.confirm("Run ALL enabled auto-campaigns now? This will send REAL messages via Karix.")) return;
+    if (!dryRun && !window.confirm("Run ALL enabled auto-campaigns now? This will send REAL messages via Telecom Provider.")) return;
     setRunningAll(true);
     try {
       const r = await api.post("/auto-campaigns/run-all", null, { params: { dry_run: dryRun } });
@@ -276,7 +276,7 @@ export default function AutoCampaignsPage() {
     <div data-testid="auto-campaigns-page">
       <PageHeader
         title="Auto Campaigns"
-        subtitle="DAILY TRIGGERS · KARIX-POWERED"
+        subtitle="DAILY TRIGGERS · TELECOM PROVIDER-POWERED"
         actions={
           <div className="flex gap-2">
             <button
@@ -316,7 +316,7 @@ export default function AutoCampaignsPage() {
           </div>
           {enabledCount === 0 && (
             <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-              Enable at least one rule + pick an approved Karix template to start auto-sending.
+              Enable at least one rule + pick an approved Telecom Provider template to start auto-sending.
             </div>
           )}
         </div>
