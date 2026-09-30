@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
-import { Store, Ticket, Package, Target, Search, X, Clock, Coins } from "lucide-react";
+import { Store, Ticket, Package, Target, Search, X, Clock, Coins, Plus } from "lucide-react";
 
 const OBJECTIVES = [
   { k: "generic", label: "Generic", icon: Target, hint: "Anyone who shops again after the send" },
@@ -22,7 +22,7 @@ function Pill({ active, onClick, children, testid }) {
   );
 }
 
-export default function CampaignObjective({ form, setForm }) {
+export default function CampaignObjective({ form, setForm, templates = [] }) {
   const [stores, setStores] = useState([]);
   const [storeQ, setStoreQ] = useState("");
   const [facets, setFacets] = useState({ categories: [], subcategories_by_category: {} });
@@ -31,12 +31,26 @@ export default function CampaignObjective({ form, setForm }) {
 
   const obj = form.objective || "generic";
   const p = form.objective_params || {};
-  const setObj = (k) => setForm((f) => ({ ...f, objective: k, objective_params: {} }));
+  const setObj = (k) => setForm((f) => ({ ...f, objective: k, objective_params: {}, ...(k !== "points" ? { tiered: false } : {}) }));
   const setP = (patch) => setForm((f) => ({ ...f, objective_params: { ...(f.objective_params || {}), ...patch } }));
   const toggleArr = (key, val) => {
     const cur = p[key] || [];
     setP({ [key]: cur.includes(val) ? cur.filter((x) => x !== val) : [...cur, val] });
   };
+
+  const smsTemplates = (templates || []).filter((t) => t.channel === "sms");
+  const bands = form.points_bands || [];
+  const setBand = (i, patch) => setForm((f) => {
+    const arr = [...(f.points_bands || [])]; arr[i] = { ...arr[i], ...patch }; return { ...f, points_bands: arr };
+  });
+  const addBand = () => setForm((f) => ({ ...f, points_bands: [...(f.points_bands || []), { label: "", min_points: 1000, max_points: "", template_id: "" }] }));
+  const removeBand = (i) => setForm((f) => ({ ...f, points_bands: (f.points_bands || []).filter((_, x) => x !== i) }));
+  const toggleTiered = (on) => setForm((f) => ({
+    ...f, tiered: on,
+    points_bands: on && !(f.points_bands || []).length
+      ? [{ label: "", min_points: 100, max_points: 499, template_id: "" }, { label: "", min_points: 500, max_points: "", template_id: "" }]
+      : (f.points_bands || []),
+  }));
 
   useEffect(() => {
     api.get("/stores").then((r) => {
@@ -100,12 +114,44 @@ export default function CampaignObjective({ form, setForm }) {
       )}
 
       {obj === "points" && (
-        <div className="text-xs text-neutral-600" data-testid="objective-points-note">
-          Each recipient's <b>live points balance</b> is injected via the{" "}
-          <code className="bg-white px-1 rounded border font-mono">{"{{points}}"}</code> variable —
-          looked up by mobile number at send time. ROI tracks the points this audience actually
-          redeems within the window below. Tip: use the <b>"By points balance"</b> audience so you
-          only message customers who hold points.
+        <div className="space-y-3" data-testid="objective-points-params">
+          <div className="text-xs text-neutral-600" data-testid="objective-points-note">
+            Each recipient's <b>live points balance</b> is injected via the{" "}
+            <code className="bg-white px-1 rounded border font-mono">{"{{points}}"}</code> variable —
+            looked up by mobile number at send time. ROI tracks the points this audience actually
+            redeems within the window below. Tip: use the <b>"By points balance"</b> or{" "}
+            <b>"Points expiring soon"</b> audience so you only message customers who hold points.
+          </div>
+
+          <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+            <input type="checkbox" checked={!!form.tiered} onChange={(e) => toggleTiered(e.target.checked)} data-testid="tiered-toggle" />
+            <span className="font-medium">Split into tiered points bands</span>
+            <span className="text-[11px] text-neutral-500">— each band becomes its own campaign with its own message</span>
+          </label>
+
+          {form.tiered && (
+            <div className="border border-neutral-200 rounded p-2.5 bg-white space-y-2" data-testid="bands-editor">
+              <div className="hidden md:grid grid-cols-12 gap-2 text-[10px] uppercase tracking-widest text-neutral-400 px-0.5">
+                <div className="col-span-3">Label</div>
+                <div className="col-span-2">Min pts</div>
+                <div className="col-span-2">Max pts</div>
+                <div className="col-span-4">SMS template</div>
+                <div className="col-span-1" />
+              </div>
+              {bands.map((b, i) => (
+                <BandRow key={i} band={b} idx={i} smsTemplates={smsTemplates} canRemove={bands.length > 1}
+                  onChange={(patch) => setBand(i, patch)} onRemove={() => removeBand(i)} />
+              ))}
+              {bands.length < 4 && (
+                <button type="button" className="k-btn k-btn-sm k-btn-ghost" onClick={addBand} data-testid="band-add">
+                  <Plus className="w-3 h-3" /> Add band
+                </button>
+              )}
+              <div className="text-[10px] text-neutral-500 pt-1 border-t border-neutral-100">
+                Leave <b>Max</b> blank for "and above". Bands with no template send simulated metrics only.
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -178,3 +224,39 @@ export default function CampaignObjective({ form, setForm }) {
 }
 
 export { WINDOWS };
+
+function BandRow({ band, idx, smsTemplates, canRemove, onChange, onRemove }) {
+  const [count, setCount] = useState(null);
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      const mn = parseInt(band.min_points, 10);
+      if (!mn && mn !== 0) { setCount(null); return; }
+      const af = { min_points: mn || 1 };
+      if (band.max_points !== "" && band.max_points != null) af.max_points = parseInt(band.max_points, 10);
+      try {
+        const r = await api.post("/campaigns/audience-preview", { audience_type: "points", audience_filter: af });
+        setCount(r.data.total_audience);
+      } catch { setCount(null); }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [band.min_points, band.max_points]);
+
+  return (
+    <div className="grid grid-cols-12 gap-2 items-center" data-testid={`band-row-${idx}`}>
+      <input className="k-input col-span-3" placeholder="Label" value={band.label || ""} onChange={(e) => onChange({ label: e.target.value })} data-testid={`band-label-${idx}`} />
+      <input className="k-input col-span-2" type="number" min="1" placeholder="Min" value={band.min_points ?? ""} onChange={(e) => onChange({ min_points: e.target.value })} data-testid={`band-min-${idx}`} />
+      <input className="k-input col-span-2" type="number" placeholder="∞" value={band.max_points ?? ""} onChange={(e) => onChange({ max_points: e.target.value })} data-testid={`band-max-${idx}`} />
+      <select className="k-input col-span-4" value={band.template_id || ""} onChange={(e) => onChange({ template_id: e.target.value })} data-testid={`band-template-${idx}`}>
+        <option value="">— Simulated (no send) —</option>
+        {smsTemplates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select>
+      <button type="button" className="col-span-1 flex justify-center text-rose-600 disabled:opacity-25" onClick={onRemove} disabled={!canRemove} data-testid={`band-remove-${idx}`} title="Remove band">
+        <X className="w-4 h-4" />
+      </button>
+      <div className="col-span-12 text-[10px] text-neutral-500 -mt-1" data-testid={`band-count-${idx}`}>
+        {count == null ? "…" : `${count.toLocaleString()} customers in this band`}
+      </div>
+    </div>
+  );
+}
+

@@ -171,6 +171,94 @@ async def message_preview(body_in: MessagePreviewIn, user: dict = Depends(get_cu
     return {"samples": samples}
 
 
+class PointsBandIn(BaseModel):
+    label: Optional[str] = None
+    min_points: int = 1
+    max_points: Optional[int] = None
+    template_id: Optional[str] = None
+    message_template: Optional[str] = None
+
+
+class TieredPointsIn(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    channels: List[str] = ["sms"]
+    roi_window: str = "7d"
+    cost: Optional[float] = None
+    link: Optional[str] = None
+    coupon_code: Optional[str] = ""
+    coupon_batch_id: Optional[str] = ""
+    send_limit: int = 50000
+    bands: List[PointsBandIn] = []
+    mode: str = "draft"                 # draft | launch | schedule
+    schedule_at: Optional[str] = None
+
+
+@router.post("/tiered-points")
+async def create_tiered_points(body: TieredPointsIn, user: dict = Depends(require_roles(*MANAGEMENT_ROLES))):
+    """Tiered points campaign — creates ONE campaign per points band (each with its own audience
+    range + template), optionally launching or scheduling every band. Points objective only."""
+    bands = body.bands or []
+    if not bands:
+        raise HTTPException(400, "Add at least one points band")
+    if len(bands) > 4:
+        raise HTTPException(400, "Up to 4 points bands are allowed")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    results: List[Dict[str, Any]] = []
+    for b in bands:
+        mn = max(int(b.min_points or 1), 1)
+        mx = b.max_points if b.max_points not in (None, "") else None
+        label = (b.label or "").strip() or (f"{mn}+" if mx is None else f"{mn}-{mx}")
+        af: Dict[str, Any] = {"min_points": mn}
+        if mx is not None:
+            af["max_points"] = int(mx)
+        doc: Dict[str, Any] = {
+            "id": uuid.uuid4().hex,
+            "name": f"{body.name} · {label} pts",
+            "description": body.description or "",
+            "channels": body.channels or ["sms"],
+            "audience_type": "points",
+            "audience_filter": af,
+            "objective": "points",
+            "objective_params": {},
+            "roi_window": body.roi_window or "7d",
+            "message_template": b.message_template or "(points band)",
+            "coupon_code": body.coupon_code or "",
+            "coupon_batch_id": body.coupon_batch_id or "",
+            "send_limit": body.send_limit or 50000,
+            "link": body.link or "",
+            "cost": body.cost,
+            "status": "draft",
+            "sent": 0, "delivered": 0, "opened": 0, "clicked": 0, "redeemed": 0,
+            "revenue_generated": 0.0,
+            "created_at": now_iso, "created_by": user["id"],
+            "tier_band": {"label": label, "min_points": mn, "max_points": mx},
+        }
+        if b.template_id:
+            doc["template_id"] = b.template_id
+        if body.mode == "schedule" and body.schedule_at:
+            doc["status"] = "scheduled"
+            doc["schedule_at"] = body.schedule_at
+        await campaigns_col.insert_one(doc)
+        doc.pop("_id", None)
+        res: Dict[str, Any] = {"campaign_id": doc["id"], "name": doc["name"],
+                               "label": label, "status": doc["status"]}
+        if body.mode == "launch":
+            try:
+                lr = await _do_launch(doc, user)
+                res["launch"] = lr
+                res["status"] = "running" if lr.get("mode") == "karix" else "completed"
+            except HTTPException as e:
+                res["error"] = e.detail
+            except Exception as e:  # noqa: BLE001
+                res["error"] = str(e)
+        results.append(res)
+    await log_audit(user, "create_tiered_points", "campaign", body.name,
+                    {"bands": len(bands), "mode": body.mode})
+    return {"campaigns": results}
+
+
+
 # ─────────────────────────── Blacklist (Phase 4) ───────────────────────────
 class BlacklistAddIn(BaseModel):
     mobile: str
@@ -260,6 +348,28 @@ def _audience_filter(c: dict) -> dict:
     return fil
 
 
+async def _expiring_points_mobiles(days: int = 30, cap: int = 200000) -> List[str]:
+    """Mobiles whose points have an UPCOMING expiry within `days` (from the points ledger).
+    Used by the 'expiring_points' audience so a reminder only reaches customers about to lapse."""
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=max(int(days or 30), 1))
+    ledger = db["points_ledger"]
+    pipe = [
+        {"$match": {"points": {"$gt": 0},
+                    "expires_at": {"$ne": None, "$gte": now.isoformat(), "$lte": end.isoformat()}}},
+        {"$group": {"_id": "$customer_mobile"}},
+        {"$limit": cap},
+    ]
+    out: List[str] = []
+    try:
+        async for r in ledger.aggregate(pipe, allowDiskUse=True, maxTimeMS=30000):
+            if r.get("_id"):
+                out.append(r["_id"])
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 async def _audience_filter_async(c: dict) -> dict:
     """Resolves audience filter — including segment-builder segments which
     require compiling a tree via segments_routes.compile_tree."""
@@ -277,6 +387,16 @@ async def _audience_filter_async(c: dict) -> dict:
             mdb = await db["marketing_databases"].find_one({"id": mdb_id}, {"_id": 0, "mobiles": 1})
             mobiles = (mdb or {}).get("mobiles") or []
             return {"mobile": {"$in": mobiles}} if mobiles else {"mobile": {"$in": ["__none__"]}}
+    if c.get("audience_type") == "expiring_points":
+        af = c.get("audience_filter") or {}
+        try:
+            days = int(af.get("expiry_days") or 30)
+        except (TypeError, ValueError):
+            days = 30
+        mobiles = await _expiring_points_mobiles(days)
+        if not mobiles:
+            return {"mobile": {"$in": ["__none__"]}}
+        return {"mobile": {"$in": mobiles}, "points_balance": {"$gt": 0}}
     return _audience_filter(c)
 
 

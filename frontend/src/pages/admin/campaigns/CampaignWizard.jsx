@@ -22,6 +22,7 @@ const BLANK = {
   audience_filter: {}, message_template: "", template_id: "",
   coupon_code: "", coupon_batch_id: "", status: "draft", send_limit: 50000,
   objective: "generic", objective_params: {}, roi_window: "7d", cost: "", link: "",
+  tiered: false, points_bands: [],
 };
 
 export default function CampaignWizard({ onClose, onDone, templates = [], coupons = [], prefill }) {
@@ -69,11 +70,12 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
 
   // auto-preview (debounced) whenever we land on the audience/review step or the audience changes
   useEffect(() => {
+    if (form.tiered) { setAudience(null); return; }
     if (STEPS[step].key !== "audience" && STEPS[step].key !== "review") return;
     const t = setTimeout(() => { previewAudience(); }, 250);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, form.audience_type, JSON.stringify(form.audience_filter)]);
+  }, [step, form.tiered, form.audience_type, JSON.stringify(form.audience_filter)]);
 
   // Live message preview — resolves the exact text sample recipients get, with LIVE points by
   // mobile. Previews the ACTUAL body that will send (template body if linked, else fallback body).
@@ -95,17 +97,19 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
 
   const stepValid = () => {
     const k = STEPS[step].key;
-    if (k === "objective") return !!form.name.trim();
+    if (k === "objective") return !!form.name.trim() && (!form.tiered || (form.points_bands || []).length > 0);
     if (k === "audience") {
+      if (form.tiered) return true;
       if (form.audience_type === "segment") return !!form.audience_filter?.segment_id;
       if (form.audience_type === "marketing_db") return !!form.audience_filter?.marketing_db_id;
       if (form.audience_type === "tier") return !!form.audience_filter?.tier;
       if (form.audience_type === "city") return !!form.audience_filter?.city;
       if (form.audience_type === "points") return (form.audience_filter?.min_points || 0) > 0;
+      if (form.audience_type === "expiring_points") return true;
       if (form.audience_type === "cohort") return !!form.audience_filter?.cohort;
       return true;
     }
-    if (k === "message") return form.channels.length > 0;
+    if (k === "message") { if (form.tiered) return true; return form.channels.length > 0; }
     return true;
   };
 
@@ -177,6 +181,43 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
     } finally { setSubmitting(null); }
   };
 
+  // Tiered points campaign — one campaign per band (each with its own points range + template).
+  const submitTiered = async (mode) => {
+    const bands = form.points_bands || [];
+    if (!bands.length) { toast.error("Add at least one points band in the Objective step"); return; }
+    if (mode === "schedule") {
+      if (!scheduleAt) { toast.error("Pick a date & time to schedule"); return; }
+      if (new Date(scheduleAt).getTime() <= Date.now()) { toast.error("Schedule time must be in the future"); return; }
+    }
+    setSubmitting(mode);
+    try {
+      const r = await api.post("/campaigns/tiered-points", {
+        name: form.name, description: form.description, channels: form.channels,
+        roi_window: form.roi_window,
+        cost: (form.cost === "" || form.cost == null) ? null : parseFloat(form.cost),
+        link: form.link || null, coupon_code: form.coupon_code, coupon_batch_id: form.coupon_batch_id || "",
+        send_limit: form.send_limit,
+        bands: bands.map((b) => ({
+          label: b.label || null,
+          min_points: parseInt(b.min_points, 10) || 1,
+          max_points: (b.max_points === "" || b.max_points == null) ? null : parseInt(b.max_points, 10),
+          template_id: b.template_id || null,
+          message_template: form.message_template || null,
+        })),
+        mode, schedule_at: mode === "schedule" ? new Date(scheduleAt).toISOString() : null,
+      });
+      const list = r.data.campaigns || [];
+      const errs = list.filter((c) => c.error);
+      const verb = mode === "launch" ? "launched" : mode === "schedule" ? "scheduled" : "saved";
+      if (errs.length) toast.warning(`${list.length - errs.length}/${list.length} band campaigns ${verb} · ${errs.length} had errors (${errs[0].error})`);
+      else toast.success(`${list.length} band campaign${list.length === 1 ? "" : "s"} ${verb}`);
+      onDone?.();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to create tiered campaign");
+    } finally { setSubmitting(null); }
+  };
+
+
   const next = () => { if (!stepValid()) { toast.error("Please complete this step"); return; } setStep((s) => Math.min(s + 1, STEPS.length - 1)); };
   const back = () => setStep((s) => Math.max(s - 1, 0));
 
@@ -216,12 +257,18 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
             <div className="space-y-3" data-testid="wizard-body-objective">
               <input className="k-input" placeholder="Campaign name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="campaign-name-input" />
               <textarea className="k-input" placeholder="Description (optional)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-              <CampaignObjective form={form} setForm={setForm} />
+              <CampaignObjective form={form} setForm={setForm} templates={templates} />
             </div>
           )}
 
           {key === "audience" && (
             <div className="space-y-3" data-testid="wizard-body-audience">
+              {form.tiered && (
+                <div className="border border-indigo-200 rounded p-4 bg-indigo-50/50 text-sm text-neutral-700" data-testid="audience-tiered-note">
+                  <b>Tiered mode is on.</b> Audiences are defined per points band in the Objective step ({(form.points_bands || []).length} band{(form.points_bands || []).length === 1 ? "" : "s"}). Each band sends to its own points range — continue to <b>Message</b> → <b>Review</b> to launch them all.
+                </div>
+              )}
+              {!form.tiered && (<>
               <div className="grid grid-cols-2 gap-3">
                 <select className="k-input" value={form.audience_type} onChange={(e) => setForm({ ...form, audience_type: e.target.value, audience_filter: {} })} data-testid="audience-type-select">
                   <option value="all">Entire base</option>
@@ -230,6 +277,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   <option value="tier">By tier</option>
                   <option value="city">By city</option>
                   <option value="points">By points balance</option>
+                  <option value="expiring_points">Points expiring soon</option>
                   <option value="cohort">By cohort</option>
                 </select>
                 {form.audience_type === "segment" && (
@@ -260,6 +308,17 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                     value={form.audience_filter?.min_points || ""}
                     onChange={(e) => setForm({ ...form, audience_filter: { min_points: parseInt(e.target.value, 10) || 0 } })}
                     data-testid="audience-minpoints-input" />
+                )}
+                {form.audience_type === "expiring_points" && (
+                  <select className="k-input" value={form.audience_filter?.expiry_days || 30}
+                    onChange={(e) => setForm({ ...form, audience_filter: { expiry_days: parseInt(e.target.value, 10) } })}
+                    data-testid="audience-expiry-days">
+                    <option value={7}>Expiring within 7 days</option>
+                    <option value={15}>Expiring within 15 days</option>
+                    <option value={30}>Expiring within 30 days</option>
+                    <option value={60}>Expiring within 60 days</option>
+                    <option value={90}>Expiring within 90 days</option>
+                  </select>
                 )}
                 {form.audience_type === "cohort" && (
                   <select className="k-input" value={form.audience_filter?.cohort || ""} onChange={(e) => setForm({ ...form, audience_filter: { cohort: e.target.value } })} data-testid="audience-cohort-select">
@@ -294,11 +353,17 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   <div className="text-neutral-400 text-sm py-3">No preview yet</div>
                 )}
               </div>
+              </>)}
             </div>
           )}
 
           {key === "message" && (
             <div className="space-y-3" data-testid="wizard-body-message">
+              {form.tiered && (
+                <div className="border border-indigo-200 rounded p-3 bg-indigo-50/50 text-sm text-neutral-700" data-testid="message-tiered-note">
+                  <b>Tiered mode:</b> each points band uses its own template (set in the Objective step). The channel, link, coupon and cost below apply to every band.
+                </div>
+              )}
               <div>
                 <label className="text-[10px] uppercase tracking-widest text-neutral-500 mb-2 block">Channels</label>
                 <div className="flex gap-2 flex-wrap">
@@ -308,6 +373,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                 </div>
               </div>
 
+              {!form.tiered && (
               <div className="border border-neutral-200 rounded p-3 bg-neutral-50" data-testid="campaign-template-select">
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-[10px] uppercase tracking-widest text-neutral-700 font-medium flex items-center gap-1"><Send className="w-3 h-3" /> Send via Telecom Provider template (real send)</label>
@@ -334,6 +400,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   return null;
                 })()}
               </div>
+              )}
 
               <textarea className="k-input" placeholder="Optional preview / fallback body (only used if no Telecom Provider template above)" value={form.message_template} onChange={(e) => setForm({ ...form, message_template: e.target.value })} data-testid="message-template-input" />
 
@@ -351,6 +418,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                 </div>
               </div>
 
+              {!form.tiered && (
               <div className="border border-emerald-200 rounded p-3 bg-emerald-50/50" data-testid="msg-preview-box">
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-[10px] uppercase tracking-widest text-emerald-800 font-medium flex items-center gap-1"><Sparkles className="w-3 h-3" /> Live preview — resolves real points by mobile</label>
@@ -371,6 +439,7 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                   <div className="text-[11px] text-neutral-500">Click Preview to see the exact message a few sample recipients will receive, with their live points balance filled in.</div>
                 )}
               </div>
+              )}
 
               <div className="grid grid-cols-3 gap-3">
                 <select className="k-input" value={form.coupon_code} onChange={(e) => setForm({ ...form, coupon_code: e.target.value })} data-testid="coupon-select">
@@ -430,6 +499,24 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
                 {form.cost !== "" && form.cost != null && <ReviewItem label="Spend" value={`₹${form.cost}`} testid="review-cost" />}
               </div>
 
+              {form.tiered && (
+                <div className="border border-indigo-200 rounded p-3 bg-indigo-50/40" data-testid="review-bands">
+                  <div className="text-[10px] uppercase tracking-widest text-indigo-700 font-medium mb-2">Tiered points bands — {(form.points_bands || []).length} separate campaign{(form.points_bands || []).length === 1 ? "" : "s"}</div>
+                  <div className="space-y-1.5">
+                    {(form.points_bands || []).map((b, i) => {
+                      const tpl = templates.find((t) => t.id === b.template_id);
+                      const label = (b.label || "").trim() || (b.max_points === "" || b.max_points == null ? `${b.min_points || 1}+` : `${b.min_points}-${b.max_points}`);
+                      return (
+                        <div key={i} className="flex items-center justify-between text-xs bg-white border rounded px-2.5 py-1.5" data-testid={`review-band-${i}`}>
+                          <span className="font-medium">{label} pts</span>
+                          <span className="text-neutral-500">{tpl ? tpl.name : "Simulated (no template)"}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div className="border border-black/10 rounded p-3 bg-white" data-testid="review-schedule">
                 <label className="text-[10px] uppercase tracking-widest text-neutral-700 font-medium flex items-center gap-1 mb-2"><CalendarClock className="w-3 h-3" /> Schedule for later (optional)</label>
                 <input type="datetime-local" className="k-input" value={scheduleAt} onChange={(e) => setScheduleAt(e.target.value)} data-testid="schedule-at-input" />
@@ -450,16 +537,16 @@ export default function CampaignWizard({ onClose, onDone, templates = [], coupon
             <button className="k-btn kazo-bg-burgundy" onClick={next} data-testid="wizard-next">Next <ChevronRight className="w-4 h-4" /></button>
           ) : (
             <div className="flex gap-2">
-              <button className="k-btn k-btn-ghost disabled:opacity-50" onClick={() => submit("draft")} disabled={!!submitting} data-testid="wizard-create-draft">
+              <button className="k-btn k-btn-ghost disabled:opacity-50" onClick={() => (form.tiered ? submitTiered("draft") : submit("draft"))} disabled={!!submitting} data-testid="wizard-create-draft">
                 {submitting === "draft" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Save draft
               </button>
               {scheduleAt ? (
-                <button className="k-btn kazo-bg-burgundy disabled:opacity-50" onClick={() => submit("schedule")} disabled={!!submitting} data-testid="wizard-create-schedule">
+                <button className="k-btn kazo-bg-burgundy disabled:opacity-50" onClick={() => (form.tiered ? submitTiered("schedule") : submit("schedule"))} disabled={!!submitting} data-testid="wizard-create-schedule">
                   {submitting === "schedule" ? <Loader2 className="w-4 h-4 animate-spin" /> : <CalendarClock className="w-4 h-4" />} Schedule
                 </button>
               ) : (
-                <button className="k-btn kazo-bg-burgundy disabled:opacity-50" onClick={() => submit("launch")} disabled={!!submitting} data-testid="wizard-create-launch">
-                  {submitting === "launch" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} Create & Launch
+                <button className="k-btn kazo-bg-burgundy disabled:opacity-50" onClick={() => (form.tiered ? submitTiered("launch") : submit("launch"))} disabled={!!submitting} data-testid="wizard-create-launch">
+                  {submitting === "launch" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} {form.tiered ? "Create & Launch all" : "Create & Launch"}
                 </button>
               )}
             </div>
