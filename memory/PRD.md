@@ -31,6 +31,10 @@ Build a complete enterprise-grade standalone loyalty, CRM, analytics, campaign a
 
 ## What's been implemented (recent — full history in CHANGELOG when split)
 
+### 🟢 (Jun 10, 2026) WhatsApp Campaign Manager (Karix RCM/WABA) + WhatsApp DLR webhook + CRM full-date
+- WhatsApp campaigns now send to cohorts / Marketing DB / segments / any audience with ROI + delivery tracking, exactly like SMS (Campaign Wizard channel select → WABA template → launch → `send_whatsapp_karix`). Karix RCM Bearer-token auth implemented (token from `tsp.instaalerts.zone/token/generate`, cached + 401-refresh + 60s negative cache). WhatsApp DLR webhook `/api/communications/dlr/whatsapp` added (channel-aware DLR ingest). ⚠️ Live sends blocked only until Karix **enables the Public API** for account `KAZO_2026` ("Public API is not enabled for user") — code is ready, no change needed once enabled. Verified iteration_112 frontend 100% (7/7).
+- CRM Customer Report dates now show the full month (e.g. "08 June 2026") via `fmtDateLong` (targeted; rest of app unchanged).
+
 
 
 ### 🟢 Batch (Jun 16, 2026): coupon-from-sheet + Bulk Send Jobs drill-down/download

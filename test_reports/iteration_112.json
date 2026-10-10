@@ -1,0 +1,19 @@
+{
+  "summary": "Frontend-only E2E of KAZO/Fundle WhatsApp Campaign Manager + CRM date formatting. All 7 requested scenarios PASSED. Logged in as superadmin (via /enterprise/login — note /admin/login route redirects to the public marketing site). Verified WhatsApp template 'Fundle WhatsApp Test (testing_fundle)' shows active + green '✓ Approved' on Communications → Templates → WhatsApp tab. Created Marketing DB 'QA WhatsApp List' with 2 dummy numbers (9999999991, 9999999992). Ran full New Campaign wizard: selected Marketing Database audience → audience count=2; on Message step toggled channel-whatsapp, template dropdown exposed 'Fundle WhatsApp Test (testing_fundle) · WHATSAPP · WABA approved' and the SMS DLT warning (tpl-no-dlt-warning) was NOT shown. Reviewed and launched — campaign appears in list with whatsapp channel pill, send mode 'Real Telecom Provider', status 'completed' with '2 failed' badge. Delivery modal opens cleanly showing Total=2 / Delivered=0 / Failed=2 / Pending=0 and the EXPECTED provider error 'Public API is not enabled for user.' on both mobiles. ROI modal opens; all attribution window switches (72 hours / 3/5/7/14/30 days) render without any error. CRM Customer Report (/admin/reports/crm-customers) renders every date column in full-month format (e.g. '05 August 2022', '10 June 2026', '10 February 2025', '28 May 2026') — zero genuine short-month ('Jun'/'Aug') occurrences detected (regex false-positives were only prefixes of the long month names).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Minor UX: /admin/login silently redirects to the public marketing homepage instead of the enterprise login page. Consider aliasing it to /enterprise/login or showing a hint. Not blocking.",
+    "Campaign Delivery and ROI modals share the Campaign Manager row; clicking ROI while Delivery is still open triggers a pointer-event intercept because of modal stacking. Not a functional bug (user can close first modal), but consider closing any open modal before opening another, or raising z-index of the newer modal."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% (7/7 scenarios pass)"},
+  "test_credentials": "superadmin@fundle.io / Fundle@2026 (used on /enterprise/login)",
+  "seed_data_creation": "Created Marketing Database 'QA WhatsApp List' (2 numbers: 9999999991, 9999999992). Created Campaign 'QA WhatsApp Campaign' (whatsapp channel, marketing_db audience, Real Telecom Provider send, status completed, 2 failed sends — expected because provider has not enabled Public API for this account).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Enterprise login path is /enterprise/login (NOT /admin/login). After login the app lands on /admin. Key testids: new-campaign-btn, campaign-wizard, campaign-name-input, audience-type-select (value='marketing_db'), audience-mdb-select (option values are hex ids; label 'QA WhatsApp List · 2 numbers (0 members)'), audience-refresh, audience-count, wizard-next, channel-sms/whatsapp/email/push/in_app toggle pills, campaign-template-dropdown, tpl-no-dlt-warning (SMS-only, must be absent for WhatsApp), wizard-create-launch. Delivery/ROI buttons are inside each campaign row — use 'button:has-text(\"Delivery\")' and 'button:has-text(\"ROI\")'. ROI window switches use labels like '72 hours', '7 days', '30 days' (not '7d').",
+  "rca of the issue": "No bugs found. The 2 failed sends on the launched WhatsApp campaign are EXPECTED per main-agent note: Karix RCM (WABA) returns 'Public API is not enabled for user.' which is a provider-side account entitlement, not a product bug."
+}

@@ -5,6 +5,21 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-06-10 — 🟢 WhatsApp Campaign Manager (Karix RCM / WABA) + WhatsApp DLR webhook + CRM full-date
+
+⚠️ Redeploy required. Verified: testing_agent iteration_112 = **frontend 100% (7/7)** + main-agent curl (DLR webhook 4 shapes, campaign e2e, Bearer token flow).
+
+- **WhatsApp campaigns, same as SMS.** The full chain already existed (Templates WABA creation+approval, Campaign Wizard channel select, any audience, `_do_launch` → `_run_bulk_send_job` → `send_whatsapp_karix`, channel-agnostic ROI). Wired the last mile:
+  - **Karix RCM auth = Bearer token.** RCM `sendMessage` needs `Authorization: Bearer <token>`; the token is generated from the account api_key at `POST https://tsp.instaalerts.zone/token/generate` body `{"api_key": ...}` → `{"validity": <minutes, 1440=24h>, "token": ...}`. New in-process token manager `_get_whatsapp_token()` (communications_routes.py): caches the token to `exp` (validity−5min), **negative-caches failures for 60s** (so a bulk job never hammers the token endpoint), refreshes on 401 (one retry). `send_whatsapp_karix` rewritten to use the Bearer header (was a wrong `Authentication: <key>` header).
+  - **Config:** DEFAULT_CONFIG gains `whatsapp_token_endpoint` + the WABA `whatsapp_api_key` (`hqvjPMFOVzSbLiDWaGS9UQ==`, account userId `KAZO_2026`). Provider Settings UI now shows Send Endpoint + Token Endpoint + API Key + version.
+  - **⚠️ Live blocker (provider-side, NOT a bug):** the token endpoint currently returns `{"status":"FAILURE","reason":"Public API is not enabled for user."}` → Karix must **enable the Public API / TSP feature** for account `KAZO_2026`. Until then WhatsApp sends fail gracefully with that exact reason (logged per message_log row). Once enabled, sends work with no code change. (Also confirm the `testing_fundle` template + sender `919133325826` are provisioned on the account.)
+- **WhatsApp DLR webhook (new):** `GET/POST /api/communications/dlr/whatsapp` (register with Karix for webHookDNId 1001). `_wa_dlr_fields()` flattens flat/nested RCM status callbacks (events[]/statuses[] batches too). `_ingest_dlr(data, channel=...)` is now **channel-aware** (dest fallback matches the whatsapp/rcs family, not just sms). `_norm_dlr_status` maps WhatsApp SENT→submitted, DELIVERED/READ→delivered. `_parse_provider_mid` captures the RCM `messageId`/`mid`. `campaign_delivery` counts `read` as delivered, returns `channels`, and surfaces the whatsapp vs sms webhook URL.
+- **Seeded a preview test template** `WATPL_TESTING_FUNDLE` = "Fundle WhatsApp Test (testing_fundle)" (channel whatsapp, waba_template_id `testing_fundle`, approved, no vars) for flow verification.
+- **CRM Customer Report — full date** (client doc Point 1 wording): added `fmtDateLong` (e.g. "08 June 2026") and used it for the CRM report date columns (Last/First Visit, Added On, DOB, DOA). Targeted — does NOT change dates elsewhere in the app.
+- **Known provider-side (unchanged):** SMS DLRs still only populate when Karix POSTs to `…/dlr/karix` (our webhook is verified working; Karix must register/push to the prod URL — external config).
+
+---
+
 ## 2026-07-11 — 🔴 Three P0 fixes: Store-KPI New/Repeat=0, non-OTP redeem double-deduct, tax-inclusive earning
 
 ⚠️ Redeploy required. Verified: testing_agent iteration_92 = 29/29 backend PASS (+ `tests/iteration92_pos_p0_fixes_test.py`).
