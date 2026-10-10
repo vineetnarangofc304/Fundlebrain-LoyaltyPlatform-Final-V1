@@ -34,9 +34,10 @@ const SECTIONS = [
     title: "WhatsApp (Telecom Provider WABA)",
     accent: "emerald",
     fields: [
-      { key: "whatsapp_endpoint", label: "Endpoint URL", placeholder: "https://rcmapi.instaalerts.zone/services/rcm/sendMessage" },
+      { key: "whatsapp_endpoint", label: "Send Endpoint URL (RCM)", placeholder: "https://rcmapi.instaalerts.zone/services/rcm/sendMessage" },
+      { key: "whatsapp_token_endpoint", label: "Token Endpoint URL (TSP)", placeholder: "https://tsp.instaalerts.zone/token/generate" },
       { key: "whatsapp_from_number", label: "Sender number (without +)", placeholder: "919133325826" },
-      { key: "whatsapp_api_key", label: "API Key (Authentication header)", secret: true },
+      { key: "whatsapp_api_key", label: "API Key (used to generate the Bearer token)", secret: true },
       { key: "whatsapp_version", label: "API Version", placeholder: "v1.0.9" },
     ],
   },

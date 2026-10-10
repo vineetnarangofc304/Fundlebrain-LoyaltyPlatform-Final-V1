@@ -868,10 +868,11 @@ async def campaign_delivery(campaign_id: str, user: dict = Depends(get_current_u
     ]).to_list(50)
     by = {(r["_id"] or "unknown"): r["n"] for r in rows}
     total = sum(by.values())
-    delivered = by.get("delivered", 0)
+    delivered = by.get("delivered", 0) + by.get("read", 0)
     counts = {
         "submitted": by.get("submitted", 0),
         "delivered": delivered,
+        "read": by.get("read", 0),
         "undelivered": by.get("undelivered", 0) + by.get("expired", 0),
         "failed": by.get("failed", 0) + by.get("rejected", 0),
         "pending": by.get("submitted", 0),
@@ -881,11 +882,15 @@ async def campaign_delivery(campaign_id: str, user: dict = Depends(get_current_u
          "delivery_status": {"$in": ["failed", "undelivered", "expired", "rejected"]}},
         {"_id": 0, "mobile": 1, "delivery_status": 1, "response": 1, "timestamp": 1},
     ).sort("timestamp", -1).limit(20).to_list(20)
+    # Which channel(s) did this campaign actually send on → surface the right DLR webhook.
+    chans = await message_log_col.distinct("channel", {"campaign_id": campaign_id})
+    is_wa = any(c in ("whatsapp", "rcs") for c in (chans or []))
     return {
         "campaign_id": campaign_id, "total": total,
         "counts": counts, "by_status": by,
+        "channels": chans or [],
         "delivery_rate_pct": round(delivered / total * 100, 1) if total else 0.0,
         "failure_rate_pct": round((counts["failed"] + counts["undelivered"]) / total * 100, 1) if total else 0.0,
         "failures_sample": fails,
-        "webhook_url": "/api/communications/dlr/karix",
+        "webhook_url": "/api/communications/dlr/whatsapp" if is_wa else "/api/communications/dlr/karix",
     }

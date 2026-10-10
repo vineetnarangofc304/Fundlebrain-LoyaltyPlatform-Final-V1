@@ -6,11 +6,11 @@ import api from "@/lib/api";
 import { requestExport } from "@/lib/exportClient";
 import { PageHeader, KPICard, SectionHeading, CHART_SERIES } from "./_shared";
 import { ColumnPicker, ReportTable, useColumns } from "./reportkit";
-import { fmtINR, fmtNum, fmtDate } from "@/lib/format";
+import { fmtINR, fmtNum, fmtDateLong } from "@/lib/format";
 import { Download, Search, RefreshCw } from "lucide-react";
 import { PieChart, Pie, Cell, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 
-const dateCell = (v) => (v ? fmtDate(v) : "—");
+const dateCell = (v) => (v ? fmtDateLong(v) : "—");
 
 const COLS = [
   { key: "mobile", label: "Mobile", mono: true, sort: "mobile" },

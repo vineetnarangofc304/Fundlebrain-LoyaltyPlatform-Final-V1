@@ -99,8 +99,9 @@ DEFAULT_CONFIG = {
     "sms_campaign_entity_id": "1101409540000012086",
     "sms_campaign_account": "fundle_campaign",
     "whatsapp_endpoint": "https://rcmapi.instaalerts.zone/services/rcm/sendMessage",
+    "whatsapp_token_endpoint": "https://tsp.instaalerts.zone/token/generate",
     "whatsapp_from_number": "919133325826",
-    "whatsapp_api_key": "",
+    "whatsapp_api_key": "hqvjPMFOVzSbLiDWaGS9UQ==",
     "whatsapp_version": "v1.0.9",
     "rcs_endpoint": "https://rcmapi.instaalerts.zone/services/rcm/sendMessage",
     "rcs_api_key": "",
@@ -356,6 +357,8 @@ async def _log(channel: str, status: str, mobile: str, payload: Dict[str, Any],
 _REQID_RE = re.compile(r"request\s*id\s*[=:]\s*([A-Za-z0-9\-]{6,})", re.I)
 _MID_RE = re.compile(r"([A-Za-z0-9\-]{8,})\s*$")
 _ACKID_RE = re.compile(r'"ackid"\s*:\s*"?([A-Za-z0-9\-]{6,})"?', re.I)
+# Karix RCM (WhatsApp/WABA) sendMessage accept body carries the message id under one of these keys.
+_MSGID_RE = re.compile(r'"(?:messageId|message_id|mid|dnId)"\s*:\s*"?([A-Za-z0-9\-_.:]{6,})"?', re.I)
 
 
 def _parse_provider_mid(resp: Optional[str]) -> Optional[str]:
@@ -366,6 +369,10 @@ def _parse_provider_mid(resp: Optional[str]) -> Optional[str]:
     m_ack = _ACKID_RE.search(resp)
     if m_ack:
         return m_ack.group(1)
+    # Karix RCM WhatsApp accept body is JSON with a messageId/mid — capture it for DLR reconciliation.
+    m_msg = _MSGID_RE.search(resp)
+    if m_msg:
+        return m_msg.group(1)
     m = _REQID_RE.search(resp)
     if m:
         return m.group(1)
@@ -392,12 +399,15 @@ def _karix_submit_ok(body: Optional[str]) -> bool:
 
 
 def _norm_dlr_status(raw: Optional[str]) -> str:
-    """Normalise a Karix DLR status code (DELIVRD / UNDELIV / EXPIRED / REJECTD / ACCEPTD…)."""
+    """Normalise a Karix DLR status code (DELIVRD / UNDELIV / EXPIRED / REJECTD / ACCEPTD…)
+    and WhatsApp/WABA event statuses (SENT / DELIVERED / READ / FAILED)."""
     s = (raw or "").strip().upper()
     if not s:
         return "unknown"
     if "UNDEL" in s:
         return "undelivered"
+    if "READ" in s:
+        return "read"
     if "DELIV" in s or s in {"DELIVRD", "DELIVERED", "SUCCESS", "0", "000"}:
         return "delivered"
     if "EXPIR" in s:
@@ -406,7 +416,7 @@ def _norm_dlr_status(raw: Optional[str]) -> str:
         return "rejected"
     if "FAIL" in s:
         return "failed"
-    if "ACCEP" in s or "SUBMIT" in s or "BUFFER" in s or "ENROUTE" in s:
+    if "ACCEP" in s or "SUBMIT" in s or "BUFFER" in s or "ENROUTE" in s or s == "SENT":
         return "submitted"
     return s.lower()
 
@@ -580,6 +590,74 @@ async def send_sms_campaign_karix(mobile: str, text: str, template_id: Optional[
 
 
 
+# ── Karix RCM (WhatsApp/WABA) Bearer token manager ─────────────────────────────
+# Karix RCM auth = a Bearer token generated from the account api_key at the TSP token
+# endpoint (POST {token_endpoint} {"api_key": ...} → {"validity": <minutes>, "token": ...}).
+# The token is valid ~24h; cached in-process and refreshed on expiry / 401 / key change.
+_WA_TOKEN_CACHE: Dict[str, Any] = {"token": None, "exp": 0.0, "key": None,
+                                   "last_error": None, "neg_exp": 0.0}
+_WA_TOKEN_LOCK = asyncio.Lock()
+
+
+async def _get_whatsapp_token(cfg: Dict[str, Any], force: bool = False) -> Optional[str]:
+    api_key = (cfg.get("whatsapp_api_key") or "").strip()
+    if not api_key:
+        _WA_TOKEN_CACHE["last_error"] = "No WhatsApp API key configured"
+        return None
+    token_url = cfg.get("whatsapp_token_endpoint") or "https://tsp.instaalerts.zone/token/generate"
+    import time as _time
+    now = _time.time()
+    if (not force and _WA_TOKEN_CACHE.get("token") and _WA_TOKEN_CACHE.get("key") == api_key
+            and _WA_TOKEN_CACHE.get("exp", 0) > now + 30):
+        return _WA_TOKEN_CACHE["token"]
+    # Negative cache: if the last token attempt for this key failed recently, don't hammer the
+    # token endpoint for every recipient in a bulk job — fail fast for ~60s.
+    if (not force and _WA_TOKEN_CACHE.get("key") == api_key
+            and _WA_TOKEN_CACHE.get("neg_exp", 0) > now):
+        return None
+    async with _WA_TOKEN_LOCK:
+        now = _time.time()
+        if (not force and _WA_TOKEN_CACHE.get("token") and _WA_TOKEN_CACHE.get("key") == api_key
+                and _WA_TOKEN_CACHE.get("exp", 0) > now + 30):
+            return _WA_TOKEN_CACHE["token"]
+        if (not force and _WA_TOKEN_CACHE.get("key") == api_key
+                and _WA_TOKEN_CACHE.get("neg_exp", 0) > now):
+            return None
+        data: Dict[str, Any] = {}
+        raw = ""
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as c:
+                r = await c.post(token_url, json={"api_key": api_key})
+            raw = r.text
+            if r.headers.get("content-type", "").lower().startswith("application/json"):
+                data = r.json()
+            else:
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    data = {}
+        except Exception as e:  # noqa: BLE001
+            _WA_TOKEN_CACHE.update({"token": None, "exp": 0.0, "key": api_key,
+                                    "neg_exp": now + 60, "last_error": f"token endpoint error: {e}"})
+            logger.warning("WhatsApp token generation failed: %s", e)
+            return None
+        token = (data or {}).get("token") or (data or {}).get("access_token")
+        if not token:
+            reason = (data or {}).get("reason") or (raw or "token not issued")[:200]
+            _WA_TOKEN_CACHE.update({"token": None, "exp": 0.0, "key": api_key,
+                                    "neg_exp": now + 60, "last_error": reason})
+            logger.warning("WhatsApp token not issued: %s", reason)
+            return None
+        try:
+            validity_min = float((data or {}).get("validity") or 1440)
+        except Exception:  # noqa: BLE001
+            validity_min = 1440.0
+        _WA_TOKEN_CACHE.update({"token": token, "key": api_key,
+                                "exp": now + max(60.0, validity_min * 60 - 300),
+                                "neg_exp": 0.0, "last_error": None})
+        return token
+
+
 async def send_whatsapp_karix(mobile: str, template_id_external: str,
                                 parameter_values: Dict[str, str],
                                 template_id: Optional[str] = None,
@@ -589,6 +667,12 @@ async def send_whatsapp_karix(mobile: str, template_id_external: str,
     if not cfg.get("whatsapp_endpoint") or not cfg.get("whatsapp_from_number"):
         await _log("whatsapp", "config_missing", mobile, {}, None, template_id, event_trigger, context)
         return {"ok": False, "error": "WhatsApp provider not configured"}
+    # Karix RCM uses a Bearer token generated from the account api_key (valid ~24h).
+    token = await _get_whatsapp_token(cfg)
+    if not token:
+        reason = _WA_TOKEN_CACHE.get("last_error") or "WhatsApp auth token unavailable"
+        await _log("whatsapp", "auth_failed", mobile, {}, reason, template_id, event_trigger, context)
+        return {"ok": False, "error": f"WhatsApp auth failed: {reason}"}
     mob = _normalize_mobile(mobile)
     payload = {
         "message": {
@@ -611,12 +695,16 @@ async def send_whatsapp_karix(mobile: str, template_id_external: str,
         },
         "metaData": {"version": cfg.get("whatsapp_version", "v1.0.9")},
     }
-    headers = {"Content-Type": "application/json"}
-    if cfg.get("whatsapp_api_key"):
-        headers["Authentication"] = cfg["whatsapp_api_key"]
     try:
-        async with httpx.AsyncClient(timeout=12.0) as c:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
             r = await c.post(cfg["whatsapp_endpoint"], json=payload, headers=headers)
+            # A 401 means the token expired/was revoked — regenerate once and retry.
+            if r.status_code == 401:
+                token = await _get_whatsapp_token(cfg, force=True)
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                    r = await c.post(cfg["whatsapp_endpoint"], json=payload, headers=headers)
         ok = r.status_code in (200, 201, 202)
         await _log("whatsapp", "ok" if ok else f"http_{r.status_code}", mob, payload,
                     r.text, template_id, event_trigger, context)
@@ -1211,23 +1299,32 @@ async def bulk_job_recipients_csv(job_id: str, user: dict = Depends(get_current_
 
 
 # ─────────────────────────── Delivery Reports (DLR) ───────────────────────────
-async def _ingest_dlr(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Ingest a single Karix DLR record → update the matching message_log row's delivery_status."""
+async def _ingest_dlr(data: Dict[str, Any], channel: Optional[str] = None) -> Dict[str, Any]:
+    """Ingest a single Karix DLR record → update the matching message_log row's delivery_status.
+    `channel` restricts the destination-based fallback match to that channel family (SMS by
+    default; pass 'whatsapp' for RCM/WABA delivery callbacks)."""
     mid = (data.get("mid") or data.get("MID") or data.get("messageId") or data.get("id")
            or data.get("msgid") or data.get("smscId") or data.get("ackid") or data.get("ackId") or "")
-    dest = (data.get("dest") or data.get("msisdn") or data.get("to") or data.get("mobile") or "")
+    dest = (data.get("dest") or data.get("msisdn") or data.get("to") or data.get("mobile")
+            or data.get("recipient") or data.get("destination") or data.get("mobileNumber")
+            or data.get("number") or "")
     raw_status = (data.get("status") or data.get("dlrstatus") or data.get("dlrStatus")
-                  or data.get("stat") or data.get("state") or "")
+                  or data.get("stat") or data.get("state") or data.get("eventType")
+                  or data.get("messageStatus") or data.get("deliveryStatus") or "")
     ns = _norm_dlr_status(raw_status)
-    dtime = data.get("dtime") or data.get("deliveryTime") or data.get("dlr_time")
+    dtime = data.get("dtime") or data.get("deliveryTime") or data.get("dlr_time") or data.get("timestamp")
     if not mid and not dest:
         return {"ok": False, "error": "DLR missing both mid and dest"}
+    # 'read' (WhatsApp) implies delivered — stamp delivered_at so delivery stats count it.
+    is_delivered_like = ns in ("delivered", "read")
     upd = {
         "delivery_status": ns,
         "dlr": data,
         "dlr_at": datetime.now(timezone.utc).isoformat(),
-        "delivered_at": (dtime or datetime.now(timezone.utc).isoformat()) if ns == "delivered" else None,
+        "delivered_at": (dtime or datetime.now(timezone.utc).isoformat()) if is_delivered_like else None,
     }
+    # Channel family for the destination-based fallback.
+    chan_set = {"whatsapp", "rcs"} if channel in {"whatsapp", "rcs"} else ({channel} if channel else {"sms"})
     matched_mobile = str(dest) if dest else None
     matched = 0
     if mid:
@@ -1237,16 +1334,17 @@ async def _ingest_dlr(data: Dict[str, Any]) -> Dict[str, Any]:
         matched = res.matched_count
         matched_mobile = (pre or {}).get("mobile") or matched_mobile
     if matched == 0 and dest:
-        # mid absent OR unknown — for the BULK pipe the per-message DLR id often differs from the
-        # batch ackid we stored, so reconcile by destination: prefer the most recent SMS to this
-        # number that is still 'submitted', else the most recent SMS to it.
+        # mid absent OR unknown — for the BULK/RCM pipe the per-message DLR id often differs from
+        # the id we stored, so reconcile by destination: prefer the most recent message to this
+        # number (within the channel family) that is still 'submitted', else the most recent.
         tail = re.escape(str(dest)[-10:])
+        chan_q = {"$in": list(chan_set)}
         doc = await message_log_col.find_one(
-            {"mobile": {"$regex": tail + "$"}, "channel": "sms", "delivery_status": "submitted"},
+            {"mobile": {"$regex": tail + "$"}, "channel": chan_q, "delivery_status": "submitted"},
             sort=[("timestamp", -1)])
         if not doc:
             doc = await message_log_col.find_one(
-                {"mobile": {"$regex": tail + "$"}, "channel": "sms"},
+                {"mobile": {"$regex": tail + "$"}, "channel": chan_q},
                 sort=[("timestamp", -1)])
         if doc:
             await message_log_col.update_one({"id": doc["id"]}, {"$set": upd})
@@ -1256,10 +1354,11 @@ async def _ingest_dlr(data: Dict[str, Any]) -> Dict[str, Any]:
     bl = None
     try:
         from routes.blacklist_util import record_dlr_status
-        bl = await record_dlr_status(matched_mobile, ns)
+        bl = await record_dlr_status(matched_mobile, "delivered" if ns == "read" else ns)
     except Exception:  # noqa: BLE001
         bl = None
     return {"ok": True, "matched": matched, "status": ns, "mid": mid or None,
+            "channel": channel or "sms",
             "auto_blacklisted": bool(bl and bl.get("blacklisted"))}
 
 
@@ -1283,6 +1382,67 @@ async def karix_dlr_webhook(request: Request):
         results = [await _ingest_dlr(x) for x in batch if isinstance(x, dict)]
         return {"ok": True, "ingested": len(results)}
     return await _ingest_dlr(data)
+
+
+def _wa_dlr_fields(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a Karix RCM (WhatsApp/WABA) delivery callback — which can be flat or nested —
+    into the flat {messageId, status, to, dtime} shape _ingest_dlr understands."""
+    def dig(obj: Any, *paths: str) -> Any:
+        for p in paths:
+            cur = obj
+            ok = True
+            for seg in p.split("."):
+                if isinstance(cur, dict) and seg in cur:
+                    cur = cur[seg]
+                else:
+                    ok = False
+                    break
+            if ok and cur not in (None, "", {}, []):
+                return cur
+        return None
+    mid = dig(d, "messageId", "message_id", "mid", "id", "message.id", "message.messageId",
+              "data.mid", "data.messageId", "data.id")
+    status = dig(d, "status", "state", "eventType", "messageStatus", "deliveryStatus",
+                 "message.status", "data.status", "data.eventType")
+    to = dig(d, "to", "recipient.to", "recipient", "destination", "msisdn", "mobileNumber",
+             "message.recipient.to", "data.to", "number", "mobile")
+    if isinstance(to, dict):
+        to = to.get("to") or to.get("number") or to.get("msisdn")
+    dtime = dig(d, "timestamp", "deliveryTime", "dtime", "eventTime", "data.timestamp")
+    return {"messageId": mid, "status": status, "to": to, "dtime": dtime}
+
+
+@router.api_route("/communications/dlr/whatsapp", methods=["GET", "POST"])
+async def karix_whatsapp_dlr_webhook(request: Request):
+    """Public Karix RCM (WhatsApp/WABA) delivery callback. Register this URL with Karix for the
+    WABA sender (webHookDNId 1001 in the send payload):
+        {BACKEND}/api/communications/dlr/whatsapp
+    Accepts a single JSON status event, a list, or a list wrapped under events/statuses/reports.
+    WhatsApp statuses map: SENT→pending, DELIVERED/READ→delivered, FAILED→failed."""
+    raw: Any = dict(request.query_params)
+    if not raw:
+        try:
+            raw = await request.json()
+        except Exception:
+            try:
+                raw = dict(await request.form())
+            except Exception:
+                raw = {}
+    # Normalise to a list of event dicts.
+    batch: Optional[List[Any]] = None
+    if isinstance(raw, list):
+        batch = raw
+    elif isinstance(raw, dict):
+        for k in ("events", "statuses", "reports", "dlrs", "data"):
+            v = raw.get(k)
+            if isinstance(v, list):
+                batch = v
+                break
+    if batch is not None:
+        results = [await _ingest_dlr(_wa_dlr_fields(x), channel="whatsapp")
+                   for x in batch if isinstance(x, dict)]
+        return {"ok": True, "channel": "whatsapp", "ingested": len(results)}
+    return await _ingest_dlr(_wa_dlr_fields(raw if isinstance(raw, dict) else {}), channel="whatsapp")
 
 
 @router.post("/communications/dlr/pull")

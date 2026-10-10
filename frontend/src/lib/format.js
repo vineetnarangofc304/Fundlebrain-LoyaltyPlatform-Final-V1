@@ -87,6 +87,13 @@ export const fmtDate = (s) => {
   return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: IST_TZ });
 };
 
+// Full date with the month spelled out, e.g. "08 June 2026" (used in the CRM Customer Report).
+export const fmtDateLong = (s) => {
+  const d = parseDate(s);
+  if (!d) return s ? s : "—";
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric", timeZone: IST_TZ });
+};
+
 export const fmtDateTime = (s) => {
   const d = parseDate(s);
   if (!d) return s ? s : "—";
