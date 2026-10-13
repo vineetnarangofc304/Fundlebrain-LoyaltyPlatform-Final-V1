@@ -600,11 +600,14 @@ _WA_TOKEN_LOCK = asyncio.Lock()
 
 
 async def _get_whatsapp_token(cfg: Dict[str, Any], force: bool = False) -> Optional[str]:
-    api_key = (cfg.get("whatsapp_api_key") or "").strip()
+    # Fall back to the baked-in default when the stored key is empty (older prod singletons
+    # have whatsapp_api_key="" which _get_config's missing-key backfill does not overwrite).
+    api_key = (cfg.get("whatsapp_api_key") or "").strip() or (DEFAULT_CONFIG.get("whatsapp_api_key") or "").strip()
     if not api_key:
         _WA_TOKEN_CACHE["last_error"] = "No WhatsApp API key configured"
         return None
-    token_url = cfg.get("whatsapp_token_endpoint") or "https://tsp.instaalerts.zone/token/generate"
+    token_url = (cfg.get("whatsapp_token_endpoint") or DEFAULT_CONFIG.get("whatsapp_token_endpoint")
+                 or "https://tsp.instaalerts.zone/token/generate")
     import time as _time
     now = _time.time()
     if (not force and _WA_TOKEN_CACHE.get("token") and _WA_TOKEN_CACHE.get("key") == api_key
@@ -664,7 +667,10 @@ async def send_whatsapp_karix(mobile: str, template_id_external: str,
                                 event_trigger: Optional[str] = None,
                                 context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = await _get_config()
-    if not cfg.get("whatsapp_endpoint") or not cfg.get("whatsapp_from_number"):
+    endpoint = cfg.get("whatsapp_endpoint") or DEFAULT_CONFIG.get("whatsapp_endpoint")
+    from_number = cfg.get("whatsapp_from_number") or DEFAULT_CONFIG.get("whatsapp_from_number")
+    version = cfg.get("whatsapp_version") or DEFAULT_CONFIG.get("whatsapp_version") or "v1.0.9"
+    if not endpoint or not from_number:
         await _log("whatsapp", "config_missing", mobile, {}, None, template_id, event_trigger, context)
         return {"ok": False, "error": "WhatsApp provider not configured"}
     # Karix RCM uses a Bearer token generated from the account api_key (valid ~24h).
@@ -690,21 +696,21 @@ async def send_whatsapp_karix(mobile: str, template_id_external: str,
                 "recipient_type": "individual",
                 "reference": {"cust_ref": f"kazo-{uuid.uuid4().hex[:8]}"},
             },
-            "sender": {"from": cfg["whatsapp_from_number"]},
+            "sender": {"from": from_number},
             "preferences": {"webHookDNId": "1001"},
         },
-        "metaData": {"version": cfg.get("whatsapp_version", "v1.0.9")},
+        "metaData": {"version": version},
     }
     try:
         async with httpx.AsyncClient(timeout=15.0) as c:
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
-            r = await c.post(cfg["whatsapp_endpoint"], json=payload, headers=headers)
+            r = await c.post(endpoint, json=payload, headers=headers)
             # A 401 means the token expired/was revoked — regenerate once and retry.
             if r.status_code == 401:
                 token = await _get_whatsapp_token(cfg, force=True)
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
-                    r = await c.post(cfg["whatsapp_endpoint"], json=payload, headers=headers)
+                    r = await c.post(endpoint, json=payload, headers=headers)
         ok = r.status_code in (200, 201, 202)
         await _log("whatsapp", "ok" if ok else f"http_{r.status_code}", mob, payload,
                     r.text, template_id, event_trigger, context)
