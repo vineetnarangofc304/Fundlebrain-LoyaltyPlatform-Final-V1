@@ -5,6 +5,16 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-10-19 — Release separation: removed WhatsApp hardcoded-credential fallback (preview; NOT deployed)
+
+Baseline compared: published `babc18b` (Publish100, 10 Oct). Narrow source change only.
+- `communications_routes.py`: DEFAULT_CONFIG `whatsapp_api_key` reverted to `""` (baked credential removed); `_get_whatsapp_token` no longer falls back to the DEFAULT_CONFIG key — it reads the key **only** from saved provider config (live config-based behavior, matching baseline).
+- Separation made WITHOUT changing existing live access (baseline baked key was already empty). No stored settings/DB edited, no provider calls, no key values printed, no Git history rewritten, no new guard architecture.
+- Preserved: DOB/DOA import fix + CRM CSV UTF-8 BOM fix (synthetic harness 18/18 still pass).
+- Note (owner choice): the broader config-based WhatsApp token-manager/Bearer/DLR-webhook code still ships in the tree but is **inert** unless an operator saves a key in Provider Settings. Excluding that too would be a separate, larger revert.
+
+---
+
 ## 2026-10-19 — Kazo Reports batch (1 Oct Doc) — PART 1 (preview review; NOT deployed)
 
 Base revision `12bbc8c`. Authorized implementation; stopped for owner preview review — no deploy.

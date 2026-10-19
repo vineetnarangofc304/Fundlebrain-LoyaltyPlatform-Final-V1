@@ -101,7 +101,7 @@ DEFAULT_CONFIG = {
     "whatsapp_endpoint": "https://rcmapi.instaalerts.zone/services/rcm/sendMessage",
     "whatsapp_token_endpoint": "https://tsp.instaalerts.zone/token/generate",
     "whatsapp_from_number": "919133325826",
-    "whatsapp_api_key": "hqvjPMFOVzSbLiDWaGS9UQ==",
+    "whatsapp_api_key": "",
     "whatsapp_version": "v1.0.9",
     "rcs_endpoint": "https://rcmapi.instaalerts.zone/services/rcm/sendMessage",
     "rcs_api_key": "",
@@ -602,7 +602,7 @@ _WA_TOKEN_LOCK = asyncio.Lock()
 async def _get_whatsapp_token(cfg: Dict[str, Any], force: bool = False) -> Optional[str]:
     # Fall back to the baked-in default when the stored key is empty (older prod singletons
     # have whatsapp_api_key="" which _get_config's missing-key backfill does not overwrite).
-    api_key = (cfg.get("whatsapp_api_key") or "").strip() or (DEFAULT_CONFIG.get("whatsapp_api_key") or "").strip()
+    api_key = (cfg.get("whatsapp_api_key") or "").strip()
     if not api_key:
         _WA_TOKEN_CACHE["last_error"] = "No WhatsApp API key configured"
         return None
