@@ -5,6 +5,29 @@ This file appends what was implemented, newest first.)
 
 ---
 
+## 2026-10-19 — Kazo Reports batch (1 Oct Doc) — PART 1 (preview review; NOT deployed)
+
+Base revision `12bbc8c`. Authorized implementation; stopped for owner preview review — no deploy.
+Synthetic/pure-function + read-only QA only; no real customer/bill data mutated, no provider sends, no migrations, no mailbox/scheduler enabled. WhatsApp provider-config work untouched.
+
+**Implemented (small, reversible):**
+- **DOB/DOA preserved verbatim (Oct Point 2 / lower Point 7)** — `historic_routes._map_customer_row` no longer nulls a DOB/DOA that coincides with a visit day. DOB/DOA are read only from their own source columns and kept as-is (distinct / legitimately-equal / null), never inferred from transactions. Removed the forbidden visit-equality heuristic.
+- **CRM export opens cleanly (lower Point 4)** — `reports_kpi_routes.crm_customers_export` now emits a UTF-8 BOM + `text/csv; charset=utf-8`, so Excel no longer garbles non-ASCII names/cities and the Home-Store "·" separator. csv.writer quoting (commas/newlines/quotes) already correct.
+
+**Verified already-satisfied (evidence):**
+- Short-date CRM filter controls (Oct Point 1): the report has no long-date filter inputs; the shared date picker uses native `type="date"` locale (short) inputs; table rows keep full-month (`fmtDateLong`). No change needed.
+- Store-KPI sales partition (Oct 4/5, lower 5): `Overall = New+Repeat+Unmapped+Return`, `Loyalty = New+Repeat` — synthetic identity exact; "New+Repeat ≠ Total" is a definition (gap = walk-in Unmapped + Returns), not a bug.
+- Old-year visibility + wide-range (lower Point 8): preview Store-KPI 2021 returns rows; 2020–2026 range HTTP 200 (16MB fix holds).
+
+**Not reproducible in preview (needs owner dataset / production):**
+- Fundle-Brain Sept-2026 sales (Oct 4/5): preview demo DB has 0 Sept-2026 bills and uniformly string bill_date; prime suspect to inspect on prod = mixed bill_date type (string CSV vs BSON datetime POS) under string range match, and UTC-vs-IST day boundary in `parse_date_range`.
+- Jasola store `K00119` (lower Point 4): absent from preview DB; CRM `home_store_id` store-filter mechanism verified present.
+- Manual missing-bill upload (Oct Point 3): existing `/reco/upload` already does skip-mode (only missing bills, idempotent, bill_number key), summary of added/skipped_existing/errors + malformed-row samples. Live ingest NOT executed (writes real transactions; isolation not established). Note: skip-mode does not apply corrections to existing bills (by design).
+
+Changed: `backend/routes/historic_routes.py`, `backend/routes/reports_kpi_routes.py`; new test-only `backend/tests/oct2026_batch_synth_harness.py` (18/18 pass). Rollback = `git checkout 12bbc8c -- <files>`.
+
+---
+
 ## 2026-06-10 — 🟢 WhatsApp Campaign Manager (Karix RCM / WABA) + WhatsApp DLR webhook + CRM full-date
 
 ⚠️ Redeploy required. Verified: testing_agent iteration_112 = **frontend 100% (7/7)** + main-agent curl (DLR webhook 4 shapes, campaign e2e, Bearer token flow).

@@ -148,13 +148,12 @@ def _map_customer_row(r: Dict[str, str]) -> Tuple[Optional[Dict[str, Any]], Opti
     added_on = parse_date(r.get("Added On"))
     dob = parse_date(r.get("DOB"))
     doa = parse_date(r.get("DOA"))
-    # Guard (KAZO doc Point 2): the source CRM export sometimes fills DOB/DOA with a visit date.
-    # A real DOB/DOA never equals the customer's first/last purchase date, so drop such mis-fills.
-    _visit_days = {d.date() for d in (first_visit, last_visit) if d}
-    if dob and dob.date() in _visit_days:
-        dob = None
-    if doa and doa.date() in _visit_days:
-        doa = None
+    # Oct-2026 batch (Point 2 / lower Point 7): DOB/DOA are read ONLY from their own source
+    # columns and preserved verbatim — distinct, legitimately equal to a visit date, or null all
+    # render as-is. We must NOT infer personal dates from transactions, nor force a real DOB/DOA
+    # to null just because it coincides with a visit day (customers do shop on birthdays /
+    # anniversaries). Any upstream mirroring is a source-data issue, not something the import
+    # silently destroys. (Removed the earlier visit-equality nulling heuristic.)
     lifetime_spend = parse_float(r.get("Total Billing"))
     visit_count = parse_int(r.get("Total Visits"))
     points_balance = parse_int(r.get("Current Point Balance"))

@@ -647,6 +647,10 @@ async def crm_customers_export(
 
     async def gen():
         from database import stores_col
+        # UTF-8 BOM so the file opens cleanly in Excel (names/cities and the Home Store "·"
+        # separator are non-ASCII; without the BOM Excel mis-detects the encoding → the client's
+        # "CRM export cannot open / garbled" report, Oct batch lower Point 4).
+        yield "\ufeff"
         smap: Dict[str, str] = {}
         async for s in stores_col.find({}, {"_id": 0, "id": 1, "code": 1, "name": 1}):
             code = (s.get("code") or "").strip()
@@ -691,7 +695,7 @@ async def crm_customers_export(
                     sent += 1
 
     fname = f"crm_customers_{datetime.now(IST).strftime('%Y%m%d')}.csv"
-    return StreamingResponse(gen(), media_type="text/csv",
+    return StreamingResponse(gen(), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
